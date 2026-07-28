@@ -1,0 +1,865 @@
+<title>PCB · Arquitectura técnica</title>
+
+<style>
+  :root {
+    --ground:      #ECEEF2;
+    --surface:     #F6F7F9;
+    --ink:         #141A21;
+    --ink-soft:    #4A5560;
+    --ink-faint:   #7E8A96;
+    --rule:        #D3D8DF;
+    --accent:      #0E7C6B;
+    --accent-soft: #D7E8E4;
+    --sheet:       #101820;
+    --sheet-2:     #16212B;
+    --sheet-rule:  #2B3945;
+    --sheet-ink:   #DCE5ED;
+    --sheet-faint: #8CA0B2;
+    --ok:          #2E7D5B;
+    --warn:        #9C6B14;
+    --fail:        #AE4436;
+
+    --mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, "SF Mono", "Roboto Mono", monospace;
+    --sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+
+    --measure: 68ch;
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:      #0C1116;
+      --surface:     #121A21;
+      --ink:         #E3EAF1;
+      --ink-soft:    #A3B0BC;
+      --ink-faint:   #6E7C89;
+      --rule:        #23303B;
+      --accent:      #4FBFA8;
+      --accent-soft: #14312C;
+      color-scheme: dark;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0C1116;
+    --surface:     #121A21;
+    --ink:         #E3EAF1;
+    --ink-soft:    #A3B0BC;
+    --ink-faint:   #6E7C89;
+    --rule:        #23303B;
+    --accent:      #4FBFA8;
+    --accent-soft: #14312C;
+    color-scheme: dark;
+  }
+
+  :root[data-theme="light"] {
+    --ground:      #ECEEF2;
+    --surface:     #F6F7F9;
+    --ink:         #141A21;
+    --ink-soft:    #4A5560;
+    --ink-faint:   #7E8A96;
+    --rule:        #D3D8DF;
+    --accent:      #0E7C6B;
+    --accent-soft: #D7E8E4;
+    color-scheme: light;
+  }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: clamp(2rem, 5vw, 4.5rem) clamp(1rem, 4vw, 2.5rem) 6rem;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(3rem, 6vw, 5rem);
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead {
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+    padding-bottom: 2rem;
+    border-bottom: 2px solid var(--ink);
+  }
+  .kicker {
+    font-family: var(--mono);
+    font-size: .72rem;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .masthead h1 {
+    font-family: var(--mono);
+    font-size: clamp(1.9rem, 4.6vw, 3rem);
+    font-weight: 600;
+    line-height: 1.08;
+    letter-spacing: -.02em;
+    text-wrap: balance;
+  }
+  .standfirst {
+    max-width: var(--measure);
+    font-size: 1.05rem;
+    color: var(--ink-soft);
+  }
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem 1.75rem;
+    font-family: var(--mono);
+    font-size: .74rem;
+    letter-spacing: .06em;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+  }
+
+  /* ---------- sections ---------- */
+
+  section {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+  .head {
+    display: flex;
+    flex-direction: column;
+    gap: .55rem;
+    max-width: var(--measure);
+  }
+  .head h2 {
+    font-family: var(--mono);
+    font-size: clamp(1.25rem, 2.6vw, 1.6rem);
+    font-weight: 600;
+    letter-spacing: -.01em;
+    line-height: 1.2;
+    text-wrap: balance;
+  }
+  .head p { color: var(--ink-soft); }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    display: flex;
+    align-items: center;
+    gap: .7rem;
+  }
+  .eyebrow::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--rule);
+  }
+
+  /* ---------- diagram sheet: always dark, in both themes ---------- */
+
+  .sheet {
+    background: var(--sheet);
+    border: 1px solid var(--sheet-rule);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .sheet-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: .4rem 1rem;
+    padding: .7rem 1.1rem;
+    border-bottom: 1px solid var(--sheet-rule);
+    background: var(--sheet-2);
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--sheet-faint);
+  }
+  .sheet-bar strong { color: var(--sheet-ink); font-weight: 600; }
+  .sheet-body {
+    overflow-x: auto;
+    padding: 1.5rem 1.1rem;
+  }
+  .sheet-body .mermaid {
+    min-width: 640px;
+    display: flex;
+    justify-content: center;
+  }
+
+  /* ---------- legend ---------- */
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .45rem 1.4rem;
+    padding: .75rem 1.1rem;
+    border-top: 1px solid var(--sheet-rule);
+    background: var(--sheet-2);
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .06em;
+    color: var(--sheet-faint);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: .45rem; }
+  .swatch {
+    width: 11px; height: 11px;
+    border-radius: 2px;
+    border: 1px solid rgba(255,255,255,.28);
+  }
+
+  /* ---------- notes grid ---------- */
+
+  .notes {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+  }
+  .note {
+    background: var(--surface);
+    padding: 1.1rem 1.2rem;
+    display: flex;
+    flex-direction: column;
+    gap: .4rem;
+  }
+  .note dt {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .note dd {
+    font-family: var(--mono);
+    font-size: 1.35rem;
+    font-weight: 600;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+  }
+  .note p { font-size: .87rem; color: var(--ink-soft); line-height: 1.5; }
+
+  /* ---------- prose bits ---------- */
+
+  .cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1.5rem 2.5rem;
+  }
+  .cols h3 {
+    font-family: var(--mono);
+    font-size: .82rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink);
+    margin-bottom: .5rem;
+  }
+  .cols p, .cols li { font-size: .93rem; color: var(--ink-soft); }
+  .cols ul { list-style: none; display: flex; flex-direction: column; gap: .45rem; }
+  .cols li { padding-left: 1.1rem; position: relative; }
+  .cols li::before {
+    content: "—";
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+    font-family: var(--mono);
+  }
+
+  code {
+    font-family: var(--mono);
+    font-size: .88em;
+    background: var(--accent-soft);
+    color: var(--ink);
+    padding: .1em .35em;
+    border-radius: 2px;
+  }
+
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    padding: 1.1rem 1.3rem;
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+    max-width: var(--measure);
+  }
+  .callout h3 {
+    font-family: var(--mono);
+    font-size: .74rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .callout p { font-size: .93rem; color: var(--ink-soft); }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: .9rem;
+  }
+  .tablewrap { overflow-x: auto; border: 1px solid var(--rule); }
+  th, td {
+    text-align: left;
+    padding: .6rem .9rem;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  th {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    background: var(--surface);
+    white-space: nowrap;
+  }
+  td { color: var(--ink-soft); }
+  td:first-child { font-family: var(--mono); font-size: .84rem; color: var(--ink); white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: none; }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.5rem;
+    font-family: var(--mono);
+    font-size: .72rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="kicker">Panel de Control Bitget · Fase 1</div>
+    <h1>Arquitectura técnica</h1>
+    <p class="standfirst">
+      Cuatro vistas del sistema: los módulos y la capa de datos, el recorrido completo de
+      una orden desde el clic hasta la respuesta del exchange, el ciclo de vida de una
+      conexión WebSocket y la máquina de estados que resuelve los fallos parciales.
+    </p>
+    <div class="meta">
+      <span>Julio 2026</span>
+      <span>Entregable 2 de 3</span>
+      <span>Escala: 5 cuentas madre · ~100 subcuentas</span>
+      <span>Futuros USDT-M</span>
+    </div>
+  </header>
+
+  <!-- ============ 1. MÓDULOS ============ -->
+  <section>
+    <div class="head">
+      <div class="eyebrow">Vista general</div>
+      <h2>Módulos y capa de datos</h2>
+      <p>
+        Una sola regla organiza todo el sistema: el renderer nunca ve una credencial, nunca
+        abre un socket y nunca llama a Bitget. Todo el I/O y todos los secretos viven en el
+        proceso principal; la interfaz recibe estado ya proyectado y emite intenciones.
+      </p>
+    </div>
+
+    <div class="sheet">
+      <div class="sheet-bar">
+        <strong>Diagrama 1</strong>
+        <span>Módulos · WebSocket + REST + reconciliación</span>
+      </div>
+      <div class="sheet-body">
+<pre class="mermaid">
+%%{init: {"theme":"base","themeVariables":{"background":"transparent","fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"13px","lineColor":"#7B8B9A","textColor":"#DCE5ED","clusterBkg":"#16212B","clusterBorder":"#2B3945","edgeLabelBackground":"#101820"}}}%%
+flowchart TB
+  subgraph REN["RENDERER · sandbox · sin secretos"]
+    direction LR
+    UI["Centro de Monitoreo<br/>filas por subcuenta · LONG / SHORT<br/>liquidación · entrada · TP"]
+    ACT["Barra de acciones<br/>abrir · cerrar · TP% · margen · apalancamiento"]
+    CONF["Diálogo de confirmación<br/>muestra precios, no porcentajes"]
+    ZS["Zustand<br/>proyección de solo lectura"]
+  end
+
+  subgraph PRE["PRELOAD · contextBridge · superficie mínima"]
+    API["API tipada<br/>invoke: intenciones &nbsp;·&nbsp; on: estado"]
+  end
+
+  subgraph MAIN["PROCESO PRINCIPAL · todo el I/O"]
+    direction TB
+    SVC["Servicios de caso de uso<br/>uno por función del pliego"]
+    PF["Preflight<br/>valida antes de enviar nada"]
+    BR["Batch Runner<br/>un job por cuenta · clientOid determinista"]
+    Q["Cola de ejecución<br/>bucket por UID 8/s · bucket global IP 40/s"]
+    PS["PositionStore<br/>FUENTE DE VERDAD<br/>Map: cuenta:símbolo:lado"]
+    RC["Reconciliador<br/>cada 45 s · gana REST"]
+    PUB["Publicador IPC<br/>coalescencia 250 ms"]
+    VA["Vault<br/>AES-256-GCM + scrypt + DPAPI"]
+    STO["Almacenamiento<br/>config.json · session.jsonl"]
+  end
+
+  subgraph NET["CAPA DE RED"]
+    direction LR
+    RST["Cliente REST · undici Pool<br/>firma HMAC-SHA256 por request"]
+    WSP["Pool WebSocket<br/>máx 80 sockets · presupuesto 300/5 min"]
+  end
+
+  subgraph BGT["BITGET"]
+    direction LR
+    BAPI["api.bitget.com<br/>/api/v2/mix/*"]
+    BWS["ws.bitget.com/v2/ws/private<br/>canales: positions · orders-algo"]
+  end
+
+  ACT --> CONF --> API
+  API --> SVC
+  PUB -.->|"lote de cambios"| API
+  API -.-> ZS --> UI
+
+  SVC --> PF --> BR --> Q --> RST
+  VA -->|"credencial descifrada<br/>solo en memoria"| RST
+  VA --> WSP
+  RST --> BAPI
+  WSP <-->|"push de posiciones"| BWS
+  BAPI -->|"respuesta / código de error"| BR
+  BR --> STO
+
+  WSP -->|"eventos"| PS
+  RC -->|"snapshot REST"| PS
+  RC --> RST
+  PS --> PUB
+  PS -->|"cuenta con posición → caliente<br/>sin posición → frío"| WSP
+
+  classDef ren fill:#3C3560,stroke:#6E63A8,color:#E9E5F7
+  classDef pre fill:#2A2540,stroke:#5B5188,color:#E3DFF2
+  classDef main fill:#14403A,stroke:#2E8574,color:#DCF2EC
+  classDef sec fill:#4A3313,stroke:#9C6B14,color:#F7E9D2
+  classDef net fill:#123044,stroke:#2E6C90,color:#D8ECF7
+  classDef ext fill:#1E2E44,stroke:#4A6A94,color:#DCE6F4
+  classDef truth fill:#14403A,stroke:#4FBFA8,stroke-width:3px,color:#EAFBF6
+
+  class UI,ACT,CONF,ZS ren
+  class API pre
+  class SVC,PF,BR,Q,RC,PUB main
+  class PS truth
+  class VA,STO sec
+  class RST,WSP net
+  class BAPI,BWS ext
+</pre>
+      </div>
+      <div class="legend">
+        <span><i class="swatch" style="background:#3C3560"></i> Renderer</span>
+        <span><i class="swatch" style="background:#14403A"></i> Núcleo</span>
+        <span><i class="swatch" style="background:#4A3313"></i> Secretos y disco</span>
+        <span><i class="swatch" style="background:#123044"></i> Red</span>
+        <span><i class="swatch" style="background:#1E2E44"></i> Bitget</span>
+        <span>Línea punteada: empuje asíncrono</span>
+      </div>
+    </div>
+
+    <dl class="notes">
+      <div class="note">
+        <dt>Actualización de la vista</dt>
+        <dd>250 ms</dd>
+        <p>Los eventos se acumulan y se publican en lotes. El compromiso contractual de 2–5 s se cumple con un orden de magnitud de margen y los renders quedan acotados a 4/s.</p>
+      </div>
+      <div class="note">
+        <dt>Reconciliación REST</dt>
+        <dd>45 s</dd>
+        <p>Con jitter y escalonada: ~2,2 cuentas por segundo. Ante cualquier divergencia gana REST, y la deriva se registra en el log de sesión.</p>
+      </div>
+      <div class="note">
+        <dt>Techo de sockets por IP</dt>
+        <dd>100 → 80</dd>
+        <p>Bitget corta en 100 conexiones por IP. Operamos con un tope duro de 80 y las cuentas sin posiciones se sirven por REST.</p>
+      </div>
+      <div class="note">
+        <dt>Cálculos propios en la vista</dt>
+        <dd>0</dd>
+        <p>Entrada y liquidación se muestran tal como los reporta la API, incluso tras una fusión de posiciones por reposicionamiento.</p>
+      </div>
+    </dl>
+  </section>
+
+  <!-- ============ 2. FLUJO DE ORDEN ============ -->
+  <section>
+    <div class="head">
+      <div class="eyebrow">Flujo de orden</div>
+      <h2>Del botón a Bitget, y de vuelta</h2>
+      <p>
+        El recorrido completo de una acción masiva. Los dos puntos donde se decide si el
+        sistema es confiable están marcados: el preflight, que evita enviar 100 órdenes
+        equivocadas, y el <code>clientOid</code> determinista, que hace imposible duplicar
+        una orden al reintentar.
+      </p>
+    </div>
+
+    <div class="sheet">
+      <div class="sheet-bar">
+        <strong>Diagrama 2</strong>
+        <span>Acción sobre N cuentas · camino feliz, fallo y timeout</span>
+      </div>
+      <div class="sheet-body">
+<pre class="mermaid">
+%%{init: {"theme":"base","themeVariables":{"background":"transparent","fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"13px","lineColor":"#8CA0B2","textColor":"#DCE5ED","actorBkg":"#14403A","actorBorder":"#4FBFA8","actorTextColor":"#EAFBF6","actorLineColor":"#4A5B69","signalColor":"#B9C7D4","signalTextColor":"#DCE5ED","labelBoxBkg":"#16212B","labelBoxBorderColor":"#2B3945","labelTextColor":"#DCE5ED","noteBkg":"#4A3313","noteBorderColor":"#9C6B14","noteTextColor":"#F7E9D2","sequenceNumberColor":"#101820","activationBkgColor":"#2E8574","altSectionBkgColor":"#16212B"}}}%%
+sequenceDiagram
+  autonumber
+  participant OP as Operador
+  participant UI as Renderer
+  participant SV as Servicio
+  participant BR as Batch Runner
+  participant QU as Cola
+  participant RS as Cliente REST
+  participant BG as Bitget
+  participant PS as PositionStore
+
+  OP->>UI: Selecciona 37 cuentas · TP 40%
+  UI->>SV: preview(acción, cuentas, parámetros)
+  SV->>PS: Lee entrada, apalancamiento y modo de margen
+  SV-->>UI: Precio de TP por cuenta + 3 omitidas
+  Note over UI,OP: El operador confirma PRECIOS.<br/>El porcentaje es la entrada; el precio es el contrato.
+  OP->>UI: Confirmar
+
+  UI->>SV: execute(batchId)
+  SV->>SV: Preflight: tick de precio, mínimos,<br/>modo de margen, permisos
+  alt Parámetros del lote inválidos
+    SV-->>UI: Lote abortado · no se envió ninguna orden
+  else Preflight correcto
+    SV->>BR: Crear lote · 34 jobs
+    loop Por cada cuenta
+      BR->>QU: encolar(job, clientOid = pcb-{lote}-{cuenta})
+      QU->>QU: Espera token del bucket de UID<br/>y del bucket global de IP
+      QU->>RS: Ejecutar
+      RS->>RS: Firma HMAC-SHA256 + cabeceras ACCESS-*
+      RS->>BG: POST /api/v2/mix/order/place-tpsl-order
+      alt 200 OK
+        BG-->>RS: orderId
+        RS-->>BR: confirmed
+      else HTTP 429
+        BG-->>RS: Too Many Requests
+        RS-->>QU: Pausa el bucket · reencola · backoff
+      else Error de negocio
+        BG-->>RS: Código de error
+        RS-->>BR: failed · motivo traducido al español
+      else Timeout tras enviar
+        RS-->>BR: unknown
+        BR->>BG: Consulta por clientOid · NO reintenta
+        BG-->>BR: Resuelve a confirmed o failed
+      end
+    end
+    BR-->>UI: Resultado · 31 OK · 3 fallidos · 3 omitidas
+  end
+
+  BG--)PS: Push WebSocket: posición actualizada
+  PS--)UI: La fila refleja el nuevo TP
+</pre>
+      </div>
+      <div class="legend">
+        <span>Autonumerado: el orden es real y secuencial</span>
+        <span>Notas en ámbar: puntos de decisión humana</span>
+        <span>Flechas discontinuas finales: empuje asíncrono, sin petición</span>
+      </div>
+    </div>
+
+    <div class="callout">
+      <h3>Por qué no hay rollback</h3>
+      <p>
+        Si una orden entra en 80 cuentas y falla en 20, revertir las 80 es peor que el
+        problema original: convierte un resultado parcial en una operación no deseada sobre
+        el capital que sí funcionó. El sistema informa con precisión —OK, fallidos y
+        omitidos, con motivo por cuenta— y ofrece <em>reintentar solo los fallidos</em>,
+        que genera un lote nuevo con identificadores nuevos sobre el subconjunto exacto que
+        falló. La decisión de corregir es siempre del operador.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ 3. CICLO WS ============ -->
+  <section>
+    <div class="head">
+      <div class="eyebrow">Ciclo WebSocket</div>
+      <h2>Vida de una conexión, y su recuperación</h2>
+      <p>
+        Bitget permite 100 conexiones simultáneas por IP y solo 300 intentos de conexión
+        cada 5 minutos. Con ~100 cuentas, una caída de red que dispare reconexiones
+        simultáneas agotaría ese presupuesto en segundos y dejaría la IP bloqueada durante
+        cinco minutos. Por eso todo reintento pasa por un único planificador con presupuesto
+        compartido.
+      </p>
+    </div>
+
+    <div class="sheet">
+      <div class="sheet-bar">
+        <strong>Diagrama 3</strong>
+        <span>Conexión · autenticación · suscripción · heartbeat · caída · reconexión</span>
+      </div>
+      <div class="sheet-body">
+<pre class="mermaid">
+%%{init: {"theme":"base","themeVariables":{"background":"transparent","fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"13px","lineColor":"#8CA0B2","textColor":"#DCE5ED","clusterBkg":"#16212B","clusterBorder":"#2B3945"}}}%%
+stateDiagram-v2
+  direction TB
+
+  [*] --> Frio: cuenta registrada
+
+  Frio: FRÍO · solo REST
+  Frio: sin posiciones abiertas
+  Frio: consulta cada 45 s
+
+  Frio --> EsperandoCupo: aparece posición<br/>u operación dirigida
+  EsperandoCupo: ESPERANDO CUPO
+  EsperandoCupo: tope de 80 sockets
+  EsperandoCupo: token del presupuesto 300 / 5 min
+
+  EsperandoCupo --> Conectando: hay cupo y token
+  EsperandoCupo --> Frio: sin cupo → aviso "modo REST" en la UI
+
+  Conectando: CONECTANDO
+  Conectando: wss://ws.bitget.com/v2/ws/private
+  Conectando: arranque escalonado, 5 conexiones/s
+
+  Conectando --> Autenticando: socket abierto
+  Conectando --> Backoff: error de red o timeout
+
+  Autenticando: AUTENTICANDO
+  Autenticando: op login · apiKey + passphrase
+  Autenticando: sign = HMAC(timestamp + GET + /user/verify)
+
+  Autenticando --> Suscribiendo: event login
+  Autenticando --> Invalida: credencial rechazada
+  Autenticando --> Backoff: sin respuesta en 10 s
+
+  Invalida: CREDENCIAL INVÁLIDA
+  Invalida: no se reintenta · se marca la cuenta en la UI
+  Invalida --> [*]
+
+  Suscribiendo: SUSCRIBIENDO
+  Suscribiendo: positions · orders-algo
+  Suscribiendo: 2 canales por cuenta
+
+  Suscribiendo --> Viva: event subscribe
+  Suscribiendo --> Backoff: error de suscripción
+
+  state Viva {
+    direction LR
+    [*] --> Escuchando
+    Escuchando: ESCUCHANDO
+    Escuchando: snapshot reemplaza el conjunto
+    Escuchando: update aplica upsert · total 0 = cierre
+    Escuchando --> Ping: cada 20 s
+    Ping: PING
+    Ping: mensaje de aplicación "ping"
+    Ping --> Escuchando: pong < 10 s
+  }
+
+  Viva --> Backoff: pong perdido · socket cerrado · 1006
+  Viva --> Frio: sin posiciones tras reconciliación<br/>libera el cupo
+
+  Backoff: BACKOFF
+  Backoff: 1 → 2 → 4 → 8 → 16 → 30 s
+  Backoff: jitter ±30% · máx 1 intento/s global
+
+  Backoff --> EsperandoCupo: siguiente intento
+
+  note right of Backoff
+    Mientras un socket está caído,
+    su cuenta cae al reconciliador REST.
+    El panel no queda ciego: pierde
+    inmediatez, no información.
+  end note
+</pre>
+      </div>
+      <div class="legend">
+        <span>Frío ⇄ Caliente: el cupo de sockets se asigna a quien tiene posiciones</span>
+        <span>Toda transición hacia Conectando pasa por el presupuesto de IP</span>
+      </div>
+    </div>
+
+    <div class="cols">
+      <div>
+        <h3>Límites que impone Bitget</h3>
+        <ul>
+          <li>100 conexiones concurrentes por IP</li>
+          <li>300 solicitudes de conexión por IP cada 5 minutos</li>
+          <li>240 suscripciones/hora y 1000 canales por conexión</li>
+          <li>Corte del servidor a los 120 s sin ping del cliente</li>
+          <li>10 mensajes por segundo por conexión</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Cómo responde el diseño</h3>
+        <ul>
+          <li>Tope propio de 80 sockets: 20% de margen permanente</li>
+          <li>Planificador único de reintentos con token bucket global</li>
+          <li>Solo 2 canales por cuenta, muy por debajo del límite</li>
+          <li>Ping cada 20 s: seis oportunidades antes del corte</li>
+          <li>Degradación explícita a REST, nunca en silencio</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 4. ESTADOS DE JOB ============ -->
+  <section>
+    <div class="head">
+      <div class="eyebrow">Fallos parciales</div>
+      <h2>Estados de un job dentro de un lote</h2>
+      <p>
+        Cada cuenta de un lote avanza por su propia máquina de estados. El estado
+        <code>unknown</code> es el que evita la peor falla posible del sistema: un timeout
+        tras enviar no dice si la orden entró, así que nunca se reintenta —se consulta.
+      </p>
+    </div>
+
+    <div class="sheet">
+      <div class="sheet-bar">
+        <strong>Diagrama 4</strong>
+        <span>Un job por cuenta · clasificación de errores</span>
+      </div>
+      <div class="sheet-body">
+<pre class="mermaid">
+%%{init: {"theme":"base","themeVariables":{"background":"transparent","fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"13px","lineColor":"#8CA0B2","textColor":"#DCE5ED","clusterBkg":"#16212B","clusterBorder":"#2B3945"}}}%%
+stateDiagram-v2
+  direction LR
+
+  [*] --> Pendiente
+
+  Pendiente --> Omitido: no aplicable<br/>p. ej. margen cruzado
+  Pendiente --> Encolado: preflight OK
+  Encolado --> Enviado: tokens disponibles<br/>+ clientOid asignado
+
+  Enviado --> Confirmado: 200 OK
+  Enviado --> Fallido: error de negocio
+  Enviado --> Desconocido: timeout tras enviar
+  Enviado --> Encolado: 429 o 5xx<br/>reintento ≤ 3
+
+  Desconocido --> Confirmado: consulta por clientOid<br/>la orden existía
+  Desconocido --> Fallido: consulta por clientOid<br/>la orden no existía
+
+  Confirmado --> [*]
+  Fallido --> [*]
+  Omitido --> [*]
+
+  note right of Desconocido
+    NUNCA se reintenta.
+    El clientOid determinista
+    permite consultar en lugar
+    de arriesgar una orden doble.
+  end note
+</pre>
+      </div>
+      <div class="legend">
+        <span>Omitido ≠ Fallido: "45 OK · 0 fallidos · 12 omitidos" es un éxito</span>
+      </div>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Clase</th><th>Ejemplos</th><th>Comportamiento</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>RETRYABLE</td>
+            <td>429, 5xx, timeout de conexión antes de enviar</td>
+            <td>Reintento automático, máximo 3, con backoff y jitter</td>
+          </tr>
+          <tr>
+            <td>FATAL_ACCOUNT</td>
+            <td>Key inválida, sin permiso, margen insuficiente, símbolo no habilitado</td>
+            <td>Falla esa cuenta; el resto del lote continúa</td>
+          </tr>
+          <tr>
+            <td>FATAL_BATCH</td>
+            <td>Activo inexistente, monto inválido, apalancamiento fuera de rango</td>
+            <td>Se aborta en preflight: no sale ninguna orden</td>
+          </tr>
+          <tr>
+            <td>SKIPPED</td>
+            <td>Cuenta en margen cruzado al agregar margen; cuenta sin la posición a cerrar</td>
+            <td>Se reporta aparte; no cuenta como error</td>
+          </tr>
+          <tr>
+            <td>UNKNOWN</td>
+            <td>Timeout o corte de red después de enviar</td>
+            <td>Se resuelve consultando por <code>clientOid</code>; jamás se reintenta</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 5. DECISIONES DE TRADING ============ -->
+  <section>
+    <div class="head">
+      <div class="eyebrow">Traducción a la API</div>
+      <h2>Las cinco acciones, endpoint por endpoint</h2>
+      <p>
+        Cada función del pliego con su endpoint, su restricción y la regla de diseño que la
+        acompaña.
+      </p>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Acción</th><th>Endpoint</th><th>Restricción y regla de diseño</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Abrir</td>
+            <td>POST /api/v2/mix/order/place-order</td>
+            <td>10 req/s por UID. Tamaño redondeado al mínimo del contrato. <code>clientOid</code> determinista obligatorio.</td>
+          </tr>
+          <tr>
+            <td>Cerrar</td>
+            <td>POST /api/v2/mix/order/close-positions</td>
+            <td>Se omiten sin error las cuentas que ya no tienen la posición: cerrar algo inexistente no es un fallo.</td>
+          </tr>
+          <tr>
+            <td>Take Profit %</td>
+            <td>POST /api/v2/mix/order/place-tpsl-order<br/><code>planType: pos_profit</code></td>
+            <td>TP a nivel de posición completa, para que siga aplicando tras una fusión por reposicionamiento. Disparo por <code>mark_price</code>. Si ya existe un TP vigente, se modifica en vez de duplicarse.</td>
+          </tr>
+          <tr>
+            <td>Agregar margen</td>
+            <td>POST /api/v2/mix/account/set-margin</td>
+            <td>Solo margen aislado. El modo ya viene en cada posición, así que las cuentas cruzadas se deshabilitan en el selector con el motivo visible.</td>
+          </tr>
+          <tr>
+            <td>Apalancamiento</td>
+            <td>POST /api/v2/mix/account/set-leverage</td>
+            <td>Con posición abierta recalcula la liquidación y puede rechazarse. El diálogo separa cuentas con y sin posición. Sin reintento automático, nunca.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <h3>Take Profit por porcentaje: la definición</h3>
+      <p>
+        En futuros apalancados «+50%» es ambiguo, y la ambigüedad se paga en dinero: con
+        apalancamiento 10x, un 50% sobre ROE está a un 5% de movimiento de precio; sobre
+        precio, a un 50% —diez veces más lejos—. El PCB adopta <strong>ROE por
+        defecto</strong>, porque es lo que un operador apalancado lee como ganancia, y
+        ofrece el modo por movimiento de precio como alternativa explícita.
+      </p>
+      <p>
+        LONG sobre ROE: <code>precioTP = entrada × (1 + P / (100 · apalancamiento))</code>.
+        SHORT invierte el signo. En el modo por precio desaparece el divisor. En ambos casos
+        el resultado se redondea al tick válido del símbolo y <strong>se muestra por cuenta
+        antes de ejecutar</strong>: el operador confirma precios, no porcentajes.
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    Panel de Control Bitget · Entregable 2 de Fase 1 · Complementa el documento de stack tecnológico
+  </footer>
+
+</div>

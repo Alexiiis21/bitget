@@ -1,0 +1,73 @@
+{
+  "name": "pcb",
+  "productName": "Panel de Control Bitget",
+  "version": "0.1.0",
+  "description": "Panel de control de escritorio para operar multiples cuentas de Bitget (futuros USDT-M) desde una sola interfaz.",
+  "private": true,
+  "license": "UNLICENSED",
+  "author": "Panel de Control Bitget",
+  "main": "./out/main/index.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"test/**/*.ts\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "build": "npm run typecheck && electron-vite build",
+    "package:portable": "npm run build && electron-builder --win portable",
+    "package:dir": "npm run build && electron-builder --win --dir"
+  },
+  "dependencies": {
+    "decimal.js": "^10.6.0",
+    "electron-log": "^5.4.4",
+    "nanoid": "^6.0.0",
+    "undici": "^8.9.0",
+    "ws": "^8.21.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.0",
+    "@radix-ui/react-dialog": "^1.1.22",
+    "@radix-ui/react-select": "^2.3.6",
+    "@radix-ui/react-tooltip": "^1.2.15",
+    "@tanstack/react-table": "^8.21.3",
+    "@tanstack/react-virtual": "^3.14.8",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.17",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.0.4",
+    "clsx": "^2.1.1",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "eslint": "^10.8.0",
+    "prettier": "^3.9.6",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10",
+    "zustand": "^5.0.14"
+  },
+  "comments": {
+    "dependencies": "Solo modulos que ejecuta el proceso principal en runtime. electron-vite los externaliza del bundle via externalizeDepsPlugin. Cero dependencias nativas: el build portable no requiere toolchain de C++ ni electron-rebuild.",
+    "devDependencies": "Todo lo del renderer va aqui porque Vite lo empaqueta en el bundle final; incluirlo en dependencies solo agrandaria el .exe.",
+    "descartados": {
+      "better-sqlite3": "Modulo nativo. La persistencia real (credenciales, config, log) no necesita SQL. Ver docs/01-stack-tecnologico.md seccion 6.",
+      "axios": "undici da control fino de agente, timeouts y metricas por request.",
+      "bitget-api": "Se instala solo como dependencia de test, como oraculo para contrastar la firma HMAC.",
+      "p-queue / bottleneck": "No soportan buckets jerarquicos (por UID + global de IP) con pausa selectiva ante 429.",
+      "date-fns / dayjs / lodash": "Intl y los metodos nativos cubren el uso real."
+    }
+  }
+}

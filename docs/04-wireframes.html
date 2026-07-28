@@ -1,0 +1,1077 @@
+<title>PCB · Wireframes</title>
+
+<style>
+  :root {
+    --ground:      #ECEEF2;
+    --surface:     #F6F7F9;
+    --ink:         #141A21;
+    --ink-soft:    #4A5560;
+    --ink-faint:   #7E8A96;
+    --rule:        #D3D8DF;
+    --accent:      #0E7C6B;
+    --accent-soft: #D7E8E4;
+    --ok:          #2E7D5B;
+    --warn:        #9C6B14;
+    --fail:        #AE4436;
+
+    /* Piel del panel: hereda el código de color de la hoja de Excel del cliente */
+    --pnl-bg:      #FFFFFF;
+    --pnl-chrome:  #EDEFF2;
+    --pnl-rule:    #C9CFD6;
+    --pnl-rule-2:  #E4E8EC;
+    --pnl-ink:     #1B222A;
+    --pnl-faint:   #77828E;
+    --hdr-group:   #FFE699;
+    --hdr-liq:     #F4B8B0;
+    --hdr-tp:      #B7DFC4;
+    --hdr-ord:     #DCE3EA;
+    --sel:         #D7E8E4;
+
+    --mono: "Cascadia Mono", Consolas, ui-monospace, "SF Mono", "Roboto Mono", monospace;
+    --sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    --measure: 68ch;
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0C1116; --surface: #121A21; --ink: #E3EAF1; --ink-soft: #A3B0BC;
+      --ink-faint: #6E7C89; --rule: #23303B; --accent: #4FBFA8; --accent-soft: #14312C;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0C1116; --surface: #121A21; --ink: #E3EAF1; --ink-soft: #A3B0BC;
+    --ink-faint: #6E7C89; --rule: #23303B; --accent: #4FBFA8; --accent-soft: #14312C;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    --ground: #ECEEF2; --surface: #F6F7F9; --ink: #141A21; --ink-soft: #4A5560;
+    --ink-faint: #7E8A96; --rule: #D3D8DF; --accent: #0E7C6B; --accent-soft: #D7E8E4;
+    color-scheme: light;
+  }
+
+  body { background: var(--ground); color: var(--ink); font-family: var(--sans);
+         font-size: 16px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1180px; margin: 0 auto;
+          padding: clamp(2rem,5vw,4.5rem) clamp(1rem,4vw,2.5rem) 6rem; }
+
+  h1 { font-size: clamp(1.9rem,4vw,2.6rem); line-height:1.15; letter-spacing:-.02em; margin:.2em 0 .3em; }
+  h2 { font-size: 1.45rem; letter-spacing:-.01em; margin:3.2rem 0 .2rem; padding-top:1.6rem; border-top:1px solid var(--rule); }
+  h3 { font-size: 1.05rem; margin:2rem 0 .4rem; color: var(--ink); }
+  p, li { max-width: var(--measure); color: var(--ink-soft); }
+  p { margin:.7em 0; }
+  strong { color: var(--ink); font-weight:600; }
+  code { font-family: var(--mono); font-size:.88em; background:var(--surface);
+         border:1px solid var(--rule); border-radius:4px; padding:.08em .35em; }
+  .lede { font-size:1.06rem; color:var(--ink-soft); max-width:64ch; }
+  .meta { font-family:var(--mono); font-size:.8rem; color:var(--ink-faint);
+          text-transform:uppercase; letter-spacing:.08em; }
+
+  table { border-collapse:collapse; width:100%; margin:1.2rem 0; font-size:.92rem; }
+  th, td { text-align:left; padding:.5rem .7rem; border-bottom:1px solid var(--rule); vertical-align:top; color:var(--ink-soft); }
+  th { color:var(--ink); font-weight:600; font-size:.8rem; text-transform:uppercase; letter-spacing:.05em; border-bottom:2px solid var(--rule); }
+  td:first-child { color:var(--ink); font-weight:500; white-space:nowrap; }
+
+  .callout { background:var(--surface); border:1px solid var(--rule); border-left:3px solid var(--accent);
+             border-radius:0 6px 6px 0; padding:1rem 1.2rem; margin:1.6rem 0; }
+  .callout h3 { margin:0 0 .3rem; font-size:.95rem; }
+  .callout p { margin:.35em 0; font-size:.94rem; }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.ask { border-left-color: var(--fail); }
+
+  /* ---------- escenario: lienzo a escala ---------- */
+  .stage { position:relative; margin:1.4rem 0 .4rem; border:1px solid var(--rule);
+           border-radius:8px; background:#9AA3AD; overflow:hidden; }
+  .stage-inner { transform-origin: top left; }
+  .stage-bar { display:flex; justify-content:space-between; align-items:center;
+               font-family:var(--mono); font-size:.72rem; color:var(--ink-faint);
+               text-transform:uppercase; letter-spacing:.07em; margin-top:.5rem; }
+  .stage-bar button { font:inherit; text-transform:inherit; letter-spacing:inherit;
+                      background:var(--surface); color:var(--ink-soft); border:1px solid var(--rule);
+                      border-radius:5px; padding:.25em .7em; cursor:pointer; }
+  .stage.real { overflow:auto; }
+
+  /* ---------- piel del panel ---------- */
+  .app { width:1920px; height:1080px; background:var(--pnl-bg); color:var(--pnl-ink);
+         font-family:var(--sans); font-size:12px; line-height:1.35;
+         display:flex; flex-direction:column; }
+  .app * { box-sizing:border-box; }
+
+  .topbar { height:40px; flex:0 0 40px; background:var(--pnl-chrome);
+            border-bottom:1px solid var(--pnl-rule); display:flex; align-items:center;
+            gap:22px; padding:0 16px; font-size:12.5px; }
+  .topbar .brand { font-weight:700; letter-spacing:.02em; }
+  .topbar .spacer { flex:1; }
+  .kv { color:var(--pnl-faint); }
+  .kv b { color:var(--pnl-ink); font-family:var(--mono); font-weight:600; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:middle; }
+  .dot.g { background:#2E9E6B; } .dot.a { background:#D9A21B; } .dot.r { background:#C0574A; }
+  .dot.hollow { background:transparent; border:1.5px solid #2E9E6B; }
+
+  .actionbar { height:52px; flex:0 0 52px; border-bottom:1px solid var(--pnl-rule);
+               display:flex; align-items:center; gap:8px; padding:0 16px; background:#FBFCFD; }
+  .btn { height:30px; padding:0 14px; border:1px solid var(--pnl-rule); border-radius:5px;
+         background:#fff; font-size:12px; font-weight:600; color:var(--pnl-ink);
+         display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
+  .btn.primary { background:#12695C; border-color:#0E5A4F; color:#fff; }
+  .btn.ghost { background:transparent; border-style:dashed; color:var(--pnl-faint); font-weight:500; }
+  .btn.danger { border-color:#C9A19A; color:#9B4034; }
+  .btn.dis { opacity:.42; }
+  .sep { width:1px; height:24px; background:var(--pnl-rule); margin:0 6px; }
+  .scope { margin-left:auto; display:flex; align-items:center; gap:8px;
+           font-size:12px; color:var(--pnl-faint); }
+  .scope b { color:var(--pnl-ink); font-family:var(--mono); }
+
+  .body { flex:1; display:flex; gap:14px; padding:12px 16px 14px; min-height:0; }
+  .mosaic { flex:1; display:flex; gap:14px; min-width:0; }
+  .rail { flex:0 0 460px; display:flex; flex-direction:column; gap:12px; min-height:0; }
+
+  /* ---------- rejilla ---------- */
+  .grid { border:1px solid var(--pnl-rule); background:#fff; display:flex; flex-direction:column; min-height:0; }
+  .grid-head { flex:0 0 auto; }
+  .grid-rows { flex:1; overflow:hidden; }
+  .r { display:grid; grid-template-columns:76px repeat(3,88px) 84px repeat(3,88px);
+       height:18px; align-items:center; border-bottom:1px solid var(--pnl-rule-2); }
+  .r > div { padding:0 6px; font-family:var(--mono); font-size:11px; text-align:right;
+             white-space:nowrap; overflow:hidden; }
+  .r > div:first-child { text-align:left; font-family:var(--sans); font-size:11px; font-weight:600; }
+  .r .band { border-left:3px solid transparent; }
+  .r.head-1 { height:18px; }
+  .r.head-1 > div { font-family:var(--sans); font-size:10px; font-weight:700; text-align:center;
+                    letter-spacing:.05em; background:var(--hdr-group); border-right:1px solid #E8C96B; }
+  .r.head-2 { height:20px; border-bottom:1px solid var(--pnl-rule); }
+  .r.head-2 > div { font-family:var(--sans); font-size:9.5px; font-weight:700; text-align:center;
+                    letter-spacing:.02em; background:var(--hdr-ord); border-right:1px solid #CFD6DD; }
+  .r .liq  { background:var(--hdr-liq)  !important; }
+  .r .tp   { background:var(--hdr-tp)   !important; }
+  .r .dist { background:#FFF2CC !important; }
+  .r.sel { background:var(--sel); }
+  .r .num { color:#222A33; }
+  .r .empty { color:#C2C9D0; }
+  .r .warn { color:#9C6B14; font-weight:700; }
+  .g1 { border-left-color:#2E7D5B; } .g2 { border-left-color:#2F6FA8; }
+  .g3 { border-left-color:#8A5AA8; } .g4 { border-left-color:#C08A2E; } .g5 { border-left-color:#A8534A; }
+
+  /* ---------- tarjetas del rail ---------- */
+  .card { border:1px solid var(--pnl-rule); background:#fff; display:flex; flex-direction:column; min-height:0; }
+  .card > header { height:26px; flex:0 0 26px; background:var(--pnl-chrome);
+                   border-bottom:1px solid var(--pnl-rule); display:flex; align-items:center;
+                   justify-content:space-between; padding:0 10px; font-size:11px; font-weight:700;
+                   letter-spacing:.04em; text-transform:uppercase; color:var(--pnl-faint); }
+  .card > .in { padding:8px 10px; overflow:hidden; flex:1; min-height:0; }
+
+  .tree { font-size:12px; }
+  .tree .n { display:flex; align-items:center; gap:7px; height:22px; }
+  .tree .n.sub { padding-left:20px; color:#3A4550; }
+  .box { width:12px; height:12px; border:1.4px solid #8C959E; border-radius:2.5px;
+         display:inline-block; flex:0 0 12px; }
+  .box.on { background:#12695C; border-color:#12695C; }
+  .box.part { background:linear-gradient(#12695C,#12695C) center/7px 2.4px no-repeat; }
+  .tree .cnt { margin-left:auto; font-family:var(--mono); font-size:10.5px; color:var(--pnl-faint); }
+
+  .log { font-family:var(--mono); font-size:10.5px; line-height:1.75; color:#3A4550; }
+  .log b { color:#12695C; font-weight:600; }
+  .log .t { color:var(--pnl-faint); }
+  .log .e { color:#9B4034; }
+
+  /* ---------- diálogos ---------- */
+  .scrim { position:absolute; inset:0; background:rgba(16,24,32,.34); }
+  .dlg { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+         background:#fff; border:1px solid #A9B2BB; border-radius:8px;
+         box-shadow:0 18px 50px rgba(10,16,22,.28); display:flex; flex-direction:column; }
+  .dlg > header { padding:14px 18px 10px; border-bottom:1px solid var(--pnl-rule-2); }
+  .dlg h4 { margin:0; font-size:15px; font-weight:700; }
+  .dlg .sub { font-size:11.5px; color:var(--pnl-faint); margin-top:2px; }
+  .dlg > .in { padding:14px 18px; display:flex; flex-direction:column; gap:12px; }
+  .dlg > footer { padding:12px 18px; border-top:1px solid var(--pnl-rule-2);
+                  display:flex; align-items:center; gap:8px; background:#FBFCFD;
+                  border-radius:0 0 8px 8px; }
+  .dlg footer .fill { flex:1; }
+  .fld { display:flex; flex-direction:column; gap:4px; }
+  .fld > label { font-size:10.5px; font-weight:700; letter-spacing:.05em;
+                 text-transform:uppercase; color:var(--pnl-faint); }
+  .inp { height:30px; border:1px solid #A9B2BB; border-radius:5px; background:#fff;
+         display:flex; align-items:center; padding:0 9px; font-family:var(--mono); font-size:12px; }
+  .inp.wide { width:100%; }
+  .seg { display:flex; border:1px solid #A9B2BB; border-radius:5px; overflow:hidden; height:30px; }
+  .seg > span { flex:1; display:flex; align-items:center; justify-content:center;
+                font-size:11.5px; font-weight:600; border-right:1px solid #C9CFD6; }
+  .seg > span:last-child { border-right:0; }
+  .seg > span.on { background:#12695C; color:#fff; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; }
+  .chip { height:28px; min-width:52px; padding:0 10px; border:1px solid #A9B2BB; border-radius:5px;
+          display:inline-flex; align-items:center; justify-content:center;
+          font-family:var(--mono); font-size:11.5px; background:#fff; }
+  .chip.on { background:#12695C; border-color:#0E5A4F; color:#fff; }
+  .note { font-size:11px; color:var(--pnl-faint); }
+  .note.warn { color:#8A5F14; }
+  .note.bad { color:#9B4034; }
+  .prev { border:1px solid var(--pnl-rule); }
+  .prev .h, .prev .l { display:grid; grid-template-columns:1fr 92px 92px 92px; height:22px;
+                       align-items:center; font-family:var(--mono); font-size:11px; }
+  .prev .h { background:var(--pnl-chrome); font-family:var(--sans); font-size:10px; font-weight:700;
+             text-transform:uppercase; letter-spacing:.04em; color:var(--pnl-faint);
+             border-bottom:1px solid var(--pnl-rule); }
+  .prev .l { border-bottom:1px solid var(--pnl-rule-2); }
+  .prev .h > div, .prev .l > div { padding:0 8px; text-align:right; }
+  .prev .h > div:first-child, .prev .l > div:first-child { text-align:left; font-family:var(--sans); }
+  .bar { height:10px; border-radius:5px; overflow:hidden; display:flex; background:#E4E8EC; }
+  .bar i { display:block; height:100%; }
+  .totline { display:flex; align-items:baseline; gap:8px; padding:9px 11px;
+             background:#FFF8E1; border:1px solid #E8D48A; border-radius:5px; }
+  .totline b { font-family:var(--mono); font-size:14px; }
+
+  /* ---------- anotaciones ---------- */
+  .pin { position:absolute; width:22px; height:22px; border-radius:50%; background:#12695C;
+         color:#fff; font-family:var(--mono); font-size:11px; font-weight:700;
+         display:flex; align-items:center; justify-content:center;
+         box-shadow:0 0 0 3px rgba(255,255,255,.85); }
+  .notes { margin:.8rem 0 0; padding:0; list-style:none; counter-reset:n; }
+  .notes li { position:relative; padding-left:2.1rem; margin:.45rem 0; font-size:.93rem; max-width:78ch; }
+  .notes li::before { counter-increment:n; content:counter(n); position:absolute; left:0; top:.15rem;
+                      width:1.45rem; height:1.45rem; border-radius:50%; background:var(--accent-soft);
+                      color:var(--accent); font-family:var(--mono); font-size:.75rem; font-weight:700;
+                      display:flex; align-items:center; justify-content:center; }
+
+  footer.doc { margin-top:4rem; padding-top:1.4rem; border-top:1px solid var(--rule);
+               font-size:.85rem; color:var(--ink-faint); }
+</style>
+
+<div class="wrap">
+
+<p class="meta">Panel de Control Bitget · Entregable 4 de Fase 1</p>
+<h1>Wireframes</h1>
+<p class="lede">
+  Trazado de todas las pantallas del PCB a escala real (1920×1080), con las medidas
+  verificadas y las decisiones de interacción que fija cada una. Complementa a los
+  entregables 1 (stack), 2 (arquitectura) y 3 (modelo de datos).
+</p>
+<p class="meta" style="margin-top:1.4rem">Versión 1.0 · 27 de julio de 2026</p>
+
+<div class="callout">
+  <h3>Qué es y qué no es este documento</h3>
+  <p><strong>Es</strong> el plano de distribución: qué ocupa cada píxel, qué información
+  aparece en cada momento y qué pasa al pulsar cada control. Los wireframes están dibujados
+  a tamaño real, así que lo que se ve aquí es lo que cabe en pantalla.</p>
+  <p><strong>No es</strong> el diseño gráfico final. Tipografías, sombras y matices de color
+  se afinan durante la construcción. Lo que no cambia sin acuerdo previo es la distribución
+  y el flujo, porque de ahí cuelgan el modelo de datos y las estimaciones.</p>
+</div>
+
+<h2>1. Decisiones que fija este trazado</h2>
+
+<table>
+  <thead><tr><th>Decisión</th><th>Por qué</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Se hereda el código de color de la hoja de Excel del cliente</td>
+      <td>Amarillo para la banda de grupo, rojo para liquidación, verde para Take Profit. El operador ya lee esa tabla todos los días; conservar su lenguaje visual reduce el aprendizaje, y la capacitación formal está fuera del alcance contratado</td>
+    </tr>
+    <tr>
+      <td>Fila = cuenta. Bloque izquierdo LONG, bloque derecho SHORT</td>
+      <td>Modo cobertura (Hallazgo 3 del entregable 3): una cuenta puede tener las dos posiciones vivas sobre el mismo símbolo</td>
+    </tr>
+    <tr>
+      <td>Las filas <strong>no se reordenan nunca</strong></td>
+      <td>Ver nota P-6 más abajo. Es la decisión de interacción más importante del documento</td>
+    </tr>
+    <tr>
+      <td>Celda sin dato muestra <code>—</code>, nunca <code>0</code></td>
+      <td>Un cero en un precio de liquidación se lee como «liquidación inminente». El guion no se confunde con nada</td>
+    </tr>
+    <tr>
+      <td>Cifras monoespaciadas y alineadas a la derecha</td>
+      <td>Permite comparar 100 precios de un vistazo: los dígitos quedan en columna</td>
+    </tr>
+    <tr>
+      <td>Toda acción destructiva pasa por confirmación con precios calculados</td>
+      <td>RF-011. El operador confirma <em>precios</em>, no porcentajes (W-09)</td>
+    </tr>
+    <tr>
+      <td>El panel nunca degrada en silencio</td>
+      <td>Modo REST, cuenta indeterminada y pérdida de conexión tienen marca visible en la propia fila (W-14)</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>2. W-01 · Centro de Monitoreo, vista mosaico</h2>
+
+<p>
+  La pantalla principal y la respuesta al requisito <em>«que se puedan ver las 100 cuentas
+  sin mover nada»</em>. Dos paneles de 50 filas, densidad compacta, más el carril derecho
+  con la selección de cuentas y el registro de la sesión.
+</p>
+
+<div class="stage" id="st1">
+  <div class="stage-inner">
+    <div class="app">
+
+      <div class="topbar">
+        <span class="brand">PCB</span>
+        <span class="kv">Activo <b>BTCUSDT</b></span>
+        <span class="kv">Precio <b>100 142.6</b></span>
+        <span class="kv"><span class="dot g"></span>API conectada</span>
+        <span class="kv">Cuentas <b>100</b> · con posición <b>63</b> · calientes <b>63/80</b></span>
+        <span class="kv">Actualizado <b>hace 1 s</b></span>
+        <span class="spacer"></span>
+        <span class="kv">Sistema 1</span>
+        <span class="btn ghost" style="height:24px;padding:0 10px">Bloquear</span>
+      </div>
+
+      <div class="actionbar">
+        <span class="btn primary">ABRIR</span>
+        <span class="btn danger">CERRAR</span>
+        <span class="sep"></span>
+        <span class="btn">TAKE PROFIT</span>
+        <span class="btn">AGREGAR MARGEN</span>
+        <span class="btn">APALANCAMIENTO</span>
+        <span class="sep"></span>
+        <span class="btn ghost">Actualizar</span>
+        <span class="scope">
+          Alcance de la acción: <b>34 cuentas</b> seleccionadas
+          <span class="btn" style="height:26px">Cambiar…</span>
+        </span>
+      </div>
+
+      <div class="body">
+        <div class="mosaic">
+          <div class="grid" id="gA"></div>
+          <div class="grid" id="gB"></div>
+        </div>
+
+        <div class="rail">
+          <div class="card" style="flex:0 0 430px">
+            <header><span>Cuentas y selección</span><span>34 / 100</span></header>
+            <div class="in tree" id="tree"></div>
+          </div>
+          <div class="card" style="flex:1">
+            <header><span>Registro de la sesión</span><span>hoy</span></header>
+            <div class="in log">
+              <div><span class="t">10:42:07</span> <b>ABRIR</b> LONG BTCUSDT · 34 cuentas · 33 ok · 1 fallo</div>
+              <div><span class="t">10:42:07</span> M2·07 <span class="e">fallo 40762</span> saldo insuficiente</div>
+              <div><span class="t">10:41:55</span> <b>APALANCAMIENTO</b> 150x · 34 cuentas · 34 ok</div>
+              <div><span class="t">10:39:12</span> <b>TP</b> 30 % (ROE) · 61 cuentas · 61 ok</div>
+              <div><span class="t">10:38:40</span> <b>MARGEN</b> +250 USDT · 12 cuentas · 12 ok</div>
+              <div><span class="t">10:31:02</span> reconexión WS · 4 sockets · 2.1 s</div>
+              <div><span class="t">10:30:58</span> <span class="e">WS caído</span> M4·11 · reintento programado</div>
+              <div><span class="t">10:22:14</span> <b>CERRAR</b> SHORT · 8 cuentas · 7 ok · 1 omitida</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  <div class="pin" style="left:2.2%;  top:10.5%">1</div>
+  <div class="pin" style="left:46.5%; top:10.5%">2</div>
+  <div class="pin" style="left:19.5%; top:19.5%">3</div>
+  <div class="pin" style="left:36.4%; top:19.5%">4</div>
+  <div class="pin" style="left:74.5%; top:22%">5</div>
+  <div class="pin" style="left:74.5%; top:63%">6</div>
+</div>
+<div class="stage-bar">
+  <span>W-01 · 1920 × 1080 · escala <span data-k>—</span></span>
+  <button data-real="st1">Ver a tamaño real 1:1</button>
+</div>
+
+<ul class="notes">
+  <li><strong>Barra de estado.</strong> Todo lo que el pliego pide «como mínimo» en la pantalla principal: activo, precio, estado de la API, número de cuentas y de subcuentas conectadas. Se añade <code>calientes 63/80</code>, que es el consumo del presupuesto de WebSocket: cuando se acerca a 80, el operador ve por qué algunas cuentas pasan a modo REST antes de que ocurra.</li>
+    <li><strong>Alcance siempre visible.</strong> Ningún botón de acción se puede pulsar sin saber sobre cuántas cuentas va a caer. Es el antídoto contra el error más caro posible: ejecutar sobre 100 cuentas creyendo que eran 3.</li>
+  <li><strong>Banda de grupo.</strong> La franja de color a la izquierda de cada fila identifica la cuenta madre (M1…M5). Sustituye a una fila de encabezado por grupo, que costaría 5 filas de las 100 disponibles.</li>
+  <li><strong>Columna DISTANCIA L/S.</strong> Fondo ámbar, entre los dos bloques, exactamente como en la hoja del cliente. Muestra <code>—</code> mientras falte cualquiera de las dos puntas.</li>
+  <li><strong>Árbol de selección.</strong> Resuelve «seleccionar todas y todas las subcuentas»: casilla de <em>Todas</em>, casilla por cuenta madre (que arrastra sus 20 subcuentas) y casilla individual. El estado intermedio se dibuja como guion, no como marca.</li>
+  <li><strong>Registro de la sesión.</strong> Siempre visible, sin ventana aparte. Una línea por lote, con el desglose ok/fallo/omitida, más los incidentes de conexión.</li>
+</ul>
+
+<div class="callout">
+  <h3>La medición, que es el punto de todo esto</h3>
+  <p>Fila de <strong>18 px</strong> con cifras de 11 px monoespaciadas. 50 filas = 900 px,
+  más 38 px de encabezado = 938 px. Con la barra de estado (40) y la de acciones (52) el
+  total es <strong>1 046 px de los 1 080 disponibles</strong>. Cada panel mide 688 px de
+  ancho; dos paneles más el carril de 460 px suman 1 896 px de los 1 920.</p>
+  <p><strong>Condición:</strong> 1920×1080 con la escala de Windows al <strong>100 %</strong>.
+  Al 125 % —el valor por defecto de muchos portátiles— el espacio efectivo baja a 1536×864 y
+  solo caben ~70 cuentas. El panel detecta la escala al arrancar y lo advierte, en lugar de
+  recortar filas en silencio.</p>
+</div>
+
+<h2>3. W-02 · Centro de Monitoreo, vista pestañas</h2>
+
+<p>
+  El otro modo del mismo dato: una cuenta madre a la vez, con las pestañas arriba tal
+  como pidió el cliente y con filas holgadas de 30 px. Es la vista de trabajo cuando se
+  opera sobre un grupo concreto; el mosaico es la vista de vigilancia.
+</p>
+
+<div class="stage" id="st2">
+  <div class="stage-inner">
+    <div class="app">
+      <div class="topbar">
+        <span class="brand">PCB</span>
+        <span class="kv">Activo <b>BTCUSDT</b></span>
+        <span class="kv">Precio <b>100 142.6</b></span>
+        <span class="kv"><span class="dot g"></span>API conectada</span>
+        <span class="spacer"></span>
+        <span class="kv">Vista <b>Pestañas</b></span>
+        <span class="btn ghost" style="height:24px;padding:0 10px">Cambiar a mosaico</span>
+      </div>
+
+      <div class="actionbar">
+        <span class="btn primary">ABRIR</span>
+        <span class="btn danger">CERRAR</span>
+        <span class="sep"></span>
+        <span class="btn">TAKE PROFIT</span>
+        <span class="btn">AGREGAR MARGEN</span>
+        <span class="btn">APALANCAMIENTO</span>
+        <span class="scope">Alcance: <b>Cuenta Madre 2 · 20 cuentas</b>
+          <span class="btn" style="height:26px">Cambiar…</span></span>
+      </div>
+
+      <div style="flex:0 0 34px;display:flex;align-items:flex-end;gap:2px;padding:0 16px;
+                  border-bottom:1px solid var(--pnl-rule);background:#F4F6F8">
+        <span style="padding:6px 18px;border:1px solid var(--pnl-rule);border-bottom:0;
+                     background:#EDEFF2;font-size:12px;color:#5A646E">Todas</span>
+        <span style="padding:6px 18px;border:1px solid var(--pnl-rule);border-bottom:0;
+                     background:#EDEFF2;font-size:12px;color:#5A646E">Madre 1</span>
+        <span style="padding:7px 18px;border:1px solid var(--pnl-rule);border-bottom:1px solid #fff;
+                     background:#fff;font-size:12px;font-weight:700">Madre 2</span>
+        <span style="padding:6px 18px;border:1px solid var(--pnl-rule);border-bottom:0;
+                     background:#EDEFF2;font-size:12px;color:#5A646E">Madre 3</span>
+        <span style="padding:6px 18px;border:1px solid var(--pnl-rule);border-bottom:0;
+                     background:#EDEFF2;font-size:12px;color:#5A646E">Madre 4</span>
+        <span style="padding:6px 18px;border:1px solid var(--pnl-rule);border-bottom:0;
+                     background:#EDEFF2;font-size:12px;color:#5A646E">Madre 5</span>
+        <span style="margin-left:14px;font-size:11.5px;color:var(--pnl-faint)">
+          14 de 20 con posición · 6 sin posición</span>
+      </div>
+
+      <div class="body">
+        <div class="mosaic"><div class="grid" id="gT"></div></div>
+        <div class="rail">
+          <div class="card" style="flex:0 0 430px">
+            <header><span>Cuentas y selección</span><span>20 / 20</span></header>
+            <div class="in tree" id="treeT"></div>
+          </div>
+          <div class="card" style="flex:1">
+            <header><span>Registro de la sesión</span><span>hoy</span></header>
+            <div class="in log">
+              <div><span class="t">10:42:07</span> <b>ABRIR</b> LONG · 20 cuentas · 20 ok</div>
+              <div><span class="t">10:39:12</span> <b>TP</b> 30 % (ROE) · 20 cuentas · 20 ok</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="stage-bar">
+  <span>W-02 · vista pestañas · fila de 30 px</span>
+  <button data-real="st2">Ver a tamaño real 1:1</button>
+</div>
+
+<p>
+  Las pestañas son los grupos del modelo de datos (§8 del entregable 3), no grupos con
+  nombre creados por el operador —eso queda fuera del alcance contratado—. La pestaña
+  activa y los grupos colapsados se guardan en <code>config.json</code>, así que el panel
+  reabre exactamente como se dejó.
+</p>
+
+<h2>4. W-04 · Abrir operación</h2>
+
+<div class="stage" id="st3">
+  <div class="stage-inner">
+    <div class="app" style="height:680px">
+      <div class="topbar"><span class="brand">PCB</span><span class="kv">Activo <b>BTCUSDT</b></span>
+        <span class="kv">Precio <b>100 142.6</b></span><span class="spacer"></span></div>
+      <div style="flex:1;position:relative;background:#F1F3F5">
+        <div class="scrim"></div>
+
+        <div class="dlg" style="width:560px">
+          <header>
+            <h4>Abrir operación</h4>
+            <div class="sub">Se enviará una orden de mercado por cada cuenta seleccionada</div>
+          </header>
+          <div class="in">
+            <div style="display:flex;gap:12px">
+              <div class="fld" style="flex:1"><label>Activo</label><div class="inp">BTCUSDT ▾</div></div>
+              <div class="fld" style="flex:1"><label>Dirección</label>
+                <div class="seg"><span class="on">LONG</span><span>SHORT</span></div></div>
+            </div>
+            <div style="display:flex;gap:12px">
+              <div class="fld" style="flex:1"><label>Capital por cuenta</label>
+                <div class="inp">250<span style="margin-left:auto;color:#8C959E">USDT</span></div></div>
+              <div class="fld" style="flex:1"><label>Apalancamiento</label>
+                <div class="inp">150<span style="margin-left:auto;color:#8C959E">x</span></div></div>
+            </div>
+            <div class="note">El capital es <b>por cuenta</b>, no el total del lote. El total aparece abajo y se repite en la confirmación.</div>
+
+            <div class="fld"><label>Aplicar a</label>
+              <div class="inp wide" style="justify-content:space-between;font-family:var(--sans)">
+                34 cuentas seleccionadas<span class="btn" style="height:22px;font-size:11px">Cambiar…</span></div>
+            </div>
+
+            <div class="note warn">▲ 2 cuentas quedan fuera: <b>M3·04</b> y <b>M3·09</b> están en modo unilateral y la estrategia requiere cobertura.</div>
+
+            <div class="totline">
+              <span style="font-size:11.5px;color:#7A6520">Compromiso total</span>
+              <b>8 500 USDT</b>
+              <span style="font-size:11.5px;color:#7A6520">· 34 cuentas × 250 · exposición nocional 1 275 000 USDT a 150x</span>
+            </div>
+          </div>
+          <footer>
+            <span class="note">Se pedirá confirmación con los precios calculados por cuenta</span>
+            <span class="fill"></span>
+            <span class="btn">Cancelar</span>
+            <span class="btn primary">Continuar</span>
+          </footer>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="stage-bar"><span>W-04 · diálogo de apertura</span><button data-real="st3">Ver a tamaño real 1:1</button></div>
+
+<ul class="notes">
+  <li><strong>«Capital por cuenta» y no «monto».</strong> El pliego dice «monto», que es ambiguo cuando hay 34 destinos: ¿250 en total o 250 en cada una? Se resuelve en la etiqueta, en la nota y en el total en ámbar. Es la clase de ambigüedad que cuesta dinero una sola vez.</li>
+  <li><strong>Exposición nocional.</strong> 8 500 USDT a 150x mueven 1 275 000 USDT de mercado. Mostrarlo no es paternalismo: es el número que hace obvio si el apalancamiento tecleado tiene un cero de más.</li>
+  <li><strong>Las exclusiones se declaran antes, no después.</strong> Las cuentas que no pueden participar aparecen aquí con el motivo, no como fallos en el reporte final.</li>
+</ul>
+
+<h2>5. W-05 · Take Profit por porcentaje</h2>
+
+<div class="stage" id="st4">
+  <div class="stage-inner">
+    <div class="app" style="height:720px">
+      <div class="topbar"><span class="brand">PCB</span><span class="kv">Activo <b>BTCUSDT</b></span>
+        <span class="spacer"></span></div>
+      <div style="flex:1;position:relative;background:#F1F3F5">
+        <div class="scrim"></div>
+        <div class="dlg" style="width:620px">
+          <header><h4>Take Profit</h4>
+            <div class="sub">Se aplica a la posición completa, no a una parte</div></header>
+          <div class="in">
+            <div class="fld"><label>Porcentaje</label>
+              <div class="chips">
+                <span class="chip">20 %</span><span class="chip">25 %</span>
+                <span class="chip on">30 %</span><span class="chip">35 %</span>
+                <span class="chip">50 %</span><span class="chip">100 %</span>
+                <span class="chip" style="border-style:dashed;color:#8C959E">manual __ %</span>
+              </div>
+            </div>
+            <div style="display:flex;gap:12px">
+              <div class="fld" style="flex:1"><label>El porcentaje es sobre</label>
+                <div class="seg"><span class="on">ROE (ganancia)</span><span>Movimiento de precio</span></div></div>
+              <div class="fld" style="flex:0 0 200px"><label>Lado</label>
+                <div class="seg"><span class="on">Ambos</span><span>LONG</span><span>SHORT</span></div></div>
+            </div>
+            <div class="note">A 150x, <b>30 % de ROE</b> es un movimiento de precio de <b>0.20 %</b>. Sobre movimiento de precio, el mismo 30 % estaría 150 veces más lejos.</div>
+
+            <div class="fld"><label>Precios que se van a fijar · 34 cuentas</label>
+              <div class="prev">
+                <div class="h"><div>Cuenta</div><div>Entrada</div><div>TP calculado</div><div>Distancia</div></div>
+                <div class="l"><div>M1·01 LONG</div><div>100 000.0</div><div>100 200.0</div><div>+0.20 %</div></div>
+                <div class="l"><div>M1·01 SHORT</div><div>99 500.0</div><div>99 301.0</div><div>−0.20 %</div></div>
+                <div class="l"><div>M1·02 LONG</div><div>100 040.0</div><div>100 240.1</div><div>+0.20 %</div></div>
+                <div class="l" style="color:#8C959E"><div>… 31 más</div><div></div><div></div><div></div></div>
+              </div>
+            </div>
+            <div class="note">Cada precio se redondea al tick válido del símbolo (0.1 en BTCUSDT). Si una cuenta ya tiene un TP vigente, <b>se modifica</b>; no se crea un segundo.</div>
+          </div>
+          <footer><span class="note">7 cuentas sin posición se omitirán sin error</span>
+            <span class="fill"></span><span class="btn">Cancelar</span>
+            <span class="btn primary">Continuar</span></footer>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="stage-bar"><span>W-05 · Take Profit</span><button data-real="st4">Ver a tamaño real 1:1</button></div>
+
+<div class="callout">
+  <h3>La hoja del cliente respalda el criterio de ROE</h3>
+  <p>En la captura de Excel, la orden LONG está en 100 000 y su TP en <strong>100 220</strong>:
+  un movimiento de precio de <strong>+0.22 %</strong>. A 150x eso equivale a
+  <strong>+33 % de ROE</strong>. Un «TP del 30 %» leído como movimiento de precio pondría el
+  objetivo en 130 000, que no es lo que muestra la hoja.</p>
+  <p>Es evidencia a favor de la decisión de ROE por defecto tomada en §10.1 del entregable 1,
+  pero conviene confirmarlo con el cliente antes de fijarlo: es la diferencia entre cerrar la
+  operación y no cerrarla nunca.</p>
+</div>
+
+<h2>6. W-06 · Agregar margen · W-07 · Apalancamiento</h2>
+
+<div class="stage" id="st5">
+  <div class="stage-inner">
+    <div class="app" style="height:560px">
+      <div class="topbar"><span class="brand">PCB</span><span class="spacer"></span></div>
+      <div style="flex:1;position:relative;background:#F1F3F5">
+        <div class="scrim"></div>
+
+        <div class="dlg" style="width:440px;left:26%;top:52%">
+          <header><h4>Agregar margen</h4><div class="sub">Aleja el precio de liquidación</div></header>
+          <div class="in">
+            <div class="fld"><label>Cantidad por cuenta</label>
+              <div class="chips"><span class="chip">100</span><span class="chip on">250</span>
+                <span class="chip" style="border-style:dashed;color:#8C959E">manual</span></div></div>
+            <div class="fld"><label>Lado</label>
+              <div class="seg"><span class="on">LONG</span><span>SHORT</span><span>Ambos</span></div></div>
+            <div class="note bad">▲ 6 cuentas en margen <b>cruzado</b> quedan deshabilitadas: agregar margen solo existe en aislado.</div>
+            <div class="totline"><span style="font-size:11.5px;color:#7A6520">Total</span>
+              <b>7 000 USDT</b><span style="font-size:11.5px;color:#7A6520">· 28 cuentas × 250</span></div>
+          </div>
+          <footer><span class="fill"></span><span class="btn">Cancelar</span>
+            <span class="btn primary">Continuar</span></footer>
+        </div>
+
+        <div class="dlg" style="width:460px;left:73%;top:52%">
+          <header><h4>Apalancamiento</h4><div class="sub">Se aplica al activo seleccionado</div></header>
+          <div class="in">
+            <div class="fld"><label>Actual en las cuentas seleccionadas</label>
+              <div class="inp wide" style="font-family:var(--sans)">Mixto · 22 cuentas a 150x · 12 a 125x</div></div>
+            <div class="fld"><label>Nuevo apalancamiento</label>
+              <div class="inp">150<span style="margin-left:auto;color:#8C959E">x · máx. 150 en BTCUSDT</span></div></div>
+            <div class="note warn">▲ <b>19 de 34 cuentas tienen posición abierta.</b> Cambiar el apalancamiento recalcula su precio de liquidación y Bitget puede rechazar el cambio. Se listan por separado en la confirmación.</div>
+            <div class="note">Si una cuenta lo rechaza, <b>no se reintenta</b>: aparece como fallo con el motivo.</div>
+          </div>
+          <footer><span class="fill"></span><span class="btn">Cancelar</span>
+            <span class="btn primary">Continuar</span></footer>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="stage-bar"><span>W-06 y W-07</span><button data-real="st5">Ver a tamaño real 1:1</button></div>
+
+<h2>7. W-09 · Confirmación</h2>
+
+<p>
+  El componente crítico de seguridad del producto. Es la última pantalla antes de que salgan
+  órdenes reales, y está diseñada para que un operador con prisa <em>no</em> pueda equivocarse
+  sin haber leído.
+</p>
+
+<div class="stage" id="st6">
+  <div class="stage-inner">
+    <div class="app" style="height:760px">
+      <div class="topbar"><span class="brand">PCB</span><span class="spacer"></span></div>
+      <div style="flex:1;position:relative;background:#F1F3F5">
+        <div class="scrim"></div>
+        <div class="dlg" style="width:660px">
+          <header><h4>Confirmar apertura</h4>
+            <div class="sub">Después de este punto las órdenes se envían a Bitget</div></header>
+          <div class="in">
+            <div style="font-size:14px;line-height:1.5;color:#1B222A">
+              Vas a abrir <b>34 posiciones LONG</b> en <b>BTCUSDT</b>,
+              de <b>250 USDT</b> cada una, con apalancamiento <b>150x</b>.
+            </div>
+            <div class="totline"><span style="font-size:11.5px;color:#7A6520">Compromiso total</span>
+              <b>8 500 USDT</b>
+              <span style="font-size:11.5px;color:#7A6520">· exposición 1 275 000 USDT</span></div>
+
+            <div class="prev">
+              <div class="h"><div>Cuenta</div><div>Capital</div><div>Liq. estimada</div><div>Estado</div></div>
+              <div class="l"><div>M1·01</div><div>250.00</div><div>99 336.1</div><div style="color:#2E7D5B">lista</div></div>
+              <div class="l"><div>M1·02</div><div>250.00</div><div>99 341.7</div><div style="color:#2E7D5B">lista</div></div>
+              <div class="l"><div>M2·07</div><div>250.00</div><div>—</div><div style="color:#9C6B14">saldo 180.4</div></div>
+              <div class="l" style="color:#8C959E"><div>… 31 más</div><div></div><div></div><div></div></div>
+            </div>
+
+            <div class="note">Las cuentas con aviso <b>se envían igual</b>; si Bitget las rechaza aparecerán como fallo con su motivo. Ninguna se descarta en silencio.</div>
+          </div>
+          <footer>
+            <span class="note">El botón se habilita en <b>2 s</b> — evita el doble clic reflejo</span>
+            <span class="fill"></span>
+            <span class="btn">Cancelar</span>
+            <span class="btn primary dis">Abrir 34 posiciones (2)</span>
+          </footer>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="stage-bar"><span>W-09 · confirmación</span><button data-real="st6">Ver a tamaño real 1:1</button></div>
+
+<ul class="notes">
+  <li><strong>Una frase en lenguaje natural</strong> arriba del todo, con las cifras en negrita. Si esa frase no describe lo que el operador quería, ya no hace falta leer la tabla.</li>
+  <li><strong>El botón dice qué hace</strong> —«Abrir 34 posiciones»—, no «Aceptar». Un botón genérico se pulsa por reflejo; uno con el número no.</li>
+  <li><strong>Retardo de 2 segundos.</strong> Suficiente para frenar el clic automático, corto para no estorbar. No hay casilla de «no volver a preguntar»: el pliego exige confirmación siempre (RF-011), y por eso <code>confirmarSiempre</code> es de solo lectura en el modelo de datos.</li>
+</ul>
+
+<h2>8. W-10 · Resultado del lote</h2>
+
+<div class="stage" id="st7">
+  <div class="stage-inner">
+    <div class="app" style="height:700px">
+      <div class="topbar"><span class="brand">PCB</span><span class="spacer"></span></div>
+      <div style="flex:1;position:relative;background:#F1F3F5">
+        <div class="scrim"></div>
+        <div class="dlg" style="width:660px">
+          <header><h4>Resultado · Abrir LONG BTCUSDT</h4>
+            <div class="sub">Lote b91 · 34 cuentas · 4.2 s</div></header>
+          <div class="in">
+            <div class="bar">
+              <i style="width:88%;background:#2E9E6B"></i>
+              <i style="width:6%;background:#C0574A"></i>
+              <i style="width:3%;background:#B9C1C9"></i>
+              <i style="width:3%;background:#D9A21B"></i>
+            </div>
+            <div style="display:flex;gap:18px;font-size:12.5px">
+              <span><b style="color:#2E7D5B">30</b> ejecutadas</span>
+              <span><b style="color:#9B4034">2</b> fallidas</span>
+              <span><b style="color:#5A646E">1</b> omitida</span>
+              <span><b style="color:#8A5F14">1</b> indeterminada</span>
+            </div>
+
+            <div class="prev">
+              <div class="h"><div>Cuenta</div><div>Resultado</div><div>Código</div><div>Detalle</div></div>
+              <div class="l"><div>M2·07</div><div style="color:#9B4034">fallo</div><div>40762</div><div>saldo insuficiente</div></div>
+              <div class="l"><div>M3·14</div><div style="color:#9B4034">fallo</div><div>40774</div><div>modo de posición</div></div>
+              <div class="l"><div>M4·02</div><div style="color:#5A646E">omitida</div><div>—</div><div>sin selección</div></div>
+              <div class="l"><div>M5·09</div><div style="color:#8A5F14">indeterminada</div><div>—</div><div>verificando…</div></div>
+            </div>
+
+            <div class="note warn">▲ <b>M5·09</b> no respondió a tiempo. El sistema está comprobando en Bitget si la orden entró; <b>no se reintenta</b>. La cuenta no acepta operaciones nuevas hasta resolverse.</div>
+          </div>
+          <footer>
+            <span class="btn ghost">Copiar reporte</span>
+            <span class="fill"></span>
+            <span class="btn">Cerrar</span>
+            <span class="btn primary">Reintentar solo las 2 fallidas</span>
+          </footer>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="stage-bar"><span>W-10 · resultado</span><button data-real="st7">Ver a tamaño real 1:1</button></div>
+
+<p>
+  Cuatro estados y no dos, porque «fallida» y «no sé» son cosas distintas y se tratan
+  distinto: el botón de reintento cuenta <strong>solo las fallidas</strong>. Una orden
+  indeterminada jamás entra en un reintento; se resuelve consultando a Bitget, como describe
+  §10 del entregable 3.
+</p>
+
+<h2>9. W-11 · Cuentas: alta e importación</h2>
+
+<div class="stage" id="st8">
+  <div class="stage-inner">
+    <div class="app" style="height:760px">
+      <div class="topbar"><span class="brand">PCB</span><span class="kv">Cuentas</span><span class="spacer"></span></div>
+      <div style="flex:1;position:relative;background:#F1F3F5">
+        <div class="scrim"></div>
+        <div class="dlg" style="width:820px">
+          <header><h4>Importar cuentas</h4>
+            <div class="sub">Pega las credenciales o arrastra un archivo CSV · cada fila se valida contra Bitget antes de guardarse</div></header>
+          <div class="in">
+            <div class="fld"><label>Origen</label>
+              <div class="inp wide" style="height:76px;align-items:flex-start;padding:8px 9px;
+                        font-size:11px;line-height:1.6;color:#5A646E;display:block">
+                grupo,etiqueta,apiKey,secretKey,passphrase<br>
+                Cuenta Madre 1,Sub 01,bg_9f2a…,••••,••••<br>
+                Cuenta Madre 1,Sub 02,bg_7c41…,••••,••••
+              </div></div>
+
+            <div class="prev">
+              <div class="h"><div>Fila · cuenta</div><div>UID</div><div>Modo</div><div>Validación</div></div>
+              <div class="l"><div>2 · M1·01</div><div>8492013</div><div>cobertura</div><div style="color:#2E7D5B">correcta</div></div>
+              <div class="l"><div>3 · M1·02</div><div>8492014</div><div>cobertura</div><div style="color:#2E7D5B">correcta</div></div>
+              <div class="l"><div>4 · M1·03</div><div>8492015</div><div>unilateral</div><div style="color:#8A5F14">revisar modo</div></div>
+              <div class="l"><div>5 · M1·04</div><div>—</div><div>—</div><div style="color:#9B4034">permiso de retiro activo</div></div>
+              <div class="l"><div>6 · M1·05</div><div>—</div><div>—</div><div style="color:#9B4034">clave o passphrase inválida</div></div>
+              <div class="l" style="color:#8C959E"><div>… 95 más</div><div></div><div></div><div></div></div>
+            </div>
+
+            <div style="display:flex;gap:18px;font-size:12.5px">
+              <span><b style="color:#2E7D5B">96</b> correctas</span>
+              <span><b style="color:#8A5F14">2</b> con aviso</span>
+              <span><b style="color:#9B4034">2</b> rechazadas</span>
+            </div>
+            <div class="note bad">▲ Una credencial con <b>permiso de retiro</b> se rechaza siempre. El panel no lo necesita y una clave con ese permiso guardada en disco es un riesgo que no vale la pena correr.</div>
+            <div class="note">Las filas con error no bloquean a las demás: se importan las 96 correctas y las 2 con aviso, y el CSV de origen nunca se copia dentro de la carpeta de datos.</div>
+          </div>
+          <footer><span class="note">Validando 100 credenciales · 38 s estimados (límite de peticiones)</span>
+            <span class="fill"></span><span class="btn">Cancelar</span>
+            <span class="btn primary">Importar 98 cuentas</span></footer>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="stage-bar"><span>W-11 · importación</span><button data-real="st8">Ver a tamaño real 1:1</button></div>
+
+<h2>10. W-12 · Desbloqueo</h2>
+
+<div class="stage" id="st9">
+  <div class="stage-inner">
+    <div class="app" style="height:560px">
+      <div class="topbar"><span class="brand">PCB</span><span class="spacer"></span>
+        <span class="kv">Sistema 1</span></div>
+      <div style="flex:1;position:relative;background:#E9ECEF;display:flex;
+                  align-items:center;justify-content:center;gap:40px">
+
+        <div style="width:360px;background:#fff;border:1px solid #A9B2BB;border-radius:8px;padding:26px 24px">
+          <div style="font-size:15px;font-weight:700;margin-bottom:4px">Desbloquear panel</div>
+          <div style="font-size:11.5px;color:#77828E;margin-bottom:18px">Sistema 1 · 100 cuentas</div>
+          <div style="display:flex;gap:10px;margin-bottom:14px">
+            <div style="width:52px;height:60px;border:1.5px solid #A9B2BB;border-radius:6px;
+                        display:flex;align-items:center;justify-content:center;
+                        font-family:var(--mono);font-size:26px">•</div>
+            <div style="width:52px;height:60px;border:1.5px solid #12695C;border-radius:6px;
+                        display:flex;align-items:center;justify-content:center;
+                        font-family:var(--mono);font-size:26px;color:#C2C9D0">|</div>
+          </div>
+          <div style="font-size:11.5px;color:#8A5F14;margin-bottom:16px">
+            2 intentos restantes de 5. Al agotarlos se pedirá la contraseña maestra.</div>
+          <div class="btn ghost" style="width:100%;justify-content:center">Usar contraseña maestra</div>
+        </div>
+
+        <div style="width:400px;background:#fff;border:1px solid #A9B2BB;border-radius:8px;padding:26px 24px">
+          <div style="font-size:15px;font-weight:700;margin-bottom:4px">Contraseña maestra</div>
+          <div style="font-size:11.5px;color:#77828E;margin-bottom:18px">
+            Necesaria para restablecer el PIN o cambiar la contraseña</div>
+          <div class="inp wide" style="margin-bottom:14px">••••••••••••</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+            <span class="box on"></span>
+            <span style="font-size:11.5px;color:#3A4550">Recordar en este equipo (activa el PIN)</span>
+          </div>
+          <div class="note bad" style="margin-bottom:16px">
+            ▲ No existe recuperación. Si se pierde, hay que revocar las claves en Bitget y
+            registrarlas de nuevo; los nombres y grupos de las cuentas se conservan.</div>
+          <div class="btn primary" style="width:100%;justify-content:center">Desbloquear</div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+<div class="stage-bar"><span>W-12 · desbloqueo</span><button data-real="st9">Ver a tamaño real 1:1</button></div>
+
+<p>
+  El contador de intentos se guarda en disco: cerrar y reabrir la aplicación no lo reinicia.
+  Es lo que impide que 100 combinaciones se prueben en un minuto y lo que convierte un PIN de
+  2 dígitos en una medida razonable. La tabla de qué protege cada capa está en §6 del
+  entregable 3.
+</p>
+
+<h2>11. W-14 · Catálogo de estados de celda</h2>
+
+<p>
+  Todo lo que una fila puede decir sin abrir un diálogo. Ninguna condición degradada se
+  muestra como una fila vacía, porque una fila vacía significa «sin posición» y confundir
+  ambas cosas es lo más peligroso que puede hacer este panel.
+</p>
+
+<table>
+  <thead><tr><th>Situación</th><th>Cómo se ve</th><th>Por qué</th></tr></thead>
+  <tbody>
+    <tr><td>Cuenta sin posición</td><td>Celdas con <code>—</code>, fila en su sitio</td><td>El operador conserva la referencia espacial de sus 100 cuentas</td></tr>
+    <tr><td>Solo una punta abierta</td><td>El bloque contrario con <code>—</code>, DISTANCIA en <code>—</code></td><td>Cero significaría que las puntas se tocan</td></tr>
+    <tr><td>TP aún no confirmado</td><td>Celda TP con <code>·</code> tenue</td><td>El precio de TP llega por un canal distinto al de posiciones; puede tardar un instante más</td></tr>
+    <tr><td>Cuenta en modo REST</td><td>Punto verde hueco junto a la etiqueta</td><td>Se superó el presupuesto de sockets; los datos son correctos pero se refrescan cada 45 s</td></tr>
+    <tr><td>Cuenta sin conexión</td><td>Fila atenuada y punto rojo; los últimos valores conocidos en gris</td><td>Mejor un dato viejo señalado como viejo que ningún dato</td></tr>
+    <tr><td>Orden indeterminada</td><td>Fila con fondo ámbar y <code>⚠</code> en la etiqueta</td><td>Hay una orden sin resolver: la fila vacía <em>no</em> debe leerse como «sin posición»</td></tr>
+    <tr><td>Cuenta en margen cruzado</td><td>Etiqueta con distintivo <code>C</code></td><td>Agregar margen no existe ahí; se ve antes de intentarlo</td></tr>
+    <tr><td>Cuenta en modo unilateral</td><td>Etiqueta con distintivo <code>U</code> y bloque SHORT inhabilitado</td><td>Hallazgo 3: la estrategia requiere cobertura</td></tr>
+  </tbody>
+</table>
+
+<h2>12. Preguntas abiertas que agrega este entregable</h2>
+
+<div class="callout ask">
+  <h3>P-6 · ¿Las filas desaparecen o se quedan vacías? <span style="color:var(--fail)">Requiere decisión</span></h3>
+  <p>El presupuesto dice que se elimina <em>«la fila completa cuando la cuenta ya no tenga
+  posiciones abiertas, sin mensajes ni avisos»</em>. El requisito nuevo pide
+  <em>«ver las 100 cuentas sin mover nada»</em>. Son incompatibles: si las filas
+  desaparecen, cada Take Profit que salta reordena las 99 restantes y el operador pierde de
+  vista dónde estaba cada cuenta.</p>
+  <p><strong>Recomendación:</strong> la fila permanece siempre en la misma posición y solo se
+  vacían sus celdas. Cumple el espíritu de la cláusula —la información de la posición cerrada
+  desaparece sin avisos— y conserva la referencia espacial, que es el valor real de una vista
+  tipo hoja de cálculo. Se añade un conmutador <em>«compactar»</em> que oculta las cuentas sin
+  posición para quien prefiera el comportamiento literal.</p>
+</div>
+
+<div class="callout ask">
+  <h3>P-7 · Confirmar que el porcentaje de TP es sobre ROE</h3>
+  <p>La hoja de Excel del cliente lo respalda (TP de 100 220 sobre entrada de 100 000 = 0.22 %
+  de precio = 33 % de ROE a 150x), pero es una inferencia sobre una celda parcialmente visible.
+  Una equivocación aquí no produce un error: produce un Take Profit que nunca se ejecuta.</p>
+</div>
+
+<div class="callout ask">
+  <h3>P-8 · Tema claro tipo hoja de cálculo, o tema oscuro</h3>
+  <p>El trazado usa el tema claro con los colores de su Excel, apostando a la familiaridad. Un
+  tema oscuro cansa menos en sesiones largas frente a la pantalla. Es puramente estético y no
+  afecta plazos; conviene decidirlo ahora para no rehacer estilos más adelante.</p>
+</div>
+
+<div class="callout ask">
+  <h3>P-9 · Resolución del equipo donde va a correr</h3>
+  <p>El mosaico de 100 cuentas exige 1920×1080 con escala de Windows al 100 %. Conviene
+  confirmar la resolución y la escala del equipo real antes de dar por buena esta vista; si
+  fuera un portátil al 125 %, la vista por pestañas pasa a ser la principal.</p>
+</div>
+
+<h2>13. Cobertura del alcance contratado</h2>
+
+<table>
+  <thead><tr><th>Requisito</th><th>Pantalla</th></tr></thead>
+  <tbody>
+    <tr><td>Apertura de operaciones</td><td>W-04 → W-09 → W-10</td></tr>
+    <tr><td>Cierre individual, grupal o masivo</td><td>W-08 (mismo patrón que W-04) → W-09 → W-10</td></tr>
+    <tr><td>Take Profit por porcentaje</td><td>W-05 → W-09 → W-10</td></tr>
+    <tr><td>Agregar margen (USDT)</td><td>W-06 → W-09 → W-10</td></tr>
+    <tr><td>Ajuste de apalancamiento</td><td>W-07 → W-09 → W-10</td></tr>
+    <tr><td>Registro y validación de credenciales</td><td>W-11</td></tr>
+    <tr><td>Estado de conexión por cuenta</td><td>W-01 barra superior, W-14 catálogo</td></tr>
+    <tr><td>Selección múltiple de cuentas</td><td>W-01 carril derecho, W-03 en cada diálogo</td></tr>
+    <tr><td>Confirmación previa y reporte por cuenta</td><td>W-09, W-10</td></tr>
+    <tr><td>Registro básico de la sesión</td><td>W-01 carril derecho</td></tr>
+    <tr><td>Centro de Monitoreo de Operaciones Activas</td><td>W-01, W-02</td></tr>
+    <tr><td>Almacenamiento cifrado y desbloqueo</td><td>W-12</td></tr>
+  </tbody>
+</table>
+
+<footer class="doc">
+  Panel de Control Bitget · Entregable 4 de Fase 1 · Complementa a los entregables 1
+  (stack tecnológico), 2 (arquitectura técnica) y 3 (modelo de datos).
+</footer>
+
+</div>
+
+<script>
+  // ---- datos de muestra del monitor -------------------------------------
+  const rnd = (s => () => (s = s * 16807 % 2147483647) / 2147483647)(20260727);
+  const f1  = n => n.toFixed(1).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+
+  function fila(g, i, modo) {
+    const et = `M${g}·${String(i).padStart(2, '0')}`;
+    const r  = rnd();
+    const hayL = modo === 'todas' ? r > 0.30 : r > 0.25;
+    const hayS = modo === 'todas' ? r > 0.42 : r > 0.38;
+    const base = 100000 + Math.round((rnd() - 0.5) * 260);
+    const ent  = base, tp = base * 1.0020, liq = base * 0.9934;
+    const entS = base - 500, tpS = (base - 500) * 0.9980, liqS = (base - 500) * 1.0066;
+    const raro = rnd();
+    const marca = raro > 0.97 ? '<span style="color:#9C6B14">⚠</span> ' :
+                  raro > 0.94 ? '<span style="color:#77828E">C</span> ' : '';
+    const c = v => `<div class="num">${f1(v)}</div>`;
+    const e = () => `<div class="empty">—</div>`;
+    const dist = (hayL && hayS) ? `<div class="num">${f1(ent - entS)}</div>` : e();
+    return `<div class="r${raro > 0.97 ? ' sel' : ''}">
+      <div class="band g${g}">${marca}${et}</div>
+      ${hayL ? c(liq) + c(ent) + c(tp) : e() + e() + e()}
+      ${dist}
+      ${hayS ? c(liqS) + c(entS) + c(tpS) : e() + e() + e()}
+    </div>`;
+  }
+
+  const cabecera = `
+    <div class="r head-1">
+      <div style="background:#EDEFF2;border-right:1px solid #CFD6DD"></div>
+      <div style="grid-column:span 3">LONG</div>
+      <div style="background:#FFF2CC">DIST</div>
+      <div style="grid-column:span 3">SHORT</div>
+    </div>
+    <div class="r head-2">
+      <div>CUENTA</div>
+      <div class="liq">LIQUIDACIÓN</div><div>ORDEN</div><div class="tp">TP</div>
+      <div class="dist">L/S</div>
+      <div class="liq">LIQUIDACIÓN</div><div>ORDEN</div><div class="tp">TP</div>
+    </div>`;
+
+  function pintaGrid(el, desde, hasta, modo) {
+    let filas = '', n = 0;
+    for (let g = 1; g <= 5; g++)
+      for (let i = 1; i <= 20; i++) {
+        n++;
+        if (n > desde && n <= hasta) filas += fila(g, i, modo);
+      }
+    el.innerHTML = `<div class="grid-head">${cabecera}</div><div class="grid-rows">${filas}</div>`;
+  }
+
+  pintaGrid(document.getElementById('gA'), 0, 50, 'todas');
+  pintaGrid(document.getElementById('gB'), 50, 100, 'todas');
+
+  const gT = document.getElementById('gT');
+  let filasT = '';
+  for (let i = 1; i <= 20; i++) filasT += fila(2, i, 'grupo');
+  gT.innerHTML = `<div class="grid-head">${cabecera}</div><div class="grid-rows">${filasT}</div>`;
+  gT.querySelectorAll('.r:not(.head-1):not(.head-2)').forEach(r => {
+    r.style.height = '30px';
+    r.querySelectorAll('div').forEach(d => d.style.fontSize = '13px');
+  });
+
+  // ---- árbol de selección ------------------------------------------------
+  function pintaArbol(el, grupos) {
+    let h = `<div class="n"><span class="box part"></span><b>Todas las cuentas</b>
+             <span class="cnt">34/100</span></div>`;
+    grupos.forEach(g => {
+      h += `<div class="n"><span class="box ${g.on}"></span>${g.nombre}
+            <span class="cnt">${g.sel}/20</span></div>`;
+      (g.subs || []).forEach(s => {
+        h += `<div class="n sub"><span class="box ${s.on}"></span>${s.nombre}
+              <span class="cnt">${s.est}</span></div>`;
+      });
+    });
+    el.innerHTML = h;
+  }
+
+  pintaArbol(document.getElementById('tree'), [
+    { nombre: 'Cuenta Madre 1', on: 'on',   sel: 20 },
+    { nombre: 'Cuenta Madre 2', on: 'part', sel: 14,
+      subs: [
+        { nombre: 'M2·01', on: 'on',  est: 'conectada' },
+        { nombre: 'M2·02', on: 'on',  est: 'conectada' },
+        { nombre: 'M2·03', on: '',    est: 'modo REST' },
+        { nombre: 'M2·04', on: 'on',  est: 'conectada' },
+        { nombre: 'M2·05', on: '',    est: 'sin conexión' },
+      ] },
+    { nombre: 'Cuenta Madre 3', on: '',     sel: 0 },
+    { nombre: 'Cuenta Madre 4', on: '',     sel: 0 },
+    { nombre: 'Cuenta Madre 5', on: '',     sel: 0 },
+  ]);
+
+  pintaArbol(document.getElementById('treeT'), [
+    { nombre: 'Cuenta Madre 2', on: 'on', sel: 20,
+      subs: Array.from({ length: 9 }, (_, i) => ({
+        nombre: `M2·${String(i + 1).padStart(2, '0')}`, on: 'on',
+        est: i === 2 ? 'modo REST' : 'conectada'
+      })) },
+  ]);
+
+  // ---- escenarios a escala ----------------------------------------------
+  function ajusta() {
+    document.querySelectorAll('.stage').forEach(st => {
+      if (st.classList.contains('real')) return;
+      const inner = st.querySelector('.stage-inner');
+      const app   = inner.firstElementChild;
+      const w = app.offsetWidth || 1920, h = app.offsetHeight || 1080;
+      const k = st.clientWidth / w;
+      inner.style.transform = `scale(${k})`;
+      st.style.height = (h * k) + 'px';
+      const et = st.nextElementSibling && st.nextElementSibling.querySelector('[data-k]');
+      if (et) et.textContent = Math.round(k * 100) + ' %';
+    });
+  }
+  addEventListener('resize', ajusta);
+  ajusta();
+
+  document.querySelectorAll('[data-real]').forEach(b => {
+    b.addEventListener('click', () => {
+      const st = document.getElementById(b.dataset.real);
+      const real = st.classList.toggle('real');
+      const inner = st.querySelector('.stage-inner');
+      if (real) {
+        inner.style.transform = 'none';
+        st.style.height = Math.min(inner.firstElementChild.offsetHeight, 700) + 'px';
+        b.textContent = 'Ajustar al ancho';
+      } else {
+        b.textContent = 'Ver a tamaño real 1:1';
+        ajusta();
+      }
+    });
+  });
+</script>
