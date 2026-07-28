@@ -10,8 +10,8 @@ Versión 1.0 · Julio 2026
 | Capa | Decisión | Alternativa obvia que se descarta |
 |---|---|---|
 | Shell de escritorio | **Electron 43** | Tauri 2 |
-| Lenguaje | **TypeScript 7** (`strict`, sin `any` en fronteras) | JavaScript / C# |
-| Build y dev server | **electron-vite 5 + Vite 8** | Next.js, webpack, CRA |
+| Lenguaje | **TypeScript 6.0** (`strict`, sin `any` en fronteras) | JavaScript / C# |
+| Build y dev server | **electron-vite 5 + Vite 7** | Next.js, webpack, CRA |
 | UI | **React 19 + Tailwind 4 + Radix Primitives + TanStack Table 8** | MUI, Ant Design, AG Grid |
 | Estado (renderer) | **Zustand 5**, como proyección de solo lectura | Redux Toolkit, TanStack Query |
 | Estado autoritativo | **`PositionStore` en el proceso principal** | Estado en el renderer |
@@ -155,11 +155,18 @@ resulta comprometida, no hay nada que robar del lado del renderer.
 
 ---
 
-## 3. Lenguaje: TypeScript 7, modo estricto
+## 3. Lenguaje: TypeScript 6.0, modo estricto
 
-`typescript@^7.0.2` es el compilador nativo (port en Go): entre 8x y 10x más rápido en
-type-check que la línea 5.x, lo que en un proyecto de este tamaño significa feedback
-inmediato en el editor y CI de segundos.
+> **Corregido el 27 de julio de 2026.** Esta sección declaraba TypeScript 7. Al montar la
+> configuración del proyecto, `typescript-eslint` resultó rechazar TS 7 **en tiempo de
+> ejecución**, no solo por rango de dependencia: sin él, ESLint no analiza un solo archivo
+> `.ts`. Se fija `typescript@~6.0.3`, que es estable y sí está soportado. La ventaja de TS
+> 7 es la velocidad de compilación, que en un proyecto de este tamaño no es un cuello de
+> botella; perder el análisis estático sobre todo el código sí tiene consecuencias.
+> Detalle y plan de reversión en [`adr/0003-typescript-6-no-7.md`](adr/0003-typescript-6-no-7.md).
+
+`typescript@~6.0.3` en modo estricto. Verificado: `npm run typecheck` y `npm run lint`
+pasan limpios sobre todo el árbol.
 
 Configuración mínima obligatoria:
 
@@ -177,14 +184,16 @@ Configuración mínima obligatoria:
 crashes en clientes de exchange vienen de asumir que un array de respuesta tiene
 elementos.
 
-**Si algún plugin del ecosistema todavía no soporta TS 7**, `typescript@5.9` es un
-reemplazo directo sin cambios de código. Es un riesgo de bajo costo.
+El riesgo previsto en esta sección —«si algún plugin del ecosistema todavía no soporta TS
+7»— se materializó a los tres días, y el reemplazo costó exactamente lo previsto: una
+línea del `package.json` y hacer relativas las rutas de `paths`, porque TS 7 había
+eliminado `baseUrl`.
 
 ---
 
 ## 4. UI: React 19 + Tailwind 4 + Radix + TanStack Table
 
-**React 19 + Vite 8 vía electron-vite 5.** Nada de Next.js: no hay servidor, no hay
+**React 19 + Vite 7 vía electron-vite 5.** Nada de Next.js: no hay servidor, no hay
 enrutamiento por archivos, no hay SEO, no hay SSR. Next.js aportaría exclusivamente
 complejidad de build.
 
@@ -646,7 +655,7 @@ pcb/
 ├── electron-builder.yml
 ├── package.json
 ├── tsconfig.json  ·  tsconfig.node.json  ·  tsconfig.web.json
-├── tailwind.config.ts  ·  eslint.config.js  ·  .prettierrc
+├── eslint.config.mjs  ·  .prettierrc  ·  vitest.config.ts  ·  playwright.config.ts
 │
 ├── src/
 │   ├── main/                          # Proceso principal — TODO el I/O y los secretos
@@ -734,8 +743,10 @@ pcb/
 ├── resources/                         # íconos, activos del build
 └── docs/
     ├── 01-stack-tecnologico.md
-    ├── 02-arquitectura.md
-    ├── 03-propuesta-daniel.docx / .pdf
+    ├── 02-arquitectura.html
+    ├── 03-modelo-de-datos.md
+    ├── 04-wireframes.html
+    ├── cliente/                       # documentos entregados al cliente
     └── adr/                           # registro de decisiones de arquitectura
 ```
 

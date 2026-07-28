@@ -19,7 +19,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:e2e": "playwright test",
+    "test:e2e": "npm run build && playwright test",
     "build": "npm run typecheck && electron-vite build",
     "package:portable": "npm run build && electron-builder --win portable",
     "package:dir": "npm run build && electron-builder --win --dir"
@@ -33,29 +33,35 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.0",
     "@radix-ui/react-dialog": "^1.1.22",
     "@radix-ui/react-select": "^2.3.6",
     "@radix-ui/react-tooltip": "^1.2.15",
+    "@tailwindcss/vite": "^4.3.3",
     "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.14.8",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1",
-    "@vitejs/plugin-react": "^6.0.4",
+    "@vitejs/plugin-react": "^5.2.0",
+    "@vitest/coverage-v8": "^4.1.10",
     "clsx": "^2.1.1",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "eslint": "^10.8.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.8.0",
     "prettier": "^3.9.6",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.3",
-    "typescript": "^7.0.2",
-    "vite": "^8.1.5",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.65.0",
+    "vite": "^7.3.6",
     "vitest": "^4.1.10",
     "zustand": "^5.0.14"
   },
@@ -68,6 +74,9 @@
       "bitget-api": "Se instala solo como dependencia de test, como oraculo para contrastar la firma HMAC.",
       "p-queue / bottleneck": "No soportan buckets jerarquicos (por UID + global de IP) con pausa selectiva ante 429.",
       "date-fns / dayjs / lodash": "Intl y los metodos nativos cubren el uso real."
-    }
+    },
+    "vite": "Fijado en 7.x, no en 8.x: electron-vite 5 declara peer vite ^5 || ^6 || ^7. Ver docs/adr/0002-vite-7-no-8.md. Revisar al liberarse electron-vite 6.",
+    "@vitejs/plugin-react": "5.2.0 es la ultima que acepta vite 7; la 6.x exige vite 8.",
+    "typescript": "Fijado con ~ en la linea 6.0: typescript-eslint 8.65 rechaza TS 7.0 en tiempo de ejecucion, no solo por peer. Un ^6 permitiria 6.1 y volveria a romper el lint. Ver docs/adr/0003-typescript-6-no-7.md."
   }
 }

@@ -1,0 +1,24 @@
+node_modules/
+out/
+dist/
+release/
+*.log
+npm-debug.log*
+
+# Datos de ejecucion del panel: credenciales cifradas, config, logs de sesion.
+# Nunca deben entrar al repositorio.
+datos/
+*.enc
+*.enc.bak
+
+# Capturas de respuestas reales de Bitget sin anonimizar
+test/fixtures/raw/
+
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+playwright-report/
+test-results/
+coverage/

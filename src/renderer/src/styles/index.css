@@ -1,0 +1,53 @@
+@import 'tailwindcss';
+
+/*
+ * Tokens del panel. Heredan el codigo de color de la hoja de calculo del
+ * cliente: ambar para la banda de grupo, rojo para liquidacion, verde para Take
+ * Profit. docs/04-wireframes.html seccion 1.
+ */
+@theme {
+  --color-panel: #ffffff;
+  --color-chrome: #edeff2;
+  --color-rule: #c9cfd6;
+  --color-rule-soft: #e4e8ec;
+  --color-tinta: #1b222a;
+  --color-tenue: #77828e;
+
+  --color-hdr-grupo: #ffe699;
+  --color-hdr-liq: #f4b8b0;
+  --color-hdr-tp: #b7dfc4;
+  --color-hdr-orden: #dce3ea;
+
+  --color-ok: #2e7d5b;
+  --color-aviso: #9c6b14;
+  --color-fallo: #ae4436;
+  --color-acento: #12695c;
+
+  /* Alto de fila en densidad compacta: 50 filas por panel en 1080 px. */
+  --spacing-fila: 18px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-chrome);
+  color: var(--color-tinta);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+  /* Aplicacion de escritorio: no hay seleccion accidental de texto ni rebote. */
+  user-select: none;
+  overflow: hidden;
+}
+
+/* Las cifras se comparan en columna: digitos de ancho fijo, siempre. */
+.cifra {
+  font-family: 'Cascadia Mono', Consolas, ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}

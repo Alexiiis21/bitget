@@ -1,0 +1,31 @@
+appId: mx.pcb.panel
+productName: Panel de Control Bitget
+copyright: Copyright (c) 2026
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.map'
+
+asar: true
+
+win:
+  # Ejecutable portable: abrir y usar, sin instalador con asistente.
+  # Alcance contratado, presupuesto seccion 2 punto 4.
+  target:
+    - target: portable
+      arch: [x64]
+  artifactName: PCB-${version}-portable.exe
+
+portable:
+  # El .exe se descomprime en una carpeta fija en lugar de una temporal
+  # aleatoria, para que PORTABLE_EXECUTABLE_DIR sea estable entre arranques
+  # y la carpeta datos/ acompañe siempre al ejecutable.
+  unpackDirName: PCB
+  requestExecutionLevel: user
+
+compression: maximum
