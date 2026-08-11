@@ -8,6 +8,7 @@
  */
 export const app = {
   getPath: (nombre: string): string => `/stub/${nombre}`,
+  setPath: (): void => undefined,
   getVersion: (): string => '0.0.0-test',
   requestSingleInstanceLock: (): boolean => true,
   on: (): void => undefined,

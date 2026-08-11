@@ -1,7 +1,23 @@
 import { resolve } from 'node:path';
 import { defineConfig } from 'vitest/config';
 
+/*
+ * La suite no corre en staging, y no es una precaucion simbolica: casi todas
+ * estas pruebas construyen clientes contra el exchange simulado, escriben
+ * vaults de usar y tirar y borran carpetas de datos. Ejecutarlas apuntando al
+ * entorno donde viven las credenciales reales es justo lo que no debe poder
+ * hacerse por descuido.
+ */
+if (process.env['APP_ENV'] === 'staging') {
+  throw new Error(
+    'Las pruebas no se ejecutan en staging: ese entorno solo habla con la API real de ' +
+      'Bitget. Ejecute la suite sin APP_ENV, o con APP_ENV=dev.'
+  );
+}
+
 export default defineConfig({
+  /* Las pruebas corren siempre en dev. Ver src/shared/entorno.ts. */
+  define: { __ENTORNO__: JSON.stringify('dev') },
   resolve: {
     alias: {
       '@main': resolve('src/main'),
@@ -15,7 +31,17 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    include: ['test/unit/**/*.test.ts', 'test/integration/**/*.test.ts'],
+    /*
+     * Las pruebas de red salen a api.bitget.com de verdad, y por eso no corren
+     * en el ciclo normal: dependen de que haya conexion y del estado del
+     * exchange. Se piden a proposito con `npm run test:red`, que las nombra en
+     * la linea de comandos; solo entonces se anaden al include.
+     */
+    include: [
+      'test/unit/**/*.test.ts',
+      'test/integration/**/*.test.ts',
+      ...(process.argv.some((arg) => arg.includes('test/red')) ? ['test/red/**/*.test.ts'] : [])
+    ],
     coverage: {
       provider: 'v8',
       reportsDirectory: 'coverage',

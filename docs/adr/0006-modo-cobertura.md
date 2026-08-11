@@ -41,10 +41,28 @@ posiciones **en silencio**.
 
 ## Spikes que abre
 
-| # | Verificación contra la cuenta demo |
-|---|---|
-| S-7 | Cómo se consulta el modo de posición; confirmar que `set-position-mode` se rechaza con posiciones abiertas |
-| S-9 | Con las dos posiciones abiertas, comprobar que `place-tpsl-order` con `planType: pos_profit` aplica al lado indicado y no a la posición neta |
+| # | Verificación contra la cuenta demo | Estado |
+|---|---|---|
+| S-7 | Cómo se consulta el modo de posición | ✅ **Resuelto el 28/07/2026** |
+| S-7b | Confirmar que `set-position-mode` se rechaza con posiciones abiertas | Pendiente: requiere saldo en la cuenta demo |
+| S-9 | Con las dos posiciones abiertas, comprobar que `place-tpsl-order` con `planType: pos_profit` aplica al lado indicado y no a la posición neta | Pendiente: requiere saldo |
+
+**S-7, resuelto.** `GET /api/v2/mix/account/account` —con `symbol`, `productType` y
+`marginCoin`— devuelve el modo de posición y el apalancamiento por lado:
+
+```jsonc
+{
+  "posMode": "hedge_mode",        // cobertura confirmada
+  "marginMode": "crossed",
+  "isolatedLongLever": 10,        // el apalancamiento es por lado, como preveía este ADR
+  "isolatedShortLever": 10,
+  "crossedMarginLeverage": 10
+}
+```
+
+Confirma la premisa del ADR: el modo es legible por cuenta y símbolo, y el apalancamiento
+en aislado se declara por separado para long y short. La verificación de credenciales lo
+lee en el alta y avisa si la cuenta está en modo unilateral.
 
 ## Riesgo si la confirmación llega tarde
 

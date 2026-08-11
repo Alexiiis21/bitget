@@ -1,66 +1,61 @@
-import { useEffect, useState } from 'react';
-import type { EstadoApp, InfoSistema } from '@shared/ipc-contract';
+import { useEffect } from 'react';
+import { usarPanel } from '@/store/panel';
+import { PantallaDesbloqueo } from '@/features/login/PantallaDesbloqueo';
+import { Avisos } from '@/features/panel/Avisos';
+import { BarraLateral } from '@/features/panel/BarraLateral';
+import { DialogoPaso } from '@/features/panel/DialogoPaso';
+import { DialogoSeguridad } from '@/features/panel/DialogoSeguridad';
+import { Encabezado } from '@/features/panel/Encabezado';
+import { MatrizCuentas } from '@/features/panel/MatrizCuentas';
+import { ModalDetalleSubcuenta } from '@/features/panel/ModalDetalleSubcuenta';
+import { PanelResultadoLote } from '@/features/panel/PanelResultadoLote';
+import { PantallaApis } from '@/features/panel/PantallaApis';
 
 /**
- * Pantalla de verificacion de la Fase 1.
+ * Composición del panel — diseño aprobado v2.
  *
- * No es la interfaz del producto: es la prueba de que la cadena
- * principal -> preload -> renderer funciona con tipos compartidos y con el
- * aislamiento de contexto activo. El Centro de Monitoreo se construye en la
- * Fase 6, sobre los wireframes de docs/04.
+ * El encabezado no se desplaza; el área de contenido (resultado del lote +
+ * matriz de cuentas) y la barra lateral comparten la altura restante, uno
+ * con scroll propio y la otra fija. Las pantallas superpuestas van al final,
+ * cada una decidiendo por sí misma si debe dibujarse.
+ *
+ * El tema es el único estado que se aplica fuera de React: cambiar
+ * `data-theme` en `<body>` deja que la cascada de CSS resuelva todos los
+ * colores sin que ningún componente vuelva a renderizarse por eso.
  */
 export default function App() {
-  const [info, setInfo] = useState<InfoSistema | null>(null);
-  const [estado, setEstado] = useState<EstadoApp | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const pantalla = usarPanel((s) => s.pantalla);
+  const tema = usarPanel((s) => s.tema);
+  const iniciar = usarPanel((s) => s.iniciar);
 
   useEffect(() => {
-    Promise.all([window.pcb.sistemaInfo(), window.pcb.sistemaEstado()])
-      .then(([i, e]) => {
-        setInfo(i);
-        setEstado(e);
-      })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
-  }, []);
+    void iniciar();
+  }, [iniciar]);
+
+  useEffect(() => {
+    document.body.setAttribute('data-theme', tema);
+  }, [tema]);
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex h-10 flex-none items-center gap-6 border-b border-rule bg-chrome px-4">
-        <span className="font-bold tracking-wide">PCB</span>
-        <span className="text-tenue">Fase 1 · esqueleto verificado</span>
-        <span className="ml-auto text-tenue">{info?.instanciaNombre ?? '—'}</span>
-      </header>
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <Encabezado />
 
-      <main className="flex-1 overflow-auto bg-panel p-8">
-        <h1 className="mb-1 text-lg font-semibold">Panel de Control Bitget</h1>
-        <p className="mb-6 text-tenue">
-          Estructura del proyecto y cadena de procesos operativas. Sin conexion a Bitget todavia.
-        </p>
+      <div style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', overflow: 'hidden' }}>
+        <div style={{ order: 1, flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          <PanelResultadoLote />
+          <MatrizCuentas />
+        </div>
+        <div style={{ order: 2 }}>
+          <BarraLateral />
+        </div>
+      </div>
 
-        {error && <p className="text-fallo">Fallo el IPC: {error}</p>}
-
-        <table className="border-collapse text-left">
-          <tbody>
-            <Fila k="Version" v={info?.appVersion} />
-            <Fila k="Electron" v={info?.electron} />
-            <Fila k="Node" v={info?.node} />
-            <Fila k="Modo" v={info ? (info.portable ? 'portable' : 'instalado') : undefined} />
-            <Fila k="Carpeta de datos" v={info?.carpetaDatos} />
-            <Fila k="Vault" v={estado?.vault} />
-            <Fila k="Cuentas registradas" v={estado?.cuentasRegistradas} />
-            <Fila k="Aislamiento de contexto" v={window.pcb ? 'activo' : 'AUSENTE'} />
-          </tbody>
-        </table>
-      </main>
+      <PantallaApis />
+      <DialogoSeguridad />
+      <DialogoPaso />
+      <ModalDetalleSubcuenta />
+      {pantalla === 'login' && <PantallaDesbloqueo />}
+      <Avisos />
     </div>
-  );
-}
-
-function Fila({ k, v }: { k: string; v: string | number | undefined }) {
-  return (
-    <tr className="border-b border-rule-soft">
-      <td className="py-1.5 pr-10 text-tenue">{k}</td>
-      <td className="cifra py-1.5 text-left">{v ?? '…'}</td>
-    </tr>
   );
 }

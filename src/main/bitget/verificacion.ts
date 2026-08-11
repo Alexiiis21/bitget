@@ -1,0 +1,288 @@
+/**
+ * Verificacion de una credencial antes de darla de alta.
+ *
+ * Responde a tres preguntas, en este orden, y la primera que falla corta:
+ *
+ *   1. ¿Bitget la acepta?          -> firma, passphrase, IP, key viva
+ *   2. ¿Tiene los permisos justos? -> ni de menos, ni de mas
+ *   3. ¿La cuenta puede operar la estrategia? -> cobertura y margen aislado
+ *
+ * Cumple RF-001 («verificar automaticamente que las credenciales sean validas
+ * antes de permitir su utilizacion») y la clausula de credenciales del
+ * presupuesto: el sistema no utiliza ni acepta permisos de retiro.
+ *
+ * --------------------------------------------------------------------------
+ * Sobre el permiso de retiro: por que lista blanca y no lista negra
+ * --------------------------------------------------------------------------
+ * docs/03 §5 preveia «consultar el permiso y rechazar cualquier key con
+ * permiso de retiro habilitado». Al implementarlo aparecio que Bitget declara
+ * los permisos como codigos opacos de cuatro letras -una key de solo futuros
+ * devuelve `["coow","cpow"]`- y no publica su significado.
+ *
+ * Con codigos que no se pueden interpretar, una lista negra **falla abierta**:
+ * un codigo de retiro que no estuviera en la lista pasaria la verificacion sin
+ * que nadie se enterase. Por eso se invierte: solo se aceptan los codigos
+ * confirmados como inocuos, y **cualquier codigo desconocido rechaza la
+ * credencial**. Falla cerrado.
+ *
+ * Es la misma regla que ya gobierna bitget/errors.ts: ante lo desconocido, la
+ * respuesta segura, nunca la comoda. El coste es que una key con permisos
+ * legitimos aun no catalogados se rechaza y hay que anadir su codigo aqui; el
+ * beneficio es que ninguna key con permiso de retiro entra por descuido.
+ */
+import type { ModoMargen, ModoPosicion } from '@shared/types';
+import { ErrorBitget } from './errors';
+import type { ClienteBitget } from './rest/client';
+import type { Credencial } from './rest/signer';
+import { obtenerCuentaSimbolo, obtenerInfoCuenta } from './rest/endpoints/cuenta';
+
+/**
+ * Codigos de permiso confirmados contra la API real.
+ *
+ * Estado: `coow` y `cpow` capturados el 28/07/2026 de una key creada **desde la
+ * web** solo con permiso de Futuros. El catalogo se amplia conforme se observen
+ * otras combinaciones; hasta entonces, lo no listado se rechaza.
+ *
+ * --------------------------------------------------------------------------
+ * `ttow`: por que se cataloga sin que Bitget publique su significado
+ * --------------------------------------------------------------------------
+ * Observado el 08/08/2026 en diez subcuentas virtuales creadas **por API** con
+ * `permList: ["contract_trade"]` y nada mas. Las diez devolvieron
+ * `[coow, ttow, cpow]`, mientras que la key equivalente creada a mano en la web
+ * devuelve solo `[coow, cpow]`. Es decir: `ttow` es parte de lo que Bitget
+ * entiende por «operar futuros» cuando el alta va por API, no un permiso que se
+ * haya pedido de mas.
+ *
+ * Dos comprobaciones independientes sostienen que es inocuo:
+ *
+ *   1. En la peticion de alta no se pidio transferencia, retiro ni spot. El
+ *      unico permiso solicitado fue `contract_trade`.
+ *   2. Esas keys se crearon **sin lista blanca de IP**, y Bitget no concede el
+ *      permiso de retiro a una key sin IP ligada. Aunque se hubiera pedido, no
+ *      habria podido concederse.
+ *
+ * Sigue siendo una confirmacion por construccion, no una definicion publicada.
+ * Antes de operar con dinero real conviene contrastarlo con soporte de Bitget
+ * -api@bitget.com- y anotar aqui la respuesta. Ver scripts/ver-permisos.mjs
+ * para reproducir la observacion.
+ */
+const PERMISOS_ACEPTADOS: Record<string, string> = {
+  coow: 'Futuros: ordenes',
+  cpow: 'Futuros: posiciones',
+  ttow: 'Futuros: operar (alta por API)'
+};
+
+export type VeredictoCredencial = 'valida' | 'rechazada' | 'invalida';
+
+export type CodigoAdvertencia =
+  'sin-ip-ligada' | 'margen-cruzado' | 'modo-unilateral' | 'sin-saldo' | 'reloj-desviado';
+
+export interface Advertencia {
+  codigo: CodigoAdvertencia;
+  /** Texto para el operador. Describe la consecuencia, no el sintoma. */
+  mensaje: string;
+}
+
+export interface ResultadoVerificacion {
+  /**
+   * `valida`     lista para operar.
+   * `rechazada`  Bitget la acepta, pero no cumple nuestras reglas de seguridad.
+   * `invalida`   Bitget no la acepta.
+   */
+  veredicto: VeredictoCredencial;
+  /** Presente salvo que la credencial ni siquiera autentique. */
+  uid: string | null;
+  esSubcuenta: boolean;
+  permisos: string[];
+  /** Codigos fuera del catalogo. Si hay alguno, el veredicto es `rechazada`. */
+  permisosDesconocidos: string[];
+  ipsLigadas: string[];
+  modoPosicion: ModoPosicion | null;
+  modoMargen: ModoMargen | null;
+  apalancamientoLong: number | null;
+  apalancamientoShort: number | null;
+  saldoDisponible: string | null;
+  advertencias: Advertencia[];
+  /** Motivo en espanol cuando el veredicto no es `valida`. */
+  motivo: string | null;
+  /** Codigo crudo del exchange cuando el veredicto es `invalida`. */
+  codigoBitget: string | null;
+  latenciaMs: number;
+}
+
+export interface OpcionesVerificacion {
+  /** Simbolo con el que se leen modo de posicion y apalancamiento. */
+  simbolo?: string;
+}
+
+/**
+ * Verifica una credencial contra Bitget.
+ *
+ * No lanza por credencial invalida: eso es un resultado, no una excepcion. Un
+ * alta masiva de 100 credenciales necesita seguir con las 99 restantes cuando
+ * una falla. Solo propaga errores de transporte reintentables, que no son un
+ * veredicto sobre la credencial sino sobre la red.
+ */
+export async function verificarCredencial(
+  cliente: ClienteBitget,
+  credencial: Credencial,
+  opciones: OpcionesVerificacion = {}
+): Promise<ResultadoVerificacion> {
+  const simbolo = opciones.simbolo ?? 'BTCUSDT';
+  const inicio = Date.now();
+
+  const base = (): ResultadoVerificacion => ({
+    veredicto: 'invalida',
+    uid: null,
+    esSubcuenta: false,
+    permisos: [],
+    permisosDesconocidos: [],
+    ipsLigadas: [],
+    modoPosicion: null,
+    modoMargen: null,
+    apalancamientoLong: null,
+    apalancamientoShort: null,
+    saldoDisponible: null,
+    advertencias: [],
+    motivo: null,
+    codigoBitget: null,
+    latenciaMs: 0
+  });
+
+  /* ---- 1. ¿la acepta Bitget? ---- */
+
+  let info;
+  try {
+    info = await obtenerInfoCuenta(cliente, credencial);
+  } catch (e) {
+    if (e instanceof ErrorBitget && e.reintentable) throw e;
+    const err = e as ErrorBitget;
+    return {
+      ...base(),
+      motivo: err.message,
+      codigoBitget: err.codigo,
+      latenciaMs: Date.now() - inicio
+    };
+  }
+
+  const permisos = info.datos.authorities;
+  const desconocidos = permisos.filter((p) => !(p in PERMISOS_ACEPTADOS));
+  const ips = info.datos.ips
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  const parcial: ResultadoVerificacion = {
+    ...base(),
+    uid: info.datos.userId,
+    esSubcuenta: typeof info.datos.parentId === 'number' && info.datos.parentId > 0,
+    permisos,
+    permisosDesconocidos: desconocidos,
+    ipsLigadas: ips
+  };
+
+  /* ---- 2. ¿permisos justos? ---- */
+
+  if (desconocidos.length > 0) {
+    return {
+      ...parcial,
+      veredicto: 'rechazada',
+      motivo:
+        `La API Key tiene permisos que el panel no reconoce (${desconocidos.join(', ')}). ` +
+        'Por seguridad no se acepta: crea la key solo con permiso de Futuros, ' +
+        'sin Wallet ni retiros.',
+      latenciaMs: Date.now() - inicio
+    };
+  }
+
+  if (permisos.length === 0) {
+    return {
+      ...parcial,
+      veredicto: 'rechazada',
+      motivo: 'La API Key no declara ningun permiso: no podria operar.',
+      latenciaMs: Date.now() - inicio
+    };
+  }
+
+  /* ---- 3. ¿la cuenta puede operar la estrategia? ---- */
+
+  let cuenta;
+  try {
+    cuenta = await obtenerCuentaSimbolo(cliente, credencial, simbolo);
+  } catch (e) {
+    if (e instanceof ErrorBitget && e.reintentable) throw e;
+    const err = e as ErrorBitget;
+    return {
+      ...parcial,
+      motivo: `Autentica, pero no se pudo leer la cuenta de futuros: ${err.message}`,
+      codigoBitget: err.codigo,
+      latenciaMs: Date.now() - inicio
+    };
+  }
+
+  const modoPosicion: ModoPosicion =
+    cuenta.datos.posMode === 'hedge_mode' ? 'cobertura' : 'unilateral';
+  const modoMargen: ModoMargen = cuenta.datos.marginMode === 'isolated' ? 'aislado' : 'cruzado';
+
+  const advertencias: Advertencia[] = [];
+
+  if (modoPosicion !== 'cobertura') {
+    advertencias.push({
+      codigo: 'modo-unilateral',
+      mensaje:
+        'La cuenta esta en modo unilateral: no admite LONG y SHORT a la vez. ' +
+        'Cambialo a modo cobertura en Bitget, con la cuenta sin posiciones abiertas.'
+    });
+  }
+
+  if (modoMargen !== 'aislado') {
+    advertencias.push({
+      codigo: 'margen-cruzado',
+      mensaje:
+        'La cuenta esta en margen cruzado: la funcion de agregar margen no estara ' +
+        'disponible, porque Bitget solo la permite en margen aislado.'
+    });
+  }
+
+  if (ips.length === 0) {
+    advertencias.push({
+      codigo: 'sin-ip-ligada',
+      mensaje:
+        'La API Key no tiene IP ligada. Funciona, pero si se filtrara seria utilizable ' +
+        'desde cualquier sitio.'
+    });
+  }
+
+  if (Number(cuenta.datos.available) === 0) {
+    advertencias.push({
+      codigo: 'sin-saldo',
+      mensaje: 'La cuenta no tiene saldo disponible: las ordenes se rechazaran por fondos.'
+    });
+  }
+
+  if (cliente.relojDesviado) {
+    advertencias.push({
+      codigo: 'reloj-desviado',
+      mensaje:
+        `El reloj del equipo se desvia ${cliente.desfaseActualMs} ms del de Bitget. ` +
+        'Se corrige al firmar, pero conviene sincronizar la hora de Windows.'
+    });
+  }
+
+  return {
+    ...parcial,
+    veredicto: 'valida',
+    modoPosicion,
+    modoMargen,
+    apalancamientoLong: cuenta.datos.isolatedLongLever ?? null,
+    apalancamientoShort: cuenta.datos.isolatedShortLever ?? null,
+    saldoDisponible: cuenta.datos.available,
+    advertencias,
+    latenciaMs: Date.now() - inicio
+  };
+}
+
+/** Descripcion legible de un codigo de permiso, para la pantalla de cuentas. */
+export function describirPermiso(codigo: string): string {
+  return PERMISOS_ACEPTADOS[codigo] ?? `Permiso desconocido (${codigo})`;
+}

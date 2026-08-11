@@ -47,7 +47,22 @@ test('el IPC responde con la informacion del sistema', async () => {
   expect(typeof info.portable).toBe('boolean');
 });
 
-test('la pantalla pinta los datos que llegan del proceso principal', async () => {
+test('el panel arranca bloqueado, con el numero que llega por IPC', async () => {
+  const info = await ventana.evaluate(() => window.pcb.sistemaInfo());
+
+  /* Lo primero que se ve es el desbloqueo: sin contrasena no hay credenciales. */
+  await expect(ventana.getByText('Contraseña maestra')).toBeVisible();
+  await expect(ventana.getByText(`PCB · PANEL #${info.numeroPanel}`)).toBeVisible();
+});
+
+test('detras del bloqueo esta el panel del diseno aprobado v2', async () => {
+  /*
+   * `cuentas` arranca vacío hasta que se desbloquea el almacén (a diferencia
+   * del diseño anterior, que precargaba datos de muestra): lo que se puede
+   * verificar sin desbloquear es el armazón -encabezado y barra lateral-, no
+   * el contenido de las cuentas.
+   */
   await expect(ventana.getByText('Panel de Control Bitget')).toBeVisible();
-  await expect(ventana.getByText('activo', { exact: true })).toBeVisible();
+  await expect(ventana.getByText('EJECUCIÓN')).toBeVisible();
+  await expect(ventana.getByText('PARÁMETROS')).toBeVisible();
 });

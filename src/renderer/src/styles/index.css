@@ -1,30 +1,112 @@
-@import 'tailwindcss';
+/*
+ * Estilos base del panel — diseño aprobado v2 (docs/cliente/PCB-standalone.html).
+ *
+ * La paleta vive como custom properties de CSS, no como objeto JS: así cambiar
+ * de tema es una sola atribución de atributo (`data-theme` en <body>) y ningún
+ * componente vuelve a renderizarse solo por el cambio de color. `lib/tokens.ts`
+ * expone los mismos nombres como `var(--x)` para usarlos en estilos en línea.
+ *
+ * Sin Tailwind a propósito: su "preflight" redefine altura de línea, botones y
+ * formularios, y con él la pantalla compilada dejaría de ser idéntica a la que
+ * aprobó el cliente. Las fuentes se sirven desde @fontsource, nunca desde
+ * Google Fonts: la CSP no permite peticiones externas y el equipo del operador
+ * puede quedarse sin internet sin que la interfaz cambie de tipografía.
+ */
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-sans/700.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+@import '@fontsource/ibm-plex-mono/600.css';
+@import '@fontsource/ibm-plex-mono/700.css';
+
+* {
+  box-sizing: border-box;
+}
+
+:root,
+body[data-theme='light'] {
+  --bg: #f2f5f8;
+  --surface: #ffffff;
+  --surface-2: #f7fafc;
+  --surface-3: #fbfdfe;
+  --band: #eef4fb;
+  --band-hover: #e2edf8;
+  --sel: #e8f2fc;
+  --sel-soft: #f5f9fd;
+  --hover: #f7fbfe;
+  --input-bg: #f8fafc;
+  --line: #e4eaf0;
+  --line-soft: #f1f4f7;
+  --line-strong: #d7e0e8;
+  --fg: #131c26;
+  --fg-2: #48545f;
+  --fg-3: #8794a0;
+  --brand: #0d2c4b;
+  --brand-fill: #1667b3;
+  --brand-fg: #1667b3;
+  --long: #12796b;
+  --short: #c0392b;
+  --row-crit: #fdeceb;
+  --row-warn: #fffaf0;
+  --alert-crit-bg: #fdeceb;
+  --alert-crit-line: #f3bfb9;
+  --alert-crit-fg: #a52016;
+  --alert-crit-fg2: #8c3226;
+  --alert-warn-bg: #fff9ee;
+  --alert-warn-line: #f0e3c4;
+  --alert-warn-fg: #7a5300;
+}
+
+body[data-theme='dark'] {
+  --bg: #07121c;
+  --surface: #0e1c28;
+  --surface-2: #0b1722;
+  --surface-3: #091420;
+  --band: #10232f;
+  --band-hover: #173142;
+  --sel: #12293a;
+  --sel-soft: #0e1f2c;
+  --hover: #132635;
+  --input-bg: #0a1620;
+  --line: #1e3140;
+  --line-soft: #182734;
+  --line-strong: #2a4256;
+  --fg: #e6eef6;
+  --fg-2: #b0c1cf;
+  --fg-3: #7d8f9e;
+  --brand: #0a1a2b;
+  --brand-fill: #1c86d6;
+  --brand-fg: #5ab8f5;
+  --long: #35c9a6;
+  --short: #ef6b58;
+  --row-crit: #2a1416;
+  --row-warn: #241c0c;
+  --alert-crit-bg: #2a1416;
+  --alert-crit-line: #5c2420;
+  --alert-crit-fg: #ff9d90;
+  --alert-crit-fg2: #e8a49c;
+  --alert-warn-bg: #241c0c;
+  --alert-warn-line: #4d3d13;
+  --alert-warn-fg: #f0c96a;
+}
 
 /*
- * Tokens del panel. Heredan el codigo de color de la hoja de calculo del
- * cliente: ambar para la banda de grupo, rojo para liquidacion, verde para Take
- * Profit. docs/04-wireframes.html seccion 1.
+ * Superficie de los campos de formulario. No cambia con el tema, y por eso vive
+ * fuera de los dos bloques de arriba.
+ *
+ * El navegador pinta los <input> con su fondo blanco nativo en ambos temas.
+ * Dando al texto escrito `--fg`, en el tema oscuro quedaba casi blanco sobre
+ * blanco: ilegible justo donde se teclea una API key o una contraseña maestra,
+ * que son los dos campos del panel donde un carácter mal escrito cuesta más
+ * caro. El fondo se declara explícitamente para no depender del valor por
+ * defecto del navegador, y el color del texto se fija oscuro en consecuencia.
  */
-@theme {
-  --color-panel: #ffffff;
-  --color-chrome: #edeff2;
-  --color-rule: #c9cfd6;
-  --color-rule-soft: #e4e8ec;
-  --color-tinta: #1b222a;
-  --color-tenue: #77828e;
-
-  --color-hdr-grupo: #ffe699;
-  --color-hdr-liq: #f4b8b0;
-  --color-hdr-tp: #b7dfc4;
-  --color-hdr-orden: #dce3ea;
-
-  --color-ok: #2e7d5b;
-  --color-aviso: #9c6b14;
-  --color-fallo: #ae4436;
-  --color-acento: #12695c;
-
-  /* Alto de fila en densidad compacta: 50 filas por panel en 1080 px. */
-  --spacing-fila: 18px;
+:root {
+  --field-bg: #ffffff;
+  --field-fg: #0b1520;
+  --field-line: #d7e0e8;
 }
 
 html,
@@ -35,19 +117,132 @@ body,
 
 body {
   margin: 0;
-  background: var(--color-chrome);
-  color: var(--color-tinta);
-  font-family: 'Segoe UI', system-ui, sans-serif;
-  font-size: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
-  /* Aplicacion de escritorio: no hay seleccion accidental de texto ni rebote. */
+  /* Aplicación de escritorio: sin selección accidental de texto ni rebote. */
   user-select: none;
   overflow: hidden;
 }
 
-/* Las cifras se comparan en columna: digitos de ancho fijo, siempre. */
-.cifra {
-  font-family: 'Cascadia Mono', Consolas, ui-monospace, monospace;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
+button {
+  font-family: inherit;
+}
+
+a {
+  color: var(--brand-fg);
+}
+
+/*
+ * Estados de ratón y foco.
+ *
+ * El resto del diseño se traslada como estilos en línea, trazables uno a uno
+ * contra los tokens; `:hover` y `:focus` son lo único que no se puede expresar
+ * así, y por eso son las únicas clases del proyecto.
+ */
+.pcb-boton-barra:hover {
+  background: #ffffff26;
+}
+
+.pcb-boton-salir:hover {
+  background: #e0313126;
+  border-color: #e0313166;
+}
+
+.pcb-boton-herramienta:hover {
+  filter: brightness(0.97);
+}
+
+.pcb-boton-oscuro:hover {
+  filter: brightness(1.12);
+}
+
+.pcb-boton-acento:hover {
+  filter: brightness(1.1);
+}
+
+.pcb-boton-claro:hover {
+  background: var(--hover);
+}
+
+.pcb-boton-peligro:hover {
+  background: var(--alert-crit-bg);
+}
+
+.pcb-casilla:hover {
+  border-color: var(--brand-fill);
+}
+
+.pcb-fila-monitor:hover {
+  background: var(--hover);
+}
+
+.pcb-fila-historial:hover {
+  background: var(--hover);
+}
+
+.pcb-cerrar-aviso:hover {
+  background: #00000010;
+  color: var(--fg);
+}
+
+.pcb-campo:focus {
+  border-color: var(--brand-fill);
+}
+
+/*
+ * Esqueletos de carga.
+ *
+ * Una animación con @keyframes es, junto a :hover y :focus, lo otro que no se
+ * puede expresar como estilo en línea. El latido es lento y de poca amplitud a
+ * propósito: esta pantalla se mira durante horas, y un parpadeo marcado en
+ * cien casillas cansa la vista mucho antes de que terminen de cargar.
+ *
+ * Con `prefers-reduced-motion` el hueco se sigue viendo, pero deja de latir.
+ */
+@keyframes pcb-latido {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.pcb-esqueleto {
+  animation: pcb-latido 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pcb-esqueleto {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+
+/*
+ * Barras de desplazamiento discretas: la pantalla ya lleva mucha información y
+ * una barra ancha del sistema roba anchura útil a la rejilla de casillas.
+ */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-3);
+  background-clip: content-box;
 }

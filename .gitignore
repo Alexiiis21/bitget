@@ -8,11 +8,27 @@ npm-debug.log*
 # Datos de ejecucion del panel: credenciales cifradas, config, logs de sesion.
 # Nunca deben entrar al repositorio.
 datos/
+datos-staging/
 *.enc
 *.enc.bak
 
+# Credenciales de la cuenta demo de Bitget para los spikes de Fase 1 y las
+# pruebas de integracion. Ver .env.example para las claves esperadas.
+.env
+.env.local
+
+# `.env.development` y `.env.staging` SI se versionan: describen los entornos y
+# no contienen ni un secreto. Las credenciales de Bitget se dan de alta desde el
+# panel y viven cifradas en vault.enc, nunca en un archivo de texto.
+.env.*.local
+
 # Capturas de respuestas reales de Bitget sin anonimizar
 test/fixtures/raw/
+
+# Salida de scripts/crear-subcuentas.mjs: API Keys y secretos en claro de las
+# subcuentas recien creadas. Es la unica copia -Bitget no vuelve a mostrar una
+# secretKey-, asi que se importa al panel y se borra.
+subcuentas-generadas*.json
 
 .DS_Store
 Thumbs.db

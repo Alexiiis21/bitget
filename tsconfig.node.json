@@ -36,9 +36,13 @@
     "src/shared/**/*.ts",
     "test/unit/**/*.ts",
     "test/integration/**/*.ts",
+    "test/red/**/*.ts",
     "test/mock-exchange/**/*.ts",
+    "scripts/**/*.ts",
     "electron.vite.config.ts",
     "vitest.config.ts",
+    "vitest.staging.config.ts",
+    "vitest.importar.config.ts",
     "playwright.config.ts"
   ]
 }

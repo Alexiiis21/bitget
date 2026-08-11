@@ -206,11 +206,9 @@ invalida los vaults existentes.
       "passphrase": "xxxxxxxx",
       "altaEn": "2026-07-27T15:39:50.000Z",
       "permisos": {
-        "verificadoEn": "2026-07-27T15:39:52.410Z",
-        "trading": true,
-        "lectura": true,
-        "retiro": false,
-        "ipsPermitidas": ["189.x.x.x"]
+        "verificadoEn": "2026-07-28T08:25:55.000Z",
+        "authorities": ["coow", "cpow"],
+        "ipsPermitidas": []
       }
     }
   ]
@@ -219,8 +217,24 @@ invalida los vaults existentes.
 
 Reglas de manejo:
 
-- **`retiro: true` bloquea el alta.** La credencial se rechaza con un mensaje que explica
-  cómo corregir el permiso en Bitget. Es una defensa barata contra un error caro.
+- **Cualquier permiso no reconocido bloquea el alta.**
+
+  > **Corregido el 28 de julio de 2026, contra la API real.** Esta sección decía
+  > *«`retiro: true` bloquea el alta»*, dando por hecho que Bitget declara los permisos
+  > con nombres legibles. No es así: los declara como **códigos opacos de cuatro letras**
+  > —una key creada solo con permiso de Futuros devuelve `["coow","cpow"]`— y no publica
+  > su significado. Tampoco existe el endpoint que se suponía: `/api/v2/user/api-key-info`
+  > y `/api/v2/account/info` devuelven 40404. Los permisos salen de
+  > `/api/v2/spot/account/info`, que sí responde con una key de solo futuros.
+  >
+  > Con códigos que no se pueden interpretar, una lista negra **falla abierta**: un código
+  > de retiro ausente de la lista pasaría sin que nadie se entere. Por eso se invierte a
+  > **lista blanca**: solo se aceptan los códigos confirmados como inocuos y cualquier
+  > código desconocido rechaza la credencial. Falla cerrado, que es la misma regla que ya
+  > gobierna la clasificación de errores. Implementado en `src/main/bitget/verificacion.ts`.
+
+  El resultado para el cliente es el mismo que se le prometió —una key con permiso de
+  retiro no entra al sistema— y además cubre los permisos que aún no hemos catalogado.
 - El payload en claro vive en memoria del proceso principal mientras la sesión está
   abierta. Al bloquear, los búferes se sobrescriben con ceros.
 - Hacia el renderer solo viaja `apiKeyEnmascarada` (§8). El valor completo no cruza el

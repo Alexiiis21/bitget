@@ -8,6 +8,18 @@ import { defineConfig } from '@playwright/test';
  */
 delete process.env['ELECTRON_RUN_AS_NODE'];
 
+/*
+ * Igual que la suite de Vitest: el extremo a extremo no corre contra staging.
+ * Abre la aplicacion de verdad y opera sobre ella, de modo que en staging
+ * estaria pulsando botones sobre credenciales y cuentas reales.
+ */
+if (process.env['APP_ENV'] === 'staging') {
+  throw new Error(
+    'Las pruebas e2e no se ejecutan en staging: abren la aplicacion y operan sobre ella. ' +
+      'Ejecutelas sin APP_ENV, o con APP_ENV=dev.'
+  );
+}
+
 /**
  * Pruebas de extremo a extremo sobre la aplicacion empaquetada.
  * Nunca apuntan a la API real de Bitget: el exchange simulado de

@@ -1,11 +1,25 @@
 import { join } from 'node:path';
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, shell } from 'electron';
 import { MOSAICO_ALTO_MIN, MOSAICO_ANCHO_MIN } from '@shared/constants';
-import type { EstadoApp, InfoSistema } from '@shared/ipc-contract';
-import type { Cuenta, FilaMonitor, Grupo } from '@shared/types';
-import { carpetaDatos, esPortable } from './storage/paths';
+import { entorno, esStaging } from '@shared/entorno';
+import { ClienteBitget } from './bitget/rest/client';
+import { SupervisorReconexion } from './execution/supervisor-reconexion';
+import { registrarIpc } from './ipc/handlers';
+import { Sesion } from './ipc/sesion';
+import { cargarInstancia } from './storage/instancia';
+import { fijarCarpetaDeEntorno, rutas } from './storage/paths';
+
+/*
+ * Lo primero de todo, antes del cerrojo de instancia unica y antes de que
+ * Electron escriba nada: cada entorno tiene su propia carpeta de datos, y por
+ * tanto su propio vault y su propia contraseña maestra. docs/03 seccion 3.
+ */
+fijarCarpetaDeEntorno();
 
 let ventana: BrowserWindow | null = null;
+let sesion: Sesion | null = null;
+let cliente: ClienteBitget | null = null;
+let supervisor: SupervisorReconexion | null = null;
 
 function crearVentana(): void {
   ventana = new BrowserWindow({
@@ -54,35 +68,6 @@ function crearVentana(): void {
   else void ventana.loadFile(join(__dirname, '../renderer/index.html'));
 }
 
-/* ---------------- manejadores de IPC ---------------- */
-
-function registrarIpc(): void {
-  ipcMain.handle('sistema:info', (): InfoSistema => ({
-    appVersion: app.getVersion(),
-    instanciaId: 'inst-pendiente',
-    instanciaNombre: 'Sistema 1',
-    portable: esPortable(),
-    carpetaDatos: carpetaDatos(),
-    electron: process.versions.electron,
-    node: process.versions.node
-  }));
-
-  ipcMain.handle('sistema:estado', (): EstadoApp => ({
-    vault: 'sin-inicializar',
-    pinIntentosRestantes: null,
-    cuentasRegistradas: 0,
-    cuentasConectadas: 0,
-    socketsCalientes: 0
-  }));
-
-  ipcMain.handle('cuentas:listar', (): { grupos: Grupo[]; cuentas: Cuenta[] } => ({
-    grupos: [],
-    cuentas: []
-  }));
-
-  ipcMain.handle('monitor:instantanea', (): FilaMonitor[] => []);
-}
-
 /* ---------------- ciclo de vida ---------------- */
 
 /*
@@ -98,8 +83,44 @@ if (!app.requestSingleInstanceLock()) {
     ventana.focus();
   });
 
-  void app.whenReady().then(() => {
-    registrarIpc();
+  void app.whenReady().then(async () => {
+    const r = rutas();
+    const instancia = await cargarInstancia(r.instancia);
+
+    /*
+     * Staging se anuncia al arrancar. Dev no: es el caso por defecto y un aviso
+     * que sale siempre deja de leerse. Cuando alguien pregunte «¿esto son datos
+     * reales?», la respuesta tiene que estar en el log y no en la memoria de
+     * nadie.
+     */
+    if (esStaging()) {
+      console.warn(`[PCB] entorno=${entorno()} — API real de Bitget. Datos en: ${r.base}`);
+    }
+
+    /*
+     * Un solo cliente para todo el proceso: el limite de peticiones de Bitget
+     * es por IP, y dos clientes con dos limitadores se pisarian el cupo.
+     * docs/01 seccion 8.
+     */
+    cliente = new ClienteBitget();
+    sesion = new Sesion({ vault: r.vault, cuentas: r.cuentas }, cliente);
+
+    /*
+     * El reintento automatico de las cuentas caidas. Late desde el arranque y
+     * no se para al bloquear el panel: mientras no haya vault abierto, cada
+     * ciclo comprueba `operativa()` y no hace nada. Sin esto, `proximoIntento`
+     * seria un calculo que nadie lee y una cuenta caida solo volveria si el
+     * operador pulsa el boton. RNF-004.
+     */
+    supervisor = new SupervisorReconexion(sesion, {
+      alFallar: (cuentaId, error) => {
+        const detalle = error instanceof Error ? error.message : String(error);
+        console.warn(`[PCB] reintento fallido en ${cuentaId}: ${detalle}`);
+      }
+    });
+    supervisor.iniciar();
+
+    registrarIpc(sesion, instancia);
     crearVentana();
 
     app.on('activate', () => {
@@ -107,7 +128,18 @@ if (!app.requestSingleInstanceLock()) {
     });
   });
 
-  app.on('window-all-closed', () => app.quit());
+  /*
+   * Al cerrar se borra de memoria la clave derivada y las credenciales en
+   * claro. No es cosmetico: un volcado del proceso tras el cierre no debe
+   * contener las claves de cien cuentas.
+   */
+  app.on('window-all-closed', () => {
+    /* Primero el latido: que no arranque un reintento sobre un vault que se esta cerrando. */
+    supervisor?.detener();
+    sesion?.cerrar();
+    void cliente?.cerrar();
+    app.quit();
+  });
 }
 
 /* Sin telemetria, sin llamadas de red fuera de Bitget. docs/01 seccion 7. */

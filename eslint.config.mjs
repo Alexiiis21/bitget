@@ -67,9 +67,24 @@ export default tseslint.config(
     rules: { '@typescript-eslint/no-explicit-any': 'off', 'no-console': 'off' }
   },
 
+  /* ---------------- utilidades de linea de comandos ---------------- */
+  {
+    /*
+     * Los scripts de `scripts/` son herramientas de operador: se ejecutan a mano
+     * desde una terminal y su salida por consola *es* la interfaz. De ahi que
+     * `no-console` no aplique aqui, al reves que en el proceso principal.
+     */
+    files: ['scripts/**/*.{ts,mjs,js}'],
+    languageOptions: {
+      globals: { ...globals.node },
+      parserOptions: { ecmaVersion: 2023, sourceType: 'module' }
+    },
+    rules: { 'no-console': 'off' }
+  },
+
   /* ---------------- archivos de configuracion ---------------- */
   {
-    files: ['*.config.{ts,js}', 'eslint.config.js'],
+    files: ['*.config.{ts,js,mjs}', 'eslint.config.js'],
     languageOptions: { globals: { ...globals.node } },
     rules: { 'no-console': 'off' }
   }
