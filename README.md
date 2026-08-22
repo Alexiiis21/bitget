@@ -4,8 +4,11 @@ Aplicación de escritorio para Windows que centraliza la ejecución de acciones 
 múltiples cuentas de Bitget (futuros USDT-M) mediante su API oficial, desde una sola
 interfaz.
 
-**Estado: Fase 1 — diseño y arquitectura.** El esqueleto arranca y la cadena de procesos
-está verificada; todavía no hay conexión con Bitget.
+**Estado: Fase 4 operable desde la pantalla.** Las seis funciones —abrir, cerrar, poner y quitar
+Take Profit, agregar margen y ajustar apalancamiento— se manejan con el ratón y sobre datos reales
+de Bitget: catálogo de activos, precios y saldos. Ninguna envía nada sin que el operador apruebe
+antes la lista concreta de lo que va a pasar en cada casilla. Las posiciones en vivo (Fase 6) son
+de una fase posterior; ver [`docs/00-fase-4-pantalla.md`](docs/00-fase-4-pantalla.md).
 
 ## Requisitos
 
@@ -16,20 +19,29 @@ está verificada; todavía no hay conexión con Bitget.
 
 ```bash
 npm install
-npm run dev          # abre la aplicación con recarga en caliente
+npm run dev          # datos de demostración, sin salir a la red
+npm run dev:staging  # API real de Bitget, vault real, carpeta de datos propia
 ```
+
+Las pruebas contra la API real necesitan un `.env` con las claves de la cuenta demo; ver
+[`.env.example`](.env.example).
 
 ## Comandos
 
 | Comando | Qué hace |
 |---|---|
 | `npm run dev` | Aplicación en desarrollo, con recarga en caliente |
+| `npm run dev:staging` | Igual, contra la API real de Bitget. [ADR 0007](docs/adr/0007-entorno-staging-sin-docker.md) |
 | `npm run typecheck` | `tsc --noEmit` sobre los dos proyectos (node y web) |
 | `npm run lint` | ESLint, cero avisos tolerados |
 | `npm run format` | Prettier sobre `src/` y `test/` |
-| `npm test` | Pruebas unitarias y de integración (Vitest) |
+| `npm test` | Pruebas unitarias, de integración y del store, sin salir a la red (Vitest) |
 | `npm run test:coverage` | Lo anterior más informe de cobertura |
+| `npm run test:red` | Pruebas contra `api.bitget.com`. Requiere `.env` |
+| `npm run test:staging` | Las mismas, con el código compilado como staging |
+| `npm run test:fisica` | **Envía órdenes reales** al mercado simulado de Bitget. QA de aceptación del panel entero: [Fase 4](docs/00-fase-4-pantalla.md) |
 | `npm run test:e2e` | Compila y ejecuta la prueba de humo sobre la app real |
+| `npm run importar:subcuentas` | Carga al panel las subcuentas de `scripts/crear-subcuentas.mjs` |
 | `npm run build` | Typecheck + compilación de los tres bundles |
 | `npm run package:portable` | Genera `release/PCB-<version>-portable.exe` |
 
@@ -40,8 +52,9 @@ src/main/       Proceso principal: TODO el I/O, la red y los secretos
 src/preload/    Puente tipado, superficie mínima (contextBridge)
 src/renderer/   Interfaz React. Sin acceso a Node, a disco ni a la red
 src/shared/     Tipos y contrato de IPC compartidos por los tres procesos
-test/           unit · integration · e2e · mock-exchange · fixtures
+test/           unit · integration · renderer · red · fisica · e2e · mock-exchange
 docs/           Entregables de diseño y registro de decisiones (ADR)
+scripts/        Herramientas de alta masiva de subcuentas (no entran en el bundle)
 ```
 
 `src/main/` está organizado por **capacidad técnica** (bitget, execution, domain,
@@ -57,6 +70,8 @@ filtró lógica hacia el renderer.
 - **Las cantidades monetarias son cadenas**, nunca `number`. La aritmética pasa por
   decimal.js.
 - **Los secretos no cruzan el IPC.** El renderer solo ve `bg••••4f2a`.
+- **Ninguna credencial se guarda sin que Bitget la acepte antes**, y cualquier permiso que
+  el panel no reconozca la rechaza: se falla cerrado.
 - **Cero dependencias nativas.** El ejecutable portable se compila en cualquier máquina
   sin toolchain de C++.
 
@@ -64,6 +79,16 @@ filtró lógica hacia el renderer.
 
 | Documento | Contenido |
 |---|---|
+| [`docs/00-entrega-fase-1.md`](docs/00-entrega-fase-1.md) | Entrega de la Fase 1: diseño y arquitectura |
+| [`docs/00-entrega-fase-2.md`](docs/00-entrega-fase-2.md) | Entrega de la Fase 2: integración con la API de Bitget |
+| [`docs/00-entrega-fase-3.md`](docs/00-entrega-fase-3.md) | Entrega de la Fase 3: administración de cuentas, con guion de validación |
+| [`docs/00-fase-4-apertura.md`](docs/00-fase-4-apertura.md) | Fase 4, función 1: apertura de operaciones |
+| [`docs/00-fase-4-cierre.md`](docs/00-fase-4-cierre.md) | Fase 4, función 2: cierre de operaciones, con guía de prueba física |
+| [`docs/00-fase-4-take-profit.md`](docs/00-fase-4-take-profit.md) | Fase 4, función 3: Take Profit por porcentaje |
+| [`docs/00-fase-4-margen-apalancamiento.md`](docs/00-fase-4-margen-apalancamiento.md) | Fase 4, funciones 4 y 5: agregar margen y apalancamiento |
+| [`docs/00-fase-4-pantalla.md`](docs/00-fase-4-pantalla.md) | Fase 4: las seis funciones conectadas a la pantalla, con la prueba de QA |
+| [`docs/00-resumen-para-daniel.md`](docs/00-resumen-para-daniel.md) | Resumen para el cliente: lo que dijo y cómo quedó |
+| [`docs/cotizacion-traspasos-entre-subcuentas.md`](docs/cotizacion-traspasos-entre-subcuentas.md) | Propuesta y estimación: traspaso de saldo entre subcuentas |
 | [`docs/01-stack-tecnologico.md`](docs/01-stack-tecnologico.md) | Stack, hallazgos sobre la API de Bitget, pool de sockets, cola de ejecución |
 | [`docs/02-arquitectura.html`](docs/02-arquitectura.html) | Arquitectura técnica, flujo de una operación, estados de un lote |
 | [`docs/03-modelo-de-datos.md`](docs/03-modelo-de-datos.md) | Esquema de cada archivo, cifrado, órdenes indeterminadas |

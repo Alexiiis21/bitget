@@ -29,6 +29,8 @@ function primeraEntrada(
 export function AccordeonMonitor({ cuenta }: { cuenta: Account }) {
   const posiciones = usarPanel((s) => s.posiciones);
   const abrirDetalle = usarPanel((s) => s.abrirDetalle);
+  const cargaPosiciones = usarPanel((s) => s.cargaPosiciones);
+  const motivoPosiciones = usarPanel((s) => s.motivoPosiciones);
 
   const vivas = cuenta.subAccounts
     .map((sub) => ({
@@ -37,6 +39,19 @@ export function AccordeonMonitor({ cuenta }: { cuenta: Account }) {
       short: posiciones.find((p) => p.subAccountId === sub.id && p.side === 'short' && p.actions.oe)
     }))
     .filter((v) => v.long || v.short);
+
+  /*
+   * «No hay posiciones abiertas» y «no se sabe si las hay» son cosas distintas
+   * y piden reacciones opuestas del operador. La lista vacía solo puede
+   * afirmarse cuando el flujo de posiciones está vivo.
+   */
+  if (cargaPosiciones === 'error') {
+    return (
+      <div style={{ padding: '10px 12px', fontSize: 10.5, color: T.texto3 }}>
+        No hay datos de posiciones: {motivoPosiciones ?? 'el flujo en vivo no está disponible.'}
+      </div>
+    );
+  }
 
   if (vivas.length === 0) {
     return <div style={{ padding: '10px 12px', fontSize: 10.5, color: T.texto3 }}>Ninguna subcuenta de esta cuenta tiene posición abierta en este momento.</div>;

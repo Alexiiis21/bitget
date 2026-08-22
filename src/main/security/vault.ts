@@ -18,7 +18,7 @@
  *
  * Cuesta 60 bytes y convierte un susto en un mensaje claro.
  */
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { registrarSecreto } from './redact';
@@ -79,9 +79,40 @@ export const esquemaCredencialGuardada = z.object({
 
 export type CredencialGuardada = z.infer<typeof esquemaCredencialGuardada>;
 
+/**
+ * La contrasena de paso, guardada como derivacion y nunca en claro.
+ *
+ * Vive **dentro del payload cifrado** y no en un archivo aparte, y eso es una
+ * decision de seguridad, no de comodidad: la contrasena de paso protege el
+ * envio de ordenes, que solo es posible con el almacen abierto. Guardarla fuera
+ * la dejaria legible con el panel bloqueado, es decir, expuesta justo cuando no
+ * hay nadie delante.
+ *
+ * Se deriva con los mismos parametros scrypt que la maestra. Es cara a
+ * proposito -~0,5 s-, que para una contrasena corta es la unica defensa real
+ * contra probarlas todas.
+ */
+const esquemaPaso = z.object({
+  /**
+   * Los parametros con los que se derivo, guardados enteros.
+   *
+   * No basta con el salt: si el almacen cambiara de coste -otra version, otra
+   * maquina- comprobar con los parametros de hoy contra una derivacion hecha
+   * con los de ayer daria «contrasena incorrecta» sin que nadie entendiera por
+   * que. Guardandolos, la comprobacion siempre reproduce lo que se hizo.
+   */
+  kdf: esquemaKdf,
+  derivada: z.string(),
+  fijadaEn: z.string()
+});
+
+type PasoGuardado = z.infer<typeof esquemaPaso>;
+
 const esquemaPayload = z.object({
   version: z.number().int().positive(),
-  credenciales: z.array(esquemaCredencialGuardada)
+  credenciales: z.array(esquemaCredencialGuardada),
+  /** Ausente en almacenes creados antes de que existiera la contrasena de paso. */
+  paso: esquemaPaso.nullish()
 });
 
 /* ---------- errores ---------- */
@@ -144,18 +175,21 @@ export class Vault {
   private clave: Buffer | null;
   private kdf: ParametrosKdf;
   private credenciales: CredencialGuardada[];
+  private paso: PasoGuardado | null;
   private cerrado = false;
 
   private constructor(
     ruta: string,
     clave: Buffer,
     kdf: ParametrosKdf,
-    credenciales: CredencialGuardada[]
+    credenciales: CredencialGuardada[],
+    paso: PasoGuardado | null = null
   ) {
     this.ruta = ruta;
     this.clave = clave;
     this.kdf = kdf;
     this.credenciales = credenciales;
+    this.paso = paso;
     for (const c of credenciales) this.marcarSecretos(c);
   }
 
@@ -258,7 +292,7 @@ export class Vault {
     }
     borrar(claro);
 
-    return new Vault(ruta, clave, archivo.kdf, payload.credenciales);
+    return new Vault(ruta, clave, archivo.kdf, payload.credenciales, payload.paso ?? null);
   }
 
   /**
@@ -352,6 +386,61 @@ export class Vault {
   }
 
   /** Baja por cuenta. Devuelve `true` si habia algo que borrar. */
+  /* ---- contrasena de paso ---- */
+
+  /** Hay una contrasena de paso fijada. */
+  tienePaso(): boolean {
+    return this.paso !== null;
+  }
+
+  /**
+   * Fija o cambia la contrasena de paso. No se guarda en claro en ningun sitio.
+   *
+   * No persiste por su cuenta: como el resto del almacen, se escribe con
+   * `guardar()`. Asi una sola escritura deja el archivo coherente.
+   */
+  async fijarPaso(contrasena: string): Promise<void> {
+    this.exigirAbierto();
+    /* El mismo coste que la maestra: mas barata seria el eslabon debil. */
+    const kdf = nuevosParametros({
+      N: this.kdf.N,
+      r: this.kdf.r,
+      p: this.kdf.p,
+      longitudClave: this.kdf.longitudClave,
+      salt: randomBytes(16).toString('base64')
+    });
+    const derivada = await derivarClave(contrasena, kdf);
+    this.paso = { kdf, derivada: derivada.toString('base64'), fijadaEn: new Date().toISOString() };
+    borrar(derivada);
+  }
+
+  /**
+   * ¿Es esta la contrasena de paso?
+   *
+   * --------------------------------------------------------------------------
+   * Sin contrasena fijada, la respuesta es `false`, nunca `true`
+   * --------------------------------------------------------------------------
+   * La tentacion es dejar pasar cuando no hay ninguna configurada, «porque no
+   * hay nada que comprobar». Eso convierte el freno en un adorno: un almacen sin
+   * paso enviaria ordenes sin confirmacion alguna. Se responde que no, y quien
+   * llama decide si eso significa «configurela primero» o «no aplica».
+   *
+   * La comparacion es en tiempo constante. Aqui no protege gran cosa -son
+   * milisegundos frente a los ~500 ms de la derivacion- pero comparar hashes con
+   * `===` es la clase de descuido que se copia a sitios donde si importa.
+   */
+  async comprobarPaso(contrasena: string): Promise<boolean> {
+    this.exigirAbierto();
+    if (this.paso === null) return false;
+
+    const derivada = await derivarClave(contrasena, this.paso.kdf);
+    const guardada = Buffer.from(this.paso.derivada, 'base64');
+
+    const igual = derivada.length === guardada.length && timingSafeEqual(derivada, guardada);
+    borrar(derivada, guardada);
+    return igual;
+  }
+
   eliminar(cuentaId: string): boolean {
     this.exigirAbierto();
     const indice = this.credenciales.findIndex((c) => c.cuentaId === cuentaId);
@@ -372,7 +461,7 @@ export class Vault {
     const clave = this.exigirAbierto();
 
     const payload = Buffer.from(
-      JSON.stringify({ version: VERSION_ACTUAL, credenciales: this.credenciales }),
+      JSON.stringify({ version: VERSION_ACTUAL, credenciales: this.credenciales, paso: this.paso }),
       'utf8'
     );
 

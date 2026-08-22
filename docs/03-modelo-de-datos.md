@@ -337,7 +337,7 @@ vacías hasta desbloquear.
 
 ```json
 {
-  "version": 1,
+  "version": 3,
   "grupos": [
     { "id": "grp_1", "nombre": "Cuenta Madre 1", "orden": 1, "colapsado": false, "color": "#0E7C86" }
   ],
@@ -346,7 +346,8 @@ vacías hasta desbloquear.
       "id": "acc_3Xz1",
       "grupoId": "grp_1",
       "etiqueta": "Sub 01",
-      "uid": "8492013",
+      "uid": "5476143713",
+      "uidPadre": "1513226215",
       "credencialId": "cred_9fK2mA",
       "apiKeyEnmascarada": "bg••••4f2a",
       "orden": 1,
@@ -363,6 +364,8 @@ vacías hasta desbloquear.
 
 | Campo | Por qué está |
 |---|---|
+| `uid` | UID que Bitget asigna a la subcuenta (`bitget_uid`). **Es la identidad del registro**: sobrevive al cambio de API Key y al cambio de nombre, y por él se reconoce una subcuenta que se vuelve a dar de alta en vez de duplicarla. Lo devuelve `/api/v2/spot/account/info` al validar; el operador no lo escribe |
+| `uidPadre` | UID de la cuenta principal (`bitget_parent_uid`), del campo `parentId` de la misma respuesta. Bitget lo envía como **número** y aquí se guarda como cadena: es un identificador, no una cantidad, y mezclar los dos tipos haría fallar la comparación en silencio. Cadena vacía si la cuenta no es subcuenta de nadie |
 | `grupoId` + `orden` | Resuelve el requisito 5: *"seleccionar todas y todas las subcuentas"*. La jerarquía es explícita y persistente, no se infiere de un nombre |
 | `modoPosicion` | Hallazgo 3 (§1). Si es `unilateral`, la cuenta se marca y se avisa |
 | `modoMargen` | `agregar margen` solo existe en aislado. Con este campo el selector puede deshabilitar las cuentas cruzadas **con el motivo visible**, antes de intentar la operación |

@@ -22,9 +22,12 @@
 import { create } from 'zustand';
 import type {
   Account,
-  ActionKey,
   Asset,
+  BatchPlan,
+  BatchResult,
+  BatchTarget,
   ClosedPosition,
+  PlanKind,
   Position,
   Side
 } from '@shared/domain/panel-view';
@@ -33,7 +36,6 @@ import { NotImplementedError } from '@shared/ports/panel-service';
 import { panelService } from '@/services/panel-service';
 import { casillas } from '@/lib/formato';
 import type {
-  AccionPendiente,
   AlcanceLado,
   Aviso,
   FormularioApiKey,
@@ -84,9 +86,9 @@ const temaInicial = (): 'light' | 'dark' => {
 };
 
 let secuenciaAviso = 0;
-let temporizadorMensaje: ReturnType<typeof setTimeout> | undefined;
 let cancelarPrecios: (() => void) | undefined;
 let cancelarPosiciones: (() => void) | undefined;
+let cancelarCuentas: (() => void) | undefined;
 
 export interface EstadoPanel {
   /* ---- sesión ---- */
@@ -108,6 +110,13 @@ export interface EstadoPanel {
   valoresFijos: boolean;
   tipoOrden: 'market' | 'limit';
   limitPrice: string;
+  /**
+   * Línea de estado de la barra lateral.
+   *
+   * Dice qué está haciendo el panel mientras dura: «revisando 34 casillas…».
+   * No es un mensaje de éxito —eso lo cuenta el informe del lote— sino la
+   * señal de que la pantalla está esperando a Bitget y no se ha quedado colgada.
+   */
   mensaje: string;
 
   /* ---- datos ---- */
@@ -117,10 +126,28 @@ export interface EstadoPanel {
   historial: Record<string, ClosedPosition[]>;
   apiKeys: ApiKeyRow[];
   formulario: FormularioApiKey;
+  /**
+   * Lo que Bitget contesto en la ultima alta correcta.
+   *
+   * Vive aqui y no en el componente porque es la prueba de que el UID se
+   * detecto solo: el operador no lo escribio en ninguna parte. Se borra en
+   * cuanto vuelve a tocar el formulario, para que no se confunda con el alta
+   * siguiente.
+   */
+  ultimaValidacion: { etiqueta: string; uid: string; uidPadre: string } | null;
 
   /* ---- carga de cada sección ---- */
   cargaCuentas: EstadoCarga;
   motivoCuentas: string | null;
+  /**
+   * Carga del flujo de posiciones, aparte del de cuentas.
+   *
+   * Son dos fuentes distintas y de fases distintas: la matriz puede estar viva
+   * mientras las posiciones todavía no existen. Mezclarlas hacía que la falta
+   * de una vaciara la otra.
+   */
+  cargaPosiciones: EstadoCarga;
+  motivoPosiciones: string | null;
   cargaApis: EstadoCarga;
   motivoApis: string | null;
   /** Por `accountId`: el historial se pide al desplegar el acordeón de cada cuenta. */
@@ -134,9 +161,32 @@ export interface EstadoPanel {
   /* ---- pantallas superpuestas ---- */
   apisAbierto: boolean;
   detalle: { accountId: string; subAccountId: string } | null;
-  batch: import('@shared/domain/panel-view').BatchResult | null;
+  batch: BatchResult | null;
   /** Repite el último lote, acotado a sus objetivos fallidos. `null` si el último lote no tuvo fallos o no es repetible. */
   reintentarFallidas: (() => Promise<void>) | null;
+
+  /* ---- plan pendiente de aprobación ---- */
+  /**
+   * Lo que se va a enviar, ya calculado por el proceso principal.
+   *
+   * Mientras esto no sea `null`, hay un diálogo abierto y **no ha salido
+   * ninguna orden**. El plan vive en el proceso principal; aquí solo está su
+   * copia para dibujarla, y confirmar devuelve únicamente su `id`.
+   */
+  plan: BatchPlan | null;
+  /** Planificando: la pantalla está esperando precios y saldos de Bitget. */
+  planCargando: boolean;
+  /** Enviando el lote aprobado. Bloquea un segundo clic sobre el mismo plan. */
+  enviando: boolean;
+  /**
+   * Operaciones encadenadas que faltan por aprobar.
+   *
+   * «Aplicar todo» son tres operaciones distintas, no una: Take Profit, margen
+   * y apalancamiento van a Bitget por caminos separados. Se aprueban de una en
+   * una, con su plan a la vista, porque juntarlas en una sola confirmación
+   * significaría aprobar a ciegas dos de las tres.
+   */
+  cola: PlanKind[];
 
   /* ---- seguridad ---- */
   seguridadAbierta: boolean;
@@ -146,8 +196,7 @@ export interface EstadoPanel {
   pasoNuevo: string;
   pasoNuevo2: string;
 
-  /* ---- confirmación de apertura ---- */
-  pendiente: AccionPendiente | null;
+  /* ---- confirmación de la operación ---- */
   pinPaso: string;
   errorPaso: string;
   intentosPaso: number;
@@ -174,16 +223,21 @@ export interface EstadoPanel {
   objetivosSeleccionados: () => { subAccountId: string; side: Side }[];
   alternarCuenta: (accountId: string) => void;
   alternarCasilla: (accountId: string, lado: 'selLong' | 'selShort', indice: number) => void;
+  seleccionarTodo: () => void;
+  limpiarSeleccion: () => void;
 
-  aplicarHerramienta: (clave: ActionKey, campo: keyof ValoresHerramientas, etiqueta: string) => Promise<void>;
-  aplicarTodo: () => Promise<void>;
+  /** Calcula qué pasaría. No envía nada. */
+  planear: (kind: PlanKind) => Promise<void>;
+  /** Encadena varias operaciones, aprobándolas de una en una. */
+  planearVarios: (kinds: PlanKind[]) => Promise<void>;
+  /** Aprueba el plan en pantalla y lo envía. */
+  confirmarPlan: () => Promise<void>;
+  /** Envía un plan, opcionalmente acotado a unas casillas: el reintento. */
+  enviarPlan: (plan: BatchPlan, soloEstos?: BatchTarget[]) => Promise<void>;
+  cancelarPlan: () => void;
   reintentarMargenCuenta: (accountId: string) => Promise<void>;
-  pedirPaso: () => void;
-  cerrarSeleccionados: () => Promise<void>;
   cerrarLote: () => void;
   escribirPin: (v: string) => void;
-  confirmarPaso: () => Promise<void>;
-  cancelarPaso: () => void;
 
   abrirApis: () => void;
   cerrarApis: () => void;
@@ -211,6 +265,55 @@ export interface EstadoPanel {
   cerrarAviso: (id: string) => void;
 }
 
+/** Cómo se llama cada operación en los avisos y en el diálogo. */
+const TITULOS: Record<PlanKind, string> = {
+  open: 'Abrir posiciones',
+  close: 'Cerrar posiciones',
+  tp: 'Take Profit',
+  'tp-remove': 'Quitar Take Profit',
+  margin: 'Margen adicional',
+  leverage: 'Apalancamiento'
+};
+
+/**
+ * Qué campo del formulario necesita cada operación, o `null` si ninguno.
+ *
+ * Cerrar y quitar el Take Profit no llevan valor: actúan sobre lo que ya hay.
+ */
+const CAMPO_DE: Record<PlanKind, keyof ValoresHerramientas | null> = {
+  open: 'mgi',
+  close: null,
+  tp: 'tp',
+  'tp-remove': null,
+  margin: 'mga',
+  leverage: 'ap'
+};
+
+/**
+ * Las operaciones que piden además la contraseña de paso.
+ *
+ * Solo la apertura, que es la que compromete dinero nuevo y la única con este
+ * freno en el pliego (docs/04 W-09). Las demás se aprueban con el plan a la
+ * vista, que ya impide enviar algo distinto de lo aprobado.
+ */
+const PIDE_PASO = new Set<PlanKind>(['open']);
+
+/**
+ * Qué campos se vacían tras enviar, salvo que estén fijados.
+ *
+ * El apalancamiento nunca se borra: el operador lo deja puesto porque casi
+ * siempre repite el mismo. Los importes sí, para que un lote no herede por
+ * descuido la cantidad del anterior.
+ */
+const LIMPIA_TRAS: Record<PlanKind, Partial<ValoresHerramientas>> = {
+  open: { mgi: '' },
+  close: {},
+  tp: { tp: '' },
+  'tp-remove': {},
+  margin: { mga: '' },
+  leverage: {}
+};
+
 export const usarPanel = create<EstadoPanel>()((set, get) => ({
   pantalla: 'login',
   contrasena: '',
@@ -236,9 +339,12 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   historial: {},
   apiKeys: [],
   formulario: FORMULARIO_VACIO,
+  ultimaValidacion: null,
 
   cargaCuentas: 'inicial',
   motivoCuentas: null,
+  cargaPosiciones: 'inicial',
+  motivoPosiciones: null,
   cargaApis: 'inicial',
   motivoApis: null,
   cargaHistorial: {},
@@ -251,6 +357,10 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   detalle: null,
   batch: null,
   reintentarFallidas: null,
+  plan: null,
+  planCargando: false,
+  enviando: false,
+  cola: [],
 
   seguridadAbierta: false,
   etapaSeguridad: 'maestra',
@@ -259,7 +369,6 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   pasoNuevo: '',
   pasoNuevo2: '',
 
-  pendiente: null,
   pinPaso: '',
   errorPaso: '',
   intentosPaso: 0,
@@ -271,7 +380,13 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   iniciar: async () => {
     try {
       const [info, activos] = await Promise.all([panelService.getSystemInfo(), panelService.listAssets()]);
-      set({ numeroPanel: info.panelNumber, activos, activoId: activos[0]?.id ?? 'BTC' });
+      const primero = activos[0];
+      set((estado) => ({
+        numeroPanel: info.panelNumber,
+        activos,
+        activoId: primero?.id ?? 'BTC',
+        valores: { ...estado.valores, ap: primero === undefined ? estado.valores.ap : String(primero.maxLeverage) }
+      }));
     } catch {
       /* Sin catálogo de activos el selector se queda vacío; no bloquea el login. */
     }
@@ -310,8 +425,15 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       try {
         const cuentas = await panelService.getAccounts();
         set({ cuentas, cargaCuentas: 'listo', motivoCuentas: null });
-        cancelarPosiciones?.();
-        cancelarPosiciones = panelService.subscribePositions((snap) => set({ posiciones: snap.positions }));
+
+        /*
+         * A partir de aquí la matriz se mantiene sola. El estado de conexión lo
+         * mueve el proceso principal en segundo plano, y sin esta suscripción
+         * la pantalla se quedaría con la foto del desbloqueo: una cuenta que
+         * reconecta seguiría en rojo y una que se cae, en verde. RF-002.
+         */
+        cancelarCuentas?.();
+        cancelarCuentas = panelService.subscribeAccounts((frescas) => set({ cuentas: frescas }));
       } catch (e) {
         /*
          * El motivo se guarda además de avisar: el aviso emergente se va solo a
@@ -321,6 +443,23 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
          */
         set({ cargaCuentas: 'error', motivoCuentas: textoDeError(e) });
         avisar('error', 'Sin datos de cuentas', textoDeError(e), 'PCB');
+      }
+
+      /*
+       * Las posiciones son otra fuente y otra fase -llegan por WebSocket en la
+       * Fase 6-. Se suscriben aparte a propósito: cuando no existen todavía, la
+       * matriz de cuentas tiene que seguir en pie. Antes compartían el mismo
+       * `try` y el fallo de esta línea dejaba la pantalla vacía con un error que
+       * no era el suyo.
+       */
+      set({ cargaPosiciones: 'cargando', motivoPosiciones: null });
+      try {
+        cancelarPosiciones?.();
+        cancelarPosiciones = panelService.subscribePositions((snap) =>
+          set({ posiciones: snap.positions, cargaPosiciones: 'listo', motivoPosiciones: null })
+        );
+      } catch (e) {
+        set({ cargaPosiciones: 'error', motivoPosiciones: textoDeError(e), posiciones: [] });
       }
 
       await refrescarApis();
@@ -339,13 +478,14 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   bloquear: () => {
     cancelarPosiciones?.();
     cancelarPosiciones = undefined;
+    cancelarCuentas?.();
+    cancelarCuentas = undefined;
     set({
       pantalla: 'login',
       contrasena: '',
       errorContrasena: '',
       apisAbierto: false,
       seguridadAbierta: false,
-      pendiente: null,
       detalle: null,
       avisos: [],
       apiKeys: [],
@@ -357,6 +497,8 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       /* Al bloquear se vuelve al punto de partida: nada pedido, nada sabido. */
       cargaCuentas: 'inicial',
       motivoCuentas: null,
+      cargaPosiciones: 'inicial',
+      motivoPosiciones: null,
       cargaApis: 'inicial',
       motivoApis: null,
       cargaHistorial: {},
@@ -380,7 +522,24 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
   /* ---------------- barra lateral ---------------- */
 
-  fijarActivo: (activoId) => set({ activoId }),
+  /**
+   * Cambiar de activo pone el apalancamiento en el máximo de ese activo.
+   *
+   * El cliente opera siempre al máximo y son topes distintos —BTC 150x, PEPE
+   * 75x, PAXG 50x, y otros en el mercado de pruebas—. El tope sale del catálogo
+   * de Bitget, así que acierta solo y se ajusta al mercado sin que nadie tenga
+   * que recordarlo.
+   *
+   * Es un valor de partida, no una imposición: el campo se sigue pudiendo
+   * escribir. Con «valores fijos» activado no se toca nada, porque ese
+   * interruptor significa justamente «no me cambies lo que escribí».
+   */
+  fijarActivo: (activoId) =>
+    set((s) => {
+      const activo = s.activos.find((a) => a.id === activoId);
+      if (activo === undefined || s.valoresFijos) return { activoId };
+      return { activoId, valores: { ...s.valores, ap: String(activo.maxLeverage) } };
+    }),
   fijarAlcance: (alcance) => set({ alcance }),
   fijarValor: (clave, v) => set((s) => ({ valores: { ...s.valores, [clave]: v } })),
   alternarValoresFijos: () => set((s) => ({ valoresFijos: !s.valoresFijos })),
@@ -442,94 +601,243 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       };
     }),
 
-  /* ---------------- acciones sobre la selección ---------------- */
+  /**
+   * Marca todas las casillas de todas las cuentas principales.
+   *
+   * El contrato pide poder operar «sobre una cuenta, varias o todas», y sin
+   * esto «todas» eran cinco pulsaciones -una por cuenta principal- justo en el
+   * momento en que el operador tiene menos tiempo.
+   */
+  seleccionarTodo: () =>
+    set((s) => ({
+      seleccion: Object.fromEntries(
+        s.cuentas.map((c) => [
+          c.id,
+          {
+            selLong: c.subAccounts.map(() => true),
+            selShort: c.subAccounts.map(() => true)
+          }
+        ])
+      )
+    })),
 
-  aplicarHerramienta: async (clave, campo, etiquetaBase) => {
-    const { objetivosSeleccionados, avisar, valores } = get();
+  /*
+   * Deja la selección vacía. Es la salida rápida después de un lote: sin ella
+   * hay que destildar a mano, y una casilla olvidada acaba recibiendo la
+   * siguiente acción sin que nadie lo pretendiera.
+   */
+  limpiarSeleccion: () => set({ seleccion: {} }),
+
+  /* ---------------- las seis operaciones, en dos fases ---------------- */
+
+  /**
+   * Calcula el plan de una operación. **No envía nada a Bitget.**
+   *
+   * Es la primera de las dos fases y la que sostiene la promesa del contrato:
+   * lo que el operador aprueba no es «abrir 100 USDT a 150x», sino la lista
+   * concreta de casillas con su cantidad, y las que se quedan fuera con su
+   * motivo. Si cancela el diálogo, no ha salido ni una orden.
+   *
+   * Planificar cuesta consultas —precio, saldo, posiciones— así que se
+   * comprueba antes lo que se puede comprobar sin gastar cupo: que haya
+   * casillas marcadas y que el campo tenga valor.
+   */
+  planear: async (kind) => {
+    const { objetivosSeleccionados, avisar, valores, activoId, activos, tipoOrden, limitPrice } = get();
     const targets = objetivosSeleccionados();
+    const titulo = TITULOS[kind];
+
     if (targets.length === 0) {
-      avisar('aviso', 'Ninguna casilla seleccionada', 'Marque al menos una casilla sobre los números 1–20 antes de aplicar la acción.', `PCB · ${etiquetaBase}`);
+      avisar('aviso', 'Ninguna casilla seleccionada', 'Marque al menos una casilla sobre los números 1–20 antes de continuar.', `PCB · ${titulo}`);
       return;
     }
 
-    const valor = valores[campo];
-    if (valor.trim() === '') {
-      avisar('aviso', 'Campo vacío', `Escriba un valor en ${etiquetaBase} antes de aplicarlo.`, `PCB · ${etiquetaBase}`);
+    const activo = activos.find((a) => a.id === activoId);
+    if (!activo) {
+      avisar('error', 'Sin activo', 'No hay ningún activo seleccionado. Vuelva a abrir el panel si la lista está vacía.', `PCB · ${titulo}`);
+      return;
+    }
+    if (!activo.tradable) {
+      avisar('aviso', 'Activo suspendido', `Bitget tiene ${activo.label} suspendido ahora mismo: no admite órdenes.`, `PCB · ${titulo}`);
       return;
     }
 
-    const ejecutar = (obj: { subAccountId: string; side: Side }[]) =>
-      clave === 'tp'
-        ? panelService.setTakeProfit({ targets: obj, percent: valor })
-        : clave === 'mg'
-          ? panelService.addMargin({ targets: obj, amount: valor })
-          : panelService.setLeverage({ targets: obj, leverage: Number.parseFloat(valor) });
+    /* El campo que hace falta según la operación. Vacío, no se planifica. */
+    const campo = CAMPO_DE[kind];
+    const valor = campo === null ? '' : valores[campo].trim();
+    if (campo !== null && valor === '') {
+      avisar('aviso', 'Campo vacío', `Escriba un valor en ${titulo} antes de continuar.`, `PCB · ${titulo}`);
+      return;
+    }
 
-    const aplicarResultado = (r: Awaited<ReturnType<typeof ejecutar>>): void => {
-      set({
-        batch: r,
-        reintentarFallidas:
-          r.failures.length > 0
-            ? async () => aplicarResultado(await ejecutar(r.failures.map((f) => ({ subAccountId: f.subAccountId, side: f.side }))))
-            : null
-      });
-    };
+    const apalancamiento = Number.parseFloat(valores.ap);
+    if ((kind === 'open' || kind === 'leverage') && !Number.isFinite(apalancamiento)) {
+      avisar('aviso', 'Apalancamiento inválido', 'Escriba el apalancamiento antes de continuar.', `PCB · ${titulo}`);
+      return;
+    }
 
+    set({ planCargando: true, mensaje: `Revisando ${casillas(targets.length)}…` });
     try {
-      const resultado = await ejecutar(targets);
-      aplicarResultado(resultado);
-      clearTimeout(temporizadorMensaje);
-      set({ mensaje: `${etiquetaBase} ${valor} → ${casillas(targets.length)}` });
-      temporizadorMensaje = setTimeout(() => set({ mensaje: '' }), 3200);
+      const plan = await (kind === 'open'
+        ? panelService.planOpen({
+            targets,
+            assetId: activoId,
+            orderType: tipoOrden,
+            limitPrice: tipoOrden === 'limit' && limitPrice.trim() !== '' ? limitPrice : null,
+            initialMargin: valores.mgi,
+            leverage: apalancamiento
+          })
+        : kind === 'close'
+          ? panelService.planClose({ targets, assetId: activoId })
+          : kind === 'tp'
+            ? panelService.planTakeProfit({ targets, assetId: activoId, percent: valores.tp })
+            : kind === 'tp-remove'
+              ? panelService.planRemoveTakeProfit({ targets, assetId: activoId })
+              : kind === 'margin'
+                ? panelService.planMargin({ targets, assetId: activoId, amount: valores.mga })
+                : panelService.planLeverage({ targets, assetId: activoId, leverage: apalancamiento }));
 
-      if (!get().valoresFijos) get().fijarValor(campo, campo === 'ap' ? valores.ap : '');
-    } catch (e) {
-      avisar('error', 'No se pudo aplicar', textoDeError(e), `PCB · ${etiquetaBase}`);
-    }
-  },
-
-  aplicarTodo: async () => {
-    const { objetivosSeleccionados, avisar, valores, valoresFijos } = get();
-    const targets = objetivosSeleccionados();
-    if (targets.length === 0) {
-      avisar('aviso', 'Ninguna casilla seleccionada', 'Marque al menos una casilla sobre los números 1–20 antes de aplicar la acción.', 'PCB · Aplicar todo');
-      return;
-    }
-
-    try {
-      const [tp, mg, ap] = await Promise.all([
-        valores.tp.trim() ? panelService.setTakeProfit({ targets, percent: valores.tp }) : null,
-        valores.mga.trim() ? panelService.addMargin({ targets, amount: valores.mga }) : null,
-        valores.ap.trim() ? panelService.setLeverage({ targets, leverage: Number.parseFloat(valores.ap) }) : null
-      ]);
-
-      const combinado = tp ?? mg ?? ap;
-      if (combinado) {
-        set({
-          batch: {
-            label: 'TP + margen adicional + apalancamiento',
-            ok: (tp?.ok ?? 0) + (mg?.ok ?? 0) + (ap?.ok ?? 0),
-            skipped: (tp?.skipped ?? 0) + (mg?.skipped ?? 0) + (ap?.skipped ?? 0),
-            failures: [...(tp?.failures ?? []), ...(mg?.failures ?? []), ...(ap?.failures ?? [])]
-          },
-          /* Combina tres lotes distintos: no hay una única llamada que repetir, así que no se ofrece reintento granular aquí. */
-          reintentarFallidas: null
-        });
+      /*
+       * Un plan sin ninguna casilla viable no se enseña como plan: sería un
+       * diálogo con una lista vacía y un botón de confirmar que no haría nada.
+       * Se dice por qué no salió ninguna, que es la información útil.
+       */
+      if (plan.entries.length === 0) {
+        set({ planCargando: false, plan: null, mensaje: '' });
+        avisar(
+          'aviso',
+          'Ninguna casilla puede recibir esta acción',
+          plan.discards[0]?.reason ?? 'Las casillas seleccionadas no admiten esta operación ahora mismo.',
+          `PCB · ${titulo}`
+        );
+        return;
       }
 
-      clearTimeout(temporizadorMensaje);
-      set({ mensaje: `TP + margen + apalancamiento → ${casillas(targets.length)}` });
-      temporizadorMensaje = setTimeout(() => set({ mensaje: '' }), 3200);
-
-      /* El apalancamiento nunca se borra; el resto se limpia salvo «valores fijos». */
-      if (!valoresFijos) set((s) => ({ valores: { tp: '', mgi: '', mga: '', ap: s.valores.ap }, limitPrice: '' }));
+      set({ plan, planCargando: false, mensaje: '', pinPaso: '', errorPaso: '', intentosPaso: 0 });
     } catch (e) {
-      avisar('error', 'No se pudo aplicar', textoDeError(e), 'PCB · Aplicar todo');
+      set({ planCargando: false, plan: null, mensaje: '' });
+      avisar('error', `No se pudo preparar ${titulo.toLowerCase()}`, textoDeError(e), `PCB · ${titulo}`);
     }
   },
 
+  /**
+   * Envía el plan aprobado. Es la segunda fase y la única que toca Bitget.
+   *
+   * La apertura pide además la contraseña de paso: es la acción que compromete
+   * dinero nuevo y la única con un freno propio en el pliego. Tres intentos
+   * fallidos cancelan la operación **sin haber enviado nada**.
+   */
+  confirmarPlan: async () => {
+    const { plan, pinPaso, intentosPaso, avisar } = get();
+    if (!plan) return;
+
+    if (PIDE_PASO.has(plan.kind)) {
+      let valido: boolean;
+      try {
+        valido = await panelService.verifyStepPassword(pinPaso);
+      } catch (e) {
+        set({ plan: null, pinPaso: '', errorPaso: '', intentosPaso: 0 });
+        avisar('error', 'No se pudo confirmar', textoDeError(e), 'Seguridad');
+        return;
+      }
+
+      if (!valido) {
+        const intentos = intentosPaso + 1;
+        if (intentos >= INTENTOS_PASO) {
+          set({ plan: null, pinPaso: '', errorPaso: '', intentosPaso: 0 });
+          avisar('error', `${plan.title}: cancelado`, `Se introdujo la contraseña de paso incorrecta ${INTENTOS_PASO} veces. No se envió ninguna orden a Bitget.`, 'Seguridad');
+          return;
+        }
+        set({ pinPaso: '', errorPaso: `Contraseña de paso incorrecta. Intento ${intentos} de ${INTENTOS_PASO}.`, intentosPaso: intentos });
+        return;
+      }
+    }
+
+    set({ plan: null, pinPaso: '', errorPaso: '', intentosPaso: 0, enviando: true, mensaje: 'Enviando a Bitget…' });
+    await get().enviarPlan(plan);
+  },
+
+  /**
+   * Envía un plan y deja el informe en pantalla.
+   *
+   * `soloEstos` es «reintentar solo las fallidas»: reutiliza el mismo plan y
+   * por tanto los mismos identificadores de orden, que es lo que impide que un
+   * reintento duplique lo que ya entró.
+   */
+  enviarPlan: async (plan, soloEstos) => {
+    const { avisar } = get();
+    try {
+      const r = await panelService.executePlan(plan, soloEstos);
+      set({
+        batch: r,
+        enviando: false,
+        mensaje: '',
+        /* Lo indeterminado queda fuera a propósito: reintentarlo a ciegas es lo único que puede duplicar. */
+        reintentarFallidas:
+          r.failures.length > 0
+            ? async () => get().enviarPlan(plan, r.failures.map((f) => ({ subAccountId: f.subAccountId, side: f.side })))
+            : null
+      });
+
+      if (r.undetermined.length > 0) {
+        avisar('aviso', 'Hay casillas sin confirmar', `${casillas(r.undetermined.length)} se enviaron y no se pudo averiguar si entraron. Compruébelas en Bitget antes de repetir: reintentarlas a ciegas podría duplicarlas.`, `PCB · ${plan.title}`);
+      } else if (r.failures.length === 0) {
+        avisar('ok', `${plan.title}: correcto`, `${casillas(r.ok)} completadas.`, `PCB · ${plan.title}`);
+      } else {
+        avisar('error', `${plan.title}: con errores`, `${r.ok} correctas y ${r.failures.length} con error. El detalle está sobre la matriz.`, `PCB · ${plan.title}`);
+      }
+
+      /* El apalancamiento se conserva; el resto se limpia salvo «valores fijos». */
+      if (!get().valoresFijos) {
+        set((s) => ({ valores: { ...s.valores, ...LIMPIA_TRAS[plan.kind] }, limitPrice: plan.kind === 'open' ? '' : s.limitPrice }));
+      }
+
+      /* Si venía de «aplicar todo», se planifica la siguiente y se aprueba igual. */
+      const [siguiente, ...resto] = get().cola;
+      if (siguiente !== undefined && soloEstos === undefined) {
+        set({ cola: resto });
+        await get().planear(siguiente);
+      }
+    } catch (e) {
+      set({ enviando: false, mensaje: '' });
+      avisar('error', `No se pudo enviar ${plan.title.toLowerCase()}`, textoDeError(e), `PCB · ${plan.title}`);
+    }
+  },
+
+  /**
+   * Encadena varias operaciones sobre la misma selección.
+   *
+   * Solo entran las que tienen valor escrito: «aplicar todo» con el margen en
+   * blanco no debe preguntar por un margen vacío.
+   */
+  planearVarios: async (kinds) => {
+    const { valores, avisar } = get();
+    const conValor = kinds.filter((k) => {
+      const campo = CAMPO_DE[k];
+      return campo === null || valores[campo].trim() !== '';
+    });
+
+    if (conValor.length === 0) {
+      avisar('aviso', 'No hay nada que aplicar', 'Escriba al menos un valor —Take Profit, margen adicional o apalancamiento— antes de pulsar «Aplicar todo».', 'PCB · Aplicar todo');
+      return;
+    }
+
+    set({ cola: conValor.slice(1) });
+    await get().planear(conValor[0] as PlanKind);
+  },
+
+  /* Cancelar una operación de la cadena cancela la cadena entera: seguir con
+   * las siguientes después de un «no» sería justo lo contrario de lo pedido. */
+  cancelarPlan: () => set({ plan: null, cola: [], pinPaso: '', errorPaso: '', intentosPaso: 0 }),
+
+  /**
+   * Reenvía margen a las posiciones críticas de una cuenta principal.
+   *
+   * Pasa por el mismo plan que todo lo demás: es dinero nuevo saliendo del
+   * saldo y no puede salir sin que alguien vea cuánto y a dónde.
+   */
   reintentarMargenCuenta: async (accountId) => {
-    const { cuentas, posiciones, avisar } = get();
+    const { cuentas, posiciones, avisar, activoId, valores } = get();
     const cuenta = cuentas.find((c) => c.id === accountId);
     if (!cuenta) return;
 
@@ -541,59 +849,14 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     if (targets.length === 0) return;
 
     try {
-      const resultado = await panelService.addMargin({ targets, amount: '50' });
-      avisar('ok', 'Margen adicional aplicado', 'Se reenvió el margen adicional a las posiciones que lo tenían pendiente. Ya no están expuestas a liquidación.', 'Alerta crítica resuelta');
-      if (resultado.failures.length > 0) {
-        avisar('error', 'Algunas posiciones siguen sin margen', `${resultado.failures.length} no se pudieron actualizar.`, cuenta.name);
+      const plan = await panelService.planMargin({ targets, assetId: activoId, amount: valores.mga.trim() || '50' });
+      if (plan.entries.length === 0) {
+        avisar('aviso', 'No se pudo agregar margen', plan.discards[0]?.reason ?? 'Ninguna posición admite margen adicional.', cuenta.name);
+        return;
       }
+      set({ plan });
     } catch (e) {
-      avisar('error', 'No se pudo aplicar el margen', textoDeError(e), cuenta.name);
-    }
-  },
-
-  pedirPaso: () => {
-    const { objetivosSeleccionados, avisar, valores } = get();
-    if (objetivosSeleccionados().length === 0) {
-      avisar('aviso', 'Ninguna casilla seleccionada', 'Marque al menos una casilla sobre los números 1–20 antes de abrir.', 'PCB · Abrir');
-      return;
-    }
-    set({
-      pendiente: {
-        tipo: 'abrir',
-        etiqueta: 'Abrir',
-        alcanceTexto: casillas(objetivosSeleccionados().length),
-        margenInicial: valores.mgi
-      },
-      pinPaso: '',
-      errorPaso: '',
-      intentosPaso: 0
-    });
-  },
-
-  cerrarSeleccionados: async () => {
-    const { objetivosSeleccionados, avisar, activoId } = get();
-    const targets = objetivosSeleccionados();
-    if (targets.length === 0) {
-      avisar('aviso', 'Ninguna casilla seleccionada', 'Marque al menos una casilla sobre los números 1–20 antes de cerrar.', 'PCB · Cerrar');
-      return;
-    }
-    const ejecutar = (obj: { subAccountId: string; side: Side }[]) => panelService.closePositions({ targets: obj, assetId: activoId });
-    const aplicarResultado = (r: Awaited<ReturnType<typeof ejecutar>>): void => {
-      set({
-        batch: r,
-        reintentarFallidas:
-          r.failures.length > 0
-            ? async () => aplicarResultado(await ejecutar(r.failures.map((f) => ({ subAccountId: f.subAccountId, side: f.side }))))
-            : null
-      });
-    };
-
-    try {
-      const resultado = await ejecutar(targets);
-      aplicarResultado(resultado);
-      avisar('ok', 'Cierre enviado', `${casillas(resultado.ok)} cerradas correctamente.`, 'PCB · Cerrar');
-    } catch (e) {
-      avisar('error', 'No se pudo cerrar', textoDeError(e), 'PCB · Cerrar');
+      avisar('error', 'No se pudo preparar el margen', textoDeError(e), cuenta.name);
     }
   },
 
@@ -601,66 +864,13 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
   escribirPin: (v) => set({ pinPaso: v, errorPaso: '' }),
 
-  confirmarPaso: async () => {
-    const { pendiente, pinPaso, intentosPaso, avisar, objetivosSeleccionados, activoId, tipoOrden, limitPrice, valores } = get();
-    if (!pendiente) return;
-
-    let valido: boolean;
-    try {
-      valido = await panelService.verifyStepPassword(pinPaso);
-    } catch (e) {
-      set({ pendiente: null, pinPaso: '', errorPaso: '', intentosPaso: 0 });
-      avisar('error', 'No se pudo confirmar', textoDeError(e), 'Seguridad');
-      return;
-    }
-
-    if (!valido) {
-      const intentos = intentosPaso + 1;
-      if (intentos >= INTENTOS_PASO) {
-        set({ pendiente: null, pinPaso: '', errorPaso: '', intentosPaso: 0 });
-        avisar('error', 'Apertura cancelada', 'Se introdujo la contraseña de paso incorrecta 3 veces. No se envió ninguna orden a Bitget.', 'Seguridad');
-        return;
-      }
-      set({ pinPaso: '', errorPaso: `Contraseña de paso incorrecta. Intento ${intentos} de ${INTENTOS_PASO}.`, intentosPaso: intentos });
-      return;
-    }
-
-    set({ pendiente: null, pinPaso: '', errorPaso: '', intentosPaso: 0 });
-
-    const ejecutar = (obj: { subAccountId: string; side: Side }[]) =>
-      panelService.openPositions({
-        targets: obj,
-        assetId: activoId,
-        orderType: tipoOrden,
-        limitPrice: tipoOrden === 'limit' && limitPrice.trim() ? limitPrice : null,
-        initialMargin: valores.mgi
-      });
-    const aplicarResultado = (r: Awaited<ReturnType<typeof ejecutar>>): void => {
-      set({
-        batch: r,
-        reintentarFallidas:
-          r.failures.length > 0
-            ? async () => aplicarResultado(await ejecutar(r.failures.map((f) => ({ subAccountId: f.subAccountId, side: f.side }))))
-            : null
-      });
-    };
-
-    try {
-      const resultado = await ejecutar(objetivosSeleccionados());
-      aplicarResultado(resultado);
-      avisar('ok', 'Apertura enviada', `${casillas(resultado.ok)} abiertas correctamente.`, 'PCB · Abrir');
-    } catch (e) {
-      avisar('error', 'No se pudo abrir', textoDeError(e), 'PCB · Abrir');
-    }
-  },
-
-  cancelarPaso: () => set({ pendiente: null, pinPaso: '', errorPaso: '', intentosPaso: 0 }),
 
   /* ---------------- API keys ---------------- */
 
   abrirApis: () => set({ apisAbierto: true }),
-  cerrarApis: () => set({ apisAbierto: false }),
-  escribirFormulario: (clave, v) => set((s) => ({ formulario: { ...s.formulario, [clave]: v } })),
+  cerrarApis: () => set({ apisAbierto: false, ultimaValidacion: null }),
+  escribirFormulario: (clave, v) =>
+    set((s) => ({ formulario: { ...s.formulario, [clave]: v }, ultimaValidacion: null })),
 
   refrescarApis: async () => {
     set({ cargaApis: 'cargando', motivoApis: null });
@@ -696,7 +906,14 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
         return;
       }
 
-      set({ formulario: FORMULARIO_VACIO });
+      set({
+        formulario: FORMULARIO_VACIO,
+        ultimaValidacion: {
+          etiqueta: formulario.subcuenta,
+          uid: resultado.uid ?? '',
+          uidPadre: resultado.parentUid ?? ''
+        }
+      });
       await refrescarApis();
       avisar('ok', 'API key guardada', `${formulario.subcuenta} se registró en la cuenta ${formulario.cuenta}.`, 'Gestión de API keys');
       resultado.warnings.forEach((w) => avisar('aviso', 'Revise la configuración de la cuenta', w.message, formulario.subcuenta));

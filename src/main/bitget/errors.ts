@@ -120,16 +120,43 @@ const CATALOGO: Record<string, { clase: ClaseError; mensaje: string }> = {
 
   /* ---- estado de la cuenta: fallan esa cuenta ---- */
   '43012': { clase: 'fatal-cuenta', mensaje: 'Saldo insuficiente en la cuenta.' },
-  '22002': { clase: 'fatal-cuenta', mensaje: 'Saldo insuficiente en la cuenta.' },
+  /*
+   * Verificado contra la API real el 12/08/2026: el texto de Bitget es «No
+   * position to close», no un problema de saldo. Se corrige la traduccion, que
+   * venia de la documentacion publica y era enganosa justo en el informe de un
+   * cierre. La clase es `omitida` porque no hay nada que arreglar: esa cuenta
+   * no tenia posicion abierta, y contarlo como fallo haria que el operador
+   * buscara un problema que no existe.
+   */
+  '22002': { clase: 'omitida', mensaje: 'No habia ninguna posicion abierta que cerrar.' },
   '40754': {
     clase: 'fatal-cuenta',
     mensaje: 'La cuenta no tiene habilitado el trading de futuros.'
+  },
+  /*
+   * Verificado el 13/08/2026 llamando a set-margin sobre una cuenta en margen
+   * cruzado: «Parameter verification exception margin mode == FIXED». Bitget
+   * solo permite agregar margen en margen aislado, y el texto original no lo
+   * dice de forma que un operador pueda actuar.
+   */
+  '40808': {
+    clase: 'fatal-cuenta',
+    mensaje:
+      'Solo se puede agregar margen en margen aislado, y esta cuenta esta en cruzado. ' +
+      'Cambiala a aislado en Bitget.'
   },
 
   /* ---- parametros: el problema es del lote entero ---- */
   '40034': { clase: 'fatal-lote', mensaje: 'El activo indicado no existe en Bitget.' },
   '40019': { clase: 'fatal-lote', mensaje: 'Falta un parametro obligatorio.' },
-  '45110': { clase: 'fatal-lote', mensaje: 'El monto es menor al minimo que exige Bitget.' }
+  '45110': { clase: 'fatal-lote', mensaje: 'El monto es menor al minimo que exige Bitget.' },
+  /*
+   * Bitget reutiliza este codigo para dos cosas distintas segun el endpoint:
+   * «falta el precio de disparo» en un Take Profit y «apalancamiento por encima
+   * del maximo» en set-leverage. Ambas son del parametro, no de la cuenta, asi
+   * que la clase es la misma y el mensaje se queda en lo comun.
+   */
+  '400172': { clase: 'fatal-lote', mensaje: 'Bitget rechazo un parametro de la operacion.' }
 };
 
 /** Traduccion y clase de un codigo del exchange. */

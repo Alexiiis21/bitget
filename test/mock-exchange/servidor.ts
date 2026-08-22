@@ -34,6 +34,15 @@ export interface ExchangeSimulado {
   responder(respuesta: Respuesta): void;
   /** Respuesta usada cuando la cola esta vacia. */
   responderSiempre(respuesta: Respuesta): void;
+  /**
+   * Responde en funcion de la peticion.
+   *
+   * Hace falta para los lotes: con trescientas ordenes en vuelo no se puede
+   * encolar una respuesta por cada una, y lo que se quiere probar es
+   * precisamente que **unas** fallen y otras no, segun a que cuenta van. Tiene
+   * prioridad sobre la cola; devolver `null` cede el turno a esta.
+   */
+  responderCon(manejador: ((p: PeticionRecibida) => Respuesta | null) | null): void;
   peticiones: PeticionRecibida[];
   cerrar(): Promise<void>;
 }
@@ -46,19 +55,21 @@ export async function iniciarExchangeSimulado(): Promise<ExchangeSimulado> {
   const cola: Respuesta[] = [];
   const peticiones: PeticionRecibida[] = [];
   let porDefecto: Respuesta = { estado: 200, cuerpo: SOBRE_OK };
+  let manejador: ((p: PeticionRecibida) => Respuesta | null) | null = null;
 
   const servidor: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const trozos: Buffer[] = [];
     req.on('data', (t: Buffer) => trozos.push(t));
     req.on('end', () => {
-      peticiones.push({
+      const recibida: PeticionRecibida = {
         metodo: req.method ?? '',
         url: req.url ?? '',
         cabeceras: req.headers,
         cuerpo: Buffer.concat(trozos).toString('utf8')
-      });
+      };
+      peticiones.push(recibida);
 
-      const respuesta = cola.shift() ?? porDefecto;
+      const respuesta = manejador?.(recibida) ?? cola.shift() ?? porDefecto;
       const emitir = (): void => {
         const cuerpo =
           typeof respuesta.cuerpo === 'string'
@@ -87,6 +98,9 @@ export async function iniciarExchangeSimulado(): Promise<ExchangeSimulado> {
     responder: (respuesta) => cola.push(respuesta),
     responderSiempre: (respuesta) => {
       porDefecto = respuesta;
+    },
+    responderCon: (fn) => {
+      manejador = fn;
     },
     peticiones,
     cerrar: () =>

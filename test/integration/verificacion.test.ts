@@ -58,11 +58,62 @@ describe('credencial correcta', () => {
 
     expect(r.veredicto).toBe('valida');
     expect(r.uid).toBe('9274202242');
+    expect(r.uidPadre).toBe('1513226215');
     expect(r.esSubcuenta).toBe(true);
     expect(r.modoPosicion).toBe('cobertura');
     expect(r.modoMargen).toBe('aislado');
     expect(r.apalancamientoLong).toBe(150);
     expect(r.motivo).toBeNull();
+  });
+});
+
+describe('los UID que detecta el panel', () => {
+  /*
+   * El operador nunca escribe el UID: sale de aqui. Y sale con dos tipos
+   * distintos -`userId` cadena, `parentId` numero-, verificado contra la API
+   * real el 19/08/2026. Guardarlos tal cual haria que comparar uno con otro
+   * fallara en silencio, asi que los dos salen como cadena.
+   */
+  it('normaliza el `parentId` numerico de Bitget a cadena', async () => {
+    exchange.responder({ cuerpo: infoCuenta(['coow', 'cpow'], { parentId: 1513226215 }) });
+    exchange.responder({ cuerpo: cuentaSimbolo() });
+
+    const r = await verificarCredencial(cliente, CREDENCIAL);
+
+    expect(r.uidPadre).toBe('1513226215');
+    expect(typeof r.uidPadre).toBe('string');
+  });
+
+  /* Una cuenta que no es subcuenta de nadie: no hay padre que guardar. */
+  it('sin `parentId` no inventa una cuenta principal', async () => {
+    exchange.responder({ cuerpo: infoCuenta(['coow', 'cpow'], { parentId: null }) });
+    exchange.responder({ cuerpo: cuentaSimbolo() });
+
+    const r = await verificarCredencial(cliente, CREDENCIAL);
+
+    expect(r.uidPadre).toBeNull();
+    expect(r.esSubcuenta).toBe(false);
+  });
+
+  /* Un cero no es un UID: es la forma que tiene Bitget de decir «ninguno». */
+  it('trata el `parentId` en cero como ausencia de cuenta principal', async () => {
+    exchange.responder({ cuerpo: infoCuenta(['coow', 'cpow'], { parentId: 0 }) });
+    exchange.responder({ cuerpo: cuentaSimbolo() });
+
+    const r = await verificarCredencial(cliente, CREDENCIAL);
+
+    expect(r.uidPadre).toBeNull();
+    expect(r.esSubcuenta).toBe(false);
+  });
+
+  /* Si la credencial no autentica no hay UID que detectar, ni que inventar. */
+  it('una credencial que Bitget no acepta no trae ningun UID', async () => {
+    exchange.responder({ estado: 400, cuerpo: { code: '40006', msg: 'Invalid ACCESS_KEY' } });
+
+    const r = await verificarCredencial(cliente, CREDENCIAL);
+
+    expect(r.uid).toBeNull();
+    expect(r.uidPadre).toBeNull();
   });
 });
 

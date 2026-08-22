@@ -94,8 +94,27 @@ function RejillaCasillas({ cuenta, lado }: { cuenta: Account; lado: Side }) {
       {cuenta.subAccounts.map((sub, i) => {
         const posicion = posicionDe(posiciones, sub.id, lado);
         const marcada = sel[i] === true;
-        const color = posicion?.hasError ? ESTADO_ACCION.error : posicion?.actions.oe ? ESTADO_ACCION.realizada : ESTADO_ACCION.pendiente;
-        const estadoTexto = posicion?.hasError ? `error · ${posicion.errorReason ?? ''}` : posicion?.actions.oe ? 'posición abierta' : posicion ? 'posición cerrada' : 'sin posición';
+
+        /*
+         * La conexión manda sobre la posición. Si no se puede hablar con la
+         * subcuenta, lo que el panel sabe de su posición es de hace un rato, y
+         * pintarlo como si fuera de ahora es peor que reconocer el corte.
+         */
+        const sinConexion = sub.status === 'error' || sub.status === 'sin-api';
+        const color = sinConexion || posicion?.hasError
+          ? ESTADO_ACCION.error
+          : posicion?.actions.oe
+            ? ESTADO_ACCION.realizada
+            : ESTADO_ACCION.pendiente;
+        const estadoTexto = sinConexion
+          ? `sin conexión · ${sub.statusReason ?? 'la credencial no responde'}`
+          : posicion?.hasError
+            ? `error · ${posicion.errorReason ?? ''}`
+            : posicion?.actions.oe
+              ? 'posición abierta'
+              : posicion
+                ? 'posición cerrada'
+                : 'sin posición';
 
         return (
           <button
@@ -126,6 +145,14 @@ function RejillaCasillas({ cuenta, lado }: { cuenta: Account; lado: Side }) {
                 {marcada ? '✓' : ''}
               </span>
               <span style={{ fontSize: 11.5, fontWeight: 700, fontFamily: FUENTE.mono, color: marcada ? T.marcaTexto : T.texto2 }}>{sub.slot}</span>
+              {sinConexion && (
+                <span
+                  aria-hidden
+                  style={{ fontSize: 9, fontWeight: 800, lineHeight: 1, color: ESTADO_ACCION.error }}
+                >
+                  ⚠
+                </span>
+              )}
             </span>
             <span style={{ width: '100%', textAlign: 'center', fontSize: 9, fontWeight: 600, fontFamily: FUENTE.mono, letterSpacing: '-.02em', color: marcada ? T.marcaTexto : T.texto3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {acortarSaldo(sub.balance)}
@@ -146,6 +173,7 @@ function BloqueCuenta({ cuenta }: { cuenta: Account }) {
   const alternarCmp = usarPanel((s) => s.alternarCmp);
   const alternarHist = usarPanel((s) => s.alternarHist);
   const posiciones = usarPanel((s) => s.posiciones);
+  const sinPosiciones = usarPanel((s) => s.cargaPosiciones === 'error');
 
   const todas = (seleccion?.selLong.every(Boolean) ?? false) && (seleccion?.selShort.every(Boolean) ?? false);
   const saldoTotal = cuenta.subAccounts.reduce((t, s) => t + Number.parseFloat(s.balance), 0);
@@ -187,7 +215,9 @@ function BloqueCuenta({ cuenta }: { cuenta: Account }) {
       >
         <span style={{ fontSize: 9, lineHeight: 1, color: T.marcaTexto, width: 9, display: 'flex', justifyContent: 'center' }}>{cmpAbierto ? '▼' : '▶'}</span>
         <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.12em', color: T.marcaTexto, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Centro de monitoreo de posiciones</span>
-        <span style={{ fontSize: 9.5, fontWeight: 600, color: T.texto3, fontFamily: FUENTE.mono, whiteSpace: 'nowrap' }}>{abiertas} de {cuenta.subAccounts.length} con posición abierta</span>
+        <span style={{ fontSize: 9.5, fontWeight: 600, color: T.texto3, fontFamily: FUENTE.mono, whiteSpace: 'nowrap' }}>
+          {sinPosiciones ? 'sin datos de posiciones' : `${abiertas} de ${cuenta.subAccounts.length} con posición abierta`}
+        </span>
       </div>
       {cmpAbierto && <AccordeonMonitor cuenta={cuenta} />}
 

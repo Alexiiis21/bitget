@@ -23,6 +23,7 @@
     "test:coverage": "vitest run --coverage",
     "test:red": "vitest run test/red",
     "test:staging": "vitest run --config vitest.staging.config.ts",
+    "test:fisica": "vitest run --config vitest.fisica.config.ts --disable-console-intercept",
     "importar:subcuentas": "vitest run --config vitest.importar.config.ts",
     "test:e2e": "npm run build && playwright test",
     "build": "npm run typecheck && electron-vite build",

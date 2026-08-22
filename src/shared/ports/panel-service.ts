@@ -30,7 +30,9 @@ import type {
   ApiKeyRow,
   Asset,
   Balance,
+  BatchPlan,
   BatchResult,
+  BatchTarget,
   ClosedPosition,
   CloseRequest,
   LeverageRequest,
@@ -57,16 +59,47 @@ export interface PanelService {
 
   /* ---- lectura ---- */
   getAccounts(): Promise<Account[]>;
+  /**
+   * Avisa cuando cambia la matriz: una cuenta que reconecta, un saldo nuevo,
+   * un alta o una baja.
+   *
+   * Sin esto, `getAccounts` seria una foto que envejece: el estado de conexion
+   * lo mueve el proceso principal en segundo plano y la pantalla no tendria
+   * forma de enterarse. RF-002.
+   */
+  subscribeAccounts(cb: (accounts: Account[]) => void): Unsubscribe;
   getBalance(subAccountId: string): Promise<Balance>;
   getHistory(subAccountId: string, limit: number): Promise<ClosedPosition[]>;
   subscribePositions(cb: (snapshot: PositionSnapshot) => void): Unsubscribe;
 
-  /* ---- escritura (lotes) ---- */
-  openPositions(req: OpenRequest): Promise<BatchResult>;
-  closePositions(req: CloseRequest): Promise<BatchResult>;
-  setTakeProfit(req: TpRequest): Promise<BatchResult>;
-  addMargin(req: MarginRequest): Promise<BatchResult>;
-  setLeverage(req: LeverageRequest): Promise<BatchResult>;
+  /* ---- escritura, en dos fases ---- */
+
+  /**
+   * Las seis operaciones se planifican antes de enviarse, y ninguna de estas
+   * seis llamadas envia nada a Bitget.
+   *
+   * Planificar cuesta consultas -precio, saldo, posiciones- y devuelve lo que
+   * de verdad va a pasar en cada casilla. Es lo que el operador aprueba. Si
+   * cancela, no ha salido ni una orden.
+   */
+  planOpen(req: OpenRequest): Promise<BatchPlan>;
+  planClose(req: CloseRequest): Promise<BatchPlan>;
+  planTakeProfit(req: TpRequest): Promise<BatchPlan>;
+  planRemoveTakeProfit(req: CloseRequest): Promise<BatchPlan>;
+  planMargin(req: MarginRequest): Promise<BatchPlan>;
+  planLeverage(req: LeverageRequest): Promise<BatchPlan>;
+
+  /**
+   * Envia un plan ya aprobado, identificandolo por su `id`.
+   *
+   * `only` acota el envio a unas casillas concretas: es «reintentar solo las
+   * fallidas». Reutiliza los identificadores de orden del plan original, que es
+   * lo que impide que un reintento duplique lo que ya entro.
+   */
+  executePlan(plan: BatchPlan, only?: BatchTarget[]): Promise<BatchResult>;
+
+  /* ---- contrasena de paso ---- */
+  hasStepPassword(): Promise<boolean>;
 
   /* ---- credenciales y seguridad ---- */
   listApiKeys(): Promise<ApiKeyRow[]>;

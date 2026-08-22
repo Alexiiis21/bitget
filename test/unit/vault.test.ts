@@ -197,6 +197,91 @@ describe('apertura fallida', () => {
   });
 });
 
+describe('contrasena de paso', () => {
+  /*
+   * Es el freno que separa marcar casillas de enviar ordenes. Vive dentro del
+   * payload cifrado y no en un archivo aparte: protege el envio, que solo es
+   * posible con el almacen abierto, asi que fuera quedaria legible justo cuando
+   * no hay nadie delante.
+   */
+  it('un almacen recien creado no tiene contrasena de paso', async () => {
+    const vault = await crear();
+
+    expect(vault.tienePaso()).toBe(false);
+  });
+
+  it('acepta la que se fijo y rechaza cualquier otra', async () => {
+    const vault = await crear();
+    await vault.fijarPaso('bg1');
+
+    expect(vault.tienePaso()).toBe(true);
+    expect(await vault.comprobarPaso('bg1')).toBe(true);
+    expect(await vault.comprobarPaso('bg2')).toBe(false);
+    expect(await vault.comprobarPaso('')).toBe(false);
+  });
+
+  /*
+   * La tentacion es dejar pasar cuando no hay ninguna configurada, «porque no
+   * hay nada que comprobar». Eso convierte el freno en un adorno: el panel
+   * enviaria ordenes sin confirmacion alguna.
+   */
+  it('sin contrasena fijada no deja pasar nada', async () => {
+    const vault = await crear();
+
+    expect(await vault.comprobarPaso('')).toBe(false);
+    expect(await vault.comprobarPaso('bg1')).toBe(false);
+  });
+
+  it('sobrevive a cerrar y volver a abrir el almacen', async () => {
+    const vault = await crear();
+    await vault.fijarPaso('bg1');
+    await vault.guardar();
+    vault.cerrar();
+
+    const abierto = await Vault.abrir(ruta, CONTRASENA);
+
+    expect(abierto.tienePaso()).toBe(true);
+    expect(await abierto.comprobarPaso('bg1')).toBe(true);
+  });
+
+  it('cambiarla invalida la anterior', async () => {
+    const vault = await crear();
+    await vault.fijarPaso('bg1');
+    await vault.fijarPaso('bg2');
+
+    expect(await vault.comprobarPaso('bg1')).toBe(false);
+    expect(await vault.comprobarPaso('bg2')).toBe(true);
+  });
+
+  /* Nunca en claro, ni en el archivo ni en el payload descifrado. */
+  it('no se guarda en claro en ninguna parte del archivo', async () => {
+    const vault = await crear();
+    await vault.fijarPaso('frase-de-paso-inconfundible');
+    await vault.guardar();
+
+    const bruto = await readFile(ruta, 'utf8');
+
+    expect(bruto).not.toContain('frase-de-paso-inconfundible');
+  });
+
+  /*
+   * Los almacenes creados antes de que existiera la contrasena de paso no la
+   * traen. Tienen que abrirse igual: romper su lectura obligaria a registrar
+   * cien credenciales otra vez.
+   */
+  it('un almacen anterior a esta funcion se abre sin ella', async () => {
+    const vault = await crear();
+    await vault.agregar(CREDENCIAL);
+    await vault.guardar();
+    vault.cerrar();
+
+    const abierto = await Vault.abrir(ruta, CONTRASENA);
+
+    expect(abierto.tienePaso()).toBe(false);
+    expect(abierto.listar()).toHaveLength(1);
+  });
+});
+
 describe('cambio de contrasena', () => {
   it('reabre con la nueva y rechaza la vieja', async () => {
     const v = await crear();

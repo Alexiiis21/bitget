@@ -1,11 +1,16 @@
 import { join } from 'node:path';
 import { app, BrowserWindow, shell } from 'electron';
-import { MOSAICO_ALTO_MIN, MOSAICO_ANCHO_MIN } from '@shared/constants';
+import {
+  MOSAICO_ALTO_MIN,
+  MOSAICO_ANCHO_MIN,
+  PUBLICACION_COALESCIDA_MS
+} from '@shared/constants';
 import { entorno, esStaging } from '@shared/entorno';
 import { ClienteBitget } from './bitget/rest/client';
 import { SupervisorReconexion } from './execution/supervisor-reconexion';
 import { registrarIpc } from './ipc/handlers';
 import { Sesion } from './ipc/sesion';
+import { cargarConfiguracion } from './storage/configuracion';
 import { cargarInstancia } from './storage/instancia';
 import { fijarCarpetaDeEntorno, rutas } from './storage/paths';
 
@@ -68,6 +73,51 @@ function crearVentana(): void {
   else void ventana.loadFile(join(__dirname, '../renderer/index.html'));
 }
 
+/* ---------------- empuje hacia la ventana ---------------- */
+
+/**
+ * Publica la matriz cada vez que cambia algo suyo.
+ *
+ * El supervisor de reconexion trabaja en segundo plano y por su cuenta: sin
+ * este puente, la pantalla solo se enteraria de que una cuenta volvio cuando el
+ * operador hiciera algo, y hasta entonces la seguiria pintando caida -o al
+ * reves, lo que es peor-. RF-002.
+ *
+ * Los avisos se agrupan en una ventana corta antes de enviarse. Al desbloquear,
+ * cien cuentas cambian de estado en pocos segundos; sin agrupar serian cien
+ * mensajes y cien redibujados para una pantalla que solo necesita el ultimo.
+ */
+function publicarCambios(sesion: Sesion): void {
+  let pendiente: ReturnType<typeof setTimeout> | null = null;
+
+  const enviar = (): void => {
+    pendiente = null;
+    if (ventana === null || ventana.isDestroyed()) return;
+    ventana.webContents.send('panel:cuentas', sesion.cuentasPanel());
+    void sesion.estadoApp().then(
+      (estado) => {
+        if (ventana !== null && !ventana.isDestroyed()) ventana.webContents.send('sistema:estado', estado);
+      },
+      () => undefined
+    );
+  };
+
+  sesion.alCambiar(() => {
+    if (pendiente !== null) return;
+    pendiente = setTimeout(enviar, PUBLICACION_COALESCIDA_MS);
+  });
+
+  /*
+   * El avance de un lote va sin agrupar y por su propio canal. Aqui no vale
+   * esperar 250 ms: mientras cien ordenes salen, lo unico que el operador tiene
+   * delante es esta barra, y es la que le dice que el panel no se ha colgado.
+   */
+  sesion.alProgresarLote((lote) => {
+    if (ventana === null || ventana.isDestroyed()) return;
+    ventana.webContents.send('lote:progreso', lote);
+  });
+}
+
 /* ---------------- ciclo de vida ---------------- */
 
 /*
@@ -102,8 +152,20 @@ if (!app.requestSingleInstanceLock()) {
      * es por IP, y dos clientes con dos limitadores se pisarian el cupo.
      * docs/01 seccion 8.
      */
+    /*
+     * Contra que mercado opera este panel. Arranca en `simulado` y solo cambia
+     * si alguien edita `config.json` a proposito: pasar a dinero real no puede
+     * ser un descuido. Ver storage/configuracion.ts.
+     */
+    const config = await cargarConfiguracion(r.config);
+    if (config.mercado === 'real') {
+      console.warn('[PCB] mercado=real — las ordenes de este panel mueven dinero de verdad.');
+    }
+
     cliente = new ClienteBitget();
-    sesion = new Sesion({ vault: r.vault, cuentas: r.cuentas }, cliente);
+    sesion = new Sesion({ vault: r.vault, cuentas: r.cuentas }, cliente, {
+      mercado: config.mercado
+    });
 
     /*
      * El reintento automatico de las cuentas caidas. Late desde el arranque y
@@ -120,7 +182,8 @@ if (!app.requestSingleInstanceLock()) {
     });
     supervisor.iniciar();
 
-    registrarIpc(sesion, instancia);
+    registrarIpc(sesion, instancia, config.mercado);
+    publicarCambios(sesion);
     crearVentana();
 
     app.on('activate', () => {

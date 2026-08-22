@@ -27,7 +27,7 @@ import { Pool } from 'undici';
 import type { z } from 'zod';
 import { esStaging } from '@shared/entorno';
 import { LimitadorPeticiones, type DiagnosticoLimitador } from '../../execution/rate-limiter';
-import { enmascararApiKey } from '../../security/redact';
+import { enmascararApiKey, redactarTexto } from '../../security/redact';
 import {
   errorDeEsquema,
   errorDeHttp,
@@ -48,6 +48,52 @@ import {
 } from './signer';
 
 export const HOST_BITGET = 'https://api.bitget.com';
+
+/* ╔══════════════════════════════════════════════════════════════════════════╗
+   ║  DEPURACIÓN TEMPORAL · BORRAR ESTE BLOQUE Y SUS DOS LLAMADAS             ║
+   ║                                                                          ║
+   ║  Vuelca al terminal la respuesta cruda de Bitget. Existe para averiguar   ║
+   ║  por qué una respuesta no encaja con su esquema; no debe quedarse en el   ║
+   ║  código entregado.                                                       ║
+   ║                                                                          ║
+   ║  Siempre imprime cuando la validación falla. Con PCB_DEBUG_API=1          ║
+   ║  imprime además cada respuesta firmada, para ver el recorrido entero.     ║
+   ║                                                                          ║
+   ║  El texto pasa por `redactarTexto`: si alguna clave registrada apareciera ║
+   ║  en la respuesta, sale como [REDACTADO] en vez de al terminal.            ║
+   ║                                                                          ║
+   ║  Para borrarlo: elimina este bloque y busca `volcarRespuesta(` — son dos  ║
+   ║  llamadas, ambas en `enviar()`.                                          ║
+   ╚══════════════════════════════════════════════════════════════════════════╝ */
+const DEPURAR_API = process.env['PCB_DEBUG_API'] === '1';
+
+function volcarRespuesta(
+  ruta: string,
+  httpStatus: number,
+  texto: string,
+  motivo: string | null
+): void {
+  const cabecera = motivo === null ? 'RESPUESTA' : 'ESQUEMA RECHAZADO';
+  console.error(`\n┌─ [DEBUG API] ${cabecera} · HTTP ${httpStatus}\n│  ruta: ${ruta}`);
+
+  let cuerpo = redactarTexto(texto);
+  try {
+    cuerpo = JSON.stringify(JSON.parse(texto), null, 2);
+    cuerpo = redactarTexto(cuerpo);
+  } catch {
+    /* Si no es JSON se enseña tal cual, que es justo lo que hay que ver. */
+  }
+
+  for (const linea of cuerpo.split('\n')) console.error(`│  ${linea}`);
+
+  if (motivo !== null) {
+    console.error('│');
+    console.error('│  por qué no encaja:');
+    for (const linea of motivo.split('\n')) console.error(`│    ${linea}`);
+  }
+  console.error('└─────────────────────────────────────────────\n');
+}
+/* ══════════════════════ FIN DEPURACIÓN TEMPORAL ══════════════════════ */
 
 /** Bucket de los endpoints publicos: su limite es por IP, no por cuenta. */
 const CLAVE_PUBLICA = 'publico';
@@ -307,6 +353,8 @@ export class ClienteBitget {
 
     const sobre = esquemaSobre.safeParse(crudo);
     if (!sobre.success) {
+      /* DEPURACIÓN TEMPORAL · BORRAR */
+      volcarRespuesta(firmada.rutaCompleta, httpStatus, texto, sobre.error.message);
       throw errorDeEsquema(firmada.rutaCompleta, sobre.error.message);
     }
 
@@ -324,8 +372,13 @@ export class ClienteBitget {
 
     const datos = esquema.safeParse(sobre.data.data);
     if (!datos.success) {
+      /* DEPURACIÓN TEMPORAL · BORRAR */
+      volcarRespuesta(firmada.rutaCompleta, httpStatus, texto, datos.error.message);
       throw errorDeEsquema(firmada.rutaCompleta, datos.error.message);
     }
+
+    /* DEPURACIÓN TEMPORAL · BORRAR */
+    if (DEPURAR_API) volcarRespuesta(firmada.rutaCompleta, httpStatus, texto, null);
 
     return { datos: datos.data as z.infer<E>, duracionMs, codigo: sobre.data.code };
   }

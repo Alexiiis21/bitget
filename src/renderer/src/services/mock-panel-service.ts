@@ -25,12 +25,17 @@ import type {
   Asset,
   Balance,
   BatchFailure,
+  BatchPlan,
   BatchResult,
+  BatchTarget,
   ClosedPosition,
   CloseRequest,
   LeverageRequest,
   MarginRequest,
   OpenRequest,
+  PlanDiscard,
+  PlanEntry,
+  PlanKind,
   Position,
   PositionSnapshot,
   Side,
@@ -44,12 +49,13 @@ import type { PanelService, Unsubscribe } from '@shared/ports/panel-service';
 import { prohibidoEnStaging } from '@shared/entorno';
 import { CASILLAS_POR_CUENTA, HISTORIAL_MAXIMO } from '@/lib/tokens';
 
+/* Topes verificados contra el catálogo real de Bitget el 18/08/2026. */
 const ASSETS: Asset[] = [
-  { id: 'BTC', symbol: 'BTCUSDT', label: 'BTC/USDT', priceDecimals: 1 },
-  { id: 'ETH', symbol: 'ETHUSDT', label: 'ETH/USDT', priceDecimals: 2 },
-  { id: 'SOL', symbol: 'SOLUSDT', label: 'SOL/USDT', priceDecimals: 3 },
-  { id: 'PEPE', symbol: 'PEPEUSDT', label: 'PEPE/USDT', priceDecimals: 8 },
-  { id: 'PAXG', symbol: 'PAXGUSDT', label: 'PAXG/USDT', priceDecimals: 2 }
+  { id: 'BTC', symbol: 'BTCUSDT', label: 'BTC/USDT', priceDecimals: 1, maxLeverage: 150, minLeverage: 1, tradable: true },
+  { id: 'ETH', symbol: 'ETHUSDT', label: 'ETH/USDT', priceDecimals: 2, maxLeverage: 150, minLeverage: 1, tradable: true },
+  { id: 'SOL', symbol: 'SOLUSDT', label: 'SOL/USDT', priceDecimals: 3, maxLeverage: 100, minLeverage: 1, tradable: true },
+  { id: 'PEPE', symbol: 'PEPEUSDT', label: 'PEPE/USDT', priceDecimals: 8, maxLeverage: 75, minLeverage: 1, tradable: true },
+  { id: 'PAXG', symbol: 'PAXGUSDT', label: 'PAXG/USDT', priceDecimals: 2, maxLeverage: 50, minLeverage: 1, tradable: true }
 ];
 
 const PRECIO_BASE: Record<string, number> = {
@@ -113,6 +119,7 @@ export class MockPanelService implements PanelService {
   private pasoActual = 'bg1';
   private readonly maestra = 'demo1234';
 
+  private readonly oyentesCuentas = new Set<(c: Account[]) => void>();
   private readonly oyentesPosiciones = new Set<(s: PositionSnapshot) => void>();
   private readonly oyentesPrecios = new Set<(p: Readonly<Record<string, Decimal>>) => void>();
   private temporizadorPrecios: ReturnType<typeof setInterval> | undefined;
@@ -161,7 +168,18 @@ export class MockPanelService implements PanelService {
         if (tieneShort) this.crearPosicion(subAccountId, 'short', azar, errorShort, mgFailShort);
         this.historial.set(subAccountId, this.generarHistorial(subAccountId, azar));
 
-        return { id: subAccountId, accountId: id, label: `Sub-${String(slot).padStart(2, '0')}`, slot, balance: dec(saldo, 2) };
+        /* Una de cada doce sin conexión: la pantalla tiene que saber pintar ese caso. */
+        const caida = azar() < 0.08;
+
+        return {
+          id: subAccountId,
+          accountId: id,
+          label: `Sub-${String(slot).padStart(2, '0')}`,
+          slot,
+          balance: dec(saldo, 2),
+          status: caida ? ('error' as const) : ('ok' as const),
+          statusReason: caida ? 'La credencial no responde.' : null
+        };
       });
 
       return { id, name: nombre, subAccounts };
@@ -240,6 +258,12 @@ export class MockPanelService implements PanelService {
     });
   }
 
+  /** Planes calculados y aún sin enviar, igual que en el proceso principal. */
+  private readonly planes = new Map<string, (solo?: BatchTarget[]) => Promise<BatchResult>>();
+
+  /** UID de la cuenta principal en el modo demostracion. Formato real de Bitget. */
+  private static readonly UID_PADRE_DEMO = '1513226215';
+
   private generarApiKeys(): void {
     const estados: ApiKeyStatus[] = ['ok', 'ok', 'error', 'ok', 'ok', 'ok', 'conectando', 'sin-api'];
     let n = 0;
@@ -252,6 +276,9 @@ export class MockPanelService implements PanelService {
           subAccountLabel: sub.label,
           accountName: cuenta.name.replace('Cuenta principal - ', ''),
           maskedKey: estado === 'sin-api' ? '' : `bg_${sub.id.slice(-4)}••••••••f2a`,
+          /* Sin credencial no hay UID: el panel lo obtiene al validar. */
+          uid: estado === 'sin-api' ? '' : `54761437${String(n).padStart(2, '0')}`,
+          parentUid: estado === 'sin-api' ? '' : MockPanelService.UID_PADRE_DEMO,
           status: estado,
           reason: estado === 'error' ? 'Bitget rechazó la firma: revise Secret Key y Passphrase.' : null
         });
@@ -317,6 +344,19 @@ export class MockPanelService implements PanelService {
     return this.cuentas.map((c) => ({ ...c, subAccounts: c.subAccounts.map((s) => ({ ...s })) }));
   }
 
+  /**
+   * En la demostración las cuentas no cambian nunca.
+   *
+   * Se registra el oyente igual, para que la pantalla siga el mismo camino que
+   * con el proceso principal real y no haya una rama distinta según el entorno.
+   */
+  subscribeAccounts(cb: (accounts: Account[]) => void): Unsubscribe {
+    this.oyentesCuentas.add(cb);
+    return () => {
+      this.oyentesCuentas.delete(cb);
+    };
+  }
+
   async getBalance(subAccountId: string): Promise<Balance> {
     await latencia(100, 100);
     for (const cuenta of this.cuentas) {
@@ -355,7 +395,7 @@ export class MockPanelService implements PanelService {
     return posicion?.errorReason ?? MOTIVOS_ERROR[0];
   }
 
-  async openPositions(req: OpenRequest): Promise<BatchResult> {
+  private async abrir(req: OpenRequest): Promise<BatchResult> {
     await latencia(260, 340);
     const fails: BatchFailure[] = [];
     let ok = 0;
@@ -398,10 +438,10 @@ export class MockPanelService implements PanelService {
     }
 
     this.publicarPosiciones();
-    return { label: 'Abrir', ok, skipped: omitidas, failures: fails };
+    return { label: 'Abrir posiciones', ok, skipped: omitidas, failures: fails, undetermined: [] };
   }
 
-  async closePositions(req: CloseRequest): Promise<BatchResult> {
+  private async cerrar(req: CloseRequest): Promise<BatchResult> {
     await latencia(220, 280);
     const fails: BatchFailure[] = [];
     let ok = 0;
@@ -444,7 +484,7 @@ export class MockPanelService implements PanelService {
     }
 
     this.publicarPosiciones();
-    return { label: 'Cerrar', ok, skipped: omitidas, failures: fails };
+    return { label: 'Cerrar posiciones', ok, skipped: omitidas, failures: fails, undetermined: [] };
   }
 
   private async aplicarSobrePosicion(
@@ -474,10 +514,10 @@ export class MockPanelService implements PanelService {
     }
 
     this.publicarPosiciones();
-    return { label: etiqueta, ok, skipped: omitidas, failures: fails };
+    return { label: etiqueta, ok, skipped: omitidas, failures: fails, undetermined: [] };
   }
 
-  async setTakeProfit(req: TpRequest): Promise<BatchResult> {
+  private async ponerTp(req: TpRequest): Promise<BatchResult> {
     return this.aplicarSobrePosicion('Take Profit', req.targets, (p) => {
       const dir = p.side === 'long' ? 1 : -1;
       const porcentaje = Number.parseFloat(req.percent) / 100;
@@ -490,7 +530,7 @@ export class MockPanelService implements PanelService {
     });
   }
 
-  async addMargin(req: MarginRequest): Promise<BatchResult> {
+  private async agregarMargen(req: MarginRequest): Promise<BatchResult> {
     return this.aplicarSobrePosicion('Margen adicional', req.targets, (p) => ({
       ...p,
       marginCritical: false,
@@ -498,12 +538,169 @@ export class MockPanelService implements PanelService {
     }));
   }
 
-  async setLeverage(req: LeverageRequest): Promise<BatchResult> {
+  private async fijarApalancamiento(req: LeverageRequest): Promise<BatchResult> {
     return this.aplicarSobrePosicion('Apalancamiento', req.targets, (p) => ({
       ...p,
       leverage: req.leverage,
       actions: { ...p.actions, ap: true, apDisplay: `${req.leverage}x` }
     }));
+  }
+
+  /* ---------------- planificación (modo demostración) ---------------- */
+
+  /**
+   * Arma un plan de mentira con la misma forma que el de verdad.
+   *
+   * El modo demostración no habla con Bitget, pero **sí respeta las dos
+   * fases**: si aquí se enviara de una sola vez, la pantalla se probaría contra
+   * un flujo que no es el que se usa en producción y el diálogo de
+   * confirmación nunca se ejercitaría.
+   *
+   * El ejecutor queda guardado contra el `id` del plan, igual que el proceso
+   * principal guarda el suyo: confirmar solo devuelve ese identificador.
+   */
+  private planificar(
+    kind: PlanKind,
+    title: string,
+    summary: string,
+    targets: BatchTarget[],
+    detalle: (t: BatchTarget) => string | null,
+    ejecutar: (solo?: BatchTarget[]) => Promise<BatchResult>
+  ): BatchPlan {
+    const id = `plan_${kind}_${Date.now()}`;
+    const entries: PlanEntry[] = [];
+    const discards: PlanDiscard[] = [];
+
+    for (const t of targets) {
+      const etiqueta = this.nombreDe(t.subAccountId);
+      const linea = detalle(t);
+      if (linea === null) {
+        discards.push({ ...t, label: etiqueta, reason: 'No hay ninguna posición de ese lado.' });
+        continue;
+      }
+      entries.push({ ...t, label: etiqueta, detail: linea });
+    }
+
+    this.planes.set(id, ejecutar);
+    return { kind, id, title, summary, reference: null, entries, discards };
+  }
+
+  private nombreDe(subAccountId: string): string {
+    for (const cuenta of this.cuentas) {
+      const sub = cuenta.subAccounts.find((s) => s.id === subAccountId);
+      if (sub) return `${sub.label} · ${cuenta.name.replace('Cuenta principal - ', '')}`;
+    }
+    return subAccountId;
+  }
+
+  private posicionDe(t: BatchTarget): Position | undefined {
+    return this.posiciones.get(claveObjetivo(t.subAccountId, t.side));
+  }
+
+  async planOpen(req: OpenRequest): Promise<BatchPlan> {
+    await latencia(180, 220);
+    const precio = this.precios[req.assetId] ?? PRECIO_BASE[req.assetId] ?? 1;
+    return this.planificar(
+      'open',
+      'Abrir posiciones',
+      `${req.initialMargin} de margen por casilla · ${req.leverage}x · ${req.orderType === 'limit' ? `límite ${req.limitPrice ?? '—'}` : 'a mercado'}`,
+      req.targets,
+      () => dec((Number.parseFloat(req.initialMargin) * req.leverage) / precio, 6),
+      (solo) => this.abrir({ ...req, targets: solo ?? req.targets })
+    );
+  }
+
+  async planClose(req: CloseRequest): Promise<BatchPlan> {
+    await latencia(180, 220);
+    return this.planificar(
+      'close',
+      'Cerrar posiciones',
+      'Cierre rápido: se cierra la posición entera, a mercado',
+      req.targets,
+      (t) => this.posicionDe(t)?.initialMarginAccum ?? null,
+      (solo) => this.cerrar({ ...req, targets: solo ?? req.targets })
+    );
+  }
+
+  async planTakeProfit(req: TpRequest): Promise<BatchPlan> {
+    await latencia(180, 220);
+    return this.planificar(
+      'tp',
+      'Poner Take Profit',
+      `${req.percent}% de ganancia sobre el margen inicial de cada posición`,
+      req.targets,
+      (t) => {
+        const posicion = this.posicionDe(t);
+        if (!posicion) return null;
+        const dir = t.side === 'long' ? 1 : -1;
+        const entrada = Number.parseFloat(posicion.entryPrice);
+        const objetivo = entrada * (1 + (dir * Number.parseFloat(req.percent)) / 100 / posicion.leverage);
+        return `TP a ${dec(objetivo, 6)} · entrada ${posicion.entryPrice} · ${posicion.leverage}x`;
+      },
+      (solo) => this.ponerTp({ ...req, targets: solo ?? req.targets })
+    );
+  }
+
+  async planRemoveTakeProfit(req: CloseRequest): Promise<BatchPlan> {
+    await latencia(180, 220);
+    return this.planificar(
+      'tp-remove',
+      'Quitar Take Profit',
+      'Esas posiciones se quedan sin Take Profit: habrá que cerrarlas a mano',
+      req.targets,
+      (t) => {
+        const puesto = this.posicionDe(t)?.takeProfitPrice;
+        return puesto == null ? null : `se quita el Take Profit puesto en ${puesto}`;
+      },
+      (solo) =>
+        this.aplicarSobrePosicion('Quitar Take Profit', solo ?? req.targets, (posicion) => ({
+          ...posicion,
+          takeProfitPrice: null,
+          actions: { ...posicion.actions, tp: false, tpDisplay: '' }
+        }))
+    );
+  }
+
+  async planMargin(req: MarginRequest): Promise<BatchPlan> {
+    await latencia(180, 220);
+    return this.planificar(
+      'margin',
+      'Agregar margen',
+      `${req.amount} por casilla`,
+      req.targets,
+      (t) => {
+        const posicion = this.posicionDe(t);
+        if (!posicion) return null;
+        const resultante = Number.parseFloat(posicion.initialMarginAccum) + Number.parseFloat(req.amount);
+        return `margen ${posicion.initialMarginAccum} → ${dec(resultante, 2)}`;
+      },
+      (solo) => this.agregarMargen({ ...req, targets: solo ?? req.targets })
+    );
+  }
+
+  async planLeverage(req: LeverageRequest): Promise<BatchPlan> {
+    await latencia(180, 220);
+    return this.planificar(
+      'leverage',
+      'Ajustar apalancamiento',
+      `${req.leverage}x en las casillas seleccionadas`,
+      req.targets,
+      (t) => `${this.posicionDe(t)?.leverage ?? '?'}x → ${req.leverage}x`,
+      (solo) => this.fijarApalancamiento({ ...req, targets: solo ?? req.targets })
+    );
+  }
+
+  async executePlan(plan: BatchPlan, only?: BatchTarget[]): Promise<BatchResult> {
+    const ejecutar = this.planes.get(plan.id);
+    if (!ejecutar) throw new Error('Ese plan ya no existe. Vuelva a revisar la operación.');
+    const r = await ejecutar(only);
+    if (only === undefined) this.planes.delete(plan.id);
+    return { ...r, label: plan.title };
+  }
+
+  async hasStepPassword(): Promise<boolean> {
+    await latencia(40, 40);
+    return this.pasoActual !== '';
   }
 
   /* ---------------- credenciales y seguridad ---------------- */
@@ -516,31 +713,45 @@ export class MockPanelService implements PanelService {
   async registerApiKey(input: ApiKeyInput): Promise<ValidationResult> {
     await latencia(400, 500);
     if (input.apiKey.length < 8 || input.secretKey.length < 8 || input.passphrase.length < 1) {
-      return { ok: false, verdict: 'invalida', reason: 'Bitget no aceptó la credencial.', warnings: [], latencyMs: 180 };
+      return { ok: false, verdict: 'invalida', reason: 'Bitget no aceptó la credencial.', warnings: [], latencyMs: 180, uid: null, parentUid: null };
     }
 
     const id = `demo-${Date.now()}`;
+    /* Como en la API real: el UID lo dice el exchange, no el formulario. */
+    const uid = `5476143${String(this.apiKeys.size).padStart(3, '0')}`;
     this.apiKeys.set(id, {
       id,
       subAccountLabel: input.subAccountLabel,
       accountName: input.accountName,
       maskedKey: `${input.apiKey.slice(0, 6)}••••${input.apiKey.slice(-4)}`,
+      uid,
+      parentUid: MockPanelService.UID_PADRE_DEMO,
       status: 'ok',
       reason: null
     });
 
-    return { ok: true, verdict: 'valida', reason: null, warnings: [], latencyMs: 180 };
+    return {
+      ok: true,
+      verdict: 'valida',
+      reason: null,
+      warnings: [],
+      latencyMs: 180,
+      uid,
+      parentUid: MockPanelService.UID_PADRE_DEMO
+    };
   }
 
   async testApiKey(id: string): Promise<ValidationResult> {
     await latencia(220, 260);
     const fila = this.apiKeys.get(id);
-    if (!fila) return { ok: false, verdict: 'invalida', reason: 'Credencial no encontrada.', warnings: [], latencyMs: 0 };
+    if (!fila) {
+      return { ok: false, verdict: 'invalida', reason: 'Credencial no encontrada.', warnings: [], latencyMs: 0, uid: null, parentUid: null };
+    }
 
     if (fila.status === 'error') {
-      return { ok: false, verdict: 'invalida', reason: fila.reason ?? 'Bitget rechazó la credencial.', warnings: [], latencyMs: 210 };
+      return { ok: false, verdict: 'invalida', reason: fila.reason ?? 'Bitget rechazó la credencial.', warnings: [], latencyMs: 210, uid: fila.uid, parentUid: fila.parentUid };
     }
-    return { ok: true, verdict: 'valida', reason: null, warnings: [], latencyMs: 140 };
+    return { ok: true, verdict: 'valida', reason: null, warnings: [], latencyMs: 140, uid: fila.uid, parentUid: fila.parentUid };
   }
 
   async deleteApiKey(id: string): Promise<void> {

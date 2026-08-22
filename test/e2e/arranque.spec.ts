@@ -47,6 +47,103 @@ test('el IPC responde con la informacion del sistema', async () => {
   expect(typeof info.portable).toBe('boolean');
 });
 
+/*
+ * La comprobacion mas importante de la Fase 4: un panel recien instalado opera
+ * contra el mercado simulado. Pasar a dinero real exige editar `config.json` a
+ * proposito; nunca puede ser el estado por defecto ni un descuido.
+ */
+test('un panel nuevo arranca contra el mercado simulado, no contra dinero real', async () => {
+  const info = await ventana.evaluate(() => window.pcb.sistemaInfo());
+  expect(info.mercado).toBe('simulado');
+});
+
+test('los canales de apertura existen y exigen el panel abierto', async () => {
+  const resultado = await ventana.evaluate(async () => {
+    try {
+      await window.pcb.aperturaPlanificar({
+        simbolo: 'SBTCSUSDT',
+        objetivos: [{ cuentaId: 'x', lado: 'long' }],
+        margenInicial: '100',
+        apalancamiento: 10,
+        precioLimite: null
+      });
+      return 'planifico';
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  });
+
+  /* Con el vault cerrado no se planifica nada, y el canal responde en vez de no existir. */
+  expect(resultado).toContain('bloqueado');
+});
+
+/*
+ * Las seis operaciones de la Fase 4 tienen su canal, y los seis se comportan
+ * igual con el panel bloqueado: responden que no, en vez de no existir. Que
+ * respondan es lo que se comprueba aqui; que hagan lo correcto, las pruebas de
+ * integracion y las fisicas.
+ */
+test('los seis canales de operacion existen y ninguno opera con el panel bloqueado', async () => {
+  const respuestas = await ventana.evaluate(async () => {
+    const objetivos = [{ cuentaId: 'x', lado: 'long' as const }];
+    const intentar = async (f: () => Promise<unknown>): Promise<string> => {
+      try {
+        await f();
+        return 'PLANIFICO';
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    };
+
+    return {
+      cierre: await intentar(() => window.pcb.cierrePlanificar({ simbolo: 'SBTCSUSDT', objetivos })),
+      tp: await intentar(() =>
+        window.pcb.tpPlanificar({ simbolo: 'SBTCSUSDT', objetivos, porcentaje: '35' })
+      ),
+      quitarTp: await intentar(() =>
+        window.pcb.tpPlanificarQuitar({ simbolo: 'SBTCSUSDT', objetivos })
+      ),
+      margen: await intentar(() =>
+        window.pcb.margenPlanificar({ simbolo: 'SBTCSUSDT', objetivos, cantidad: '50' })
+      ),
+      apalancamiento: await intentar(() =>
+        window.pcb.apalancamientoPlanificar({ simbolo: 'SBTCSUSDT', objetivos, apalancamiento: 20 })
+      )
+    };
+  });
+
+  for (const [canal, mensaje] of Object.entries(respuestas)) {
+    expect(mensaje, canal).toContain('bloqueado');
+  }
+});
+
+/*
+ * El catalogo es publico: no necesita credenciales ni almacen abierto, y por eso
+ * la pantalla puede dibujar el selector de activo antes de desbloquear. Trae los
+ * simbolos del mercado simulado, que es donde arranca un panel nuevo.
+ */
+test('el catalogo de activos responde con el panel aun bloqueado', async () => {
+  const activos = await ventana.evaluate(() => window.pcb.mercadoActivos());
+
+  expect(activos.length).toBeGreaterThan(0);
+  for (const activo of activos) {
+    expect(activo.simbolo).toContain('SUSDT');
+    expect(activo.apalancamientoMax).toBeGreaterThan(0);
+  }
+});
+
+/*
+ * La contrasena de paso vive dentro del almacen cifrado. Con el panel bloqueado
+ * no hay ninguna que comprobar, y la respuesta segura es «no», nunca «si».
+ */
+test('la contrasena de paso no deja pasar con el panel bloqueado', async () => {
+  const hay = await ventana.evaluate(() => window.pcb.pasoHay());
+  const acepta = await ventana.evaluate(() => window.pcb.pasoComprobar('bg1'));
+
+  expect(hay).toBe(false);
+  expect(acepta).toBe(false);
+});
+
 test('el panel arranca bloqueado, con el numero que llega por IPC', async () => {
   const info = await ventana.evaluate(() => window.pcb.sistemaInfo());
 

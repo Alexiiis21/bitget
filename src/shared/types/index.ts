@@ -35,11 +35,35 @@ export interface Cuenta {
   id: string;
   grupoId: string;
   etiqueta: string;
+  /**
+   * UID que Bitget asigna a la subcuenta (`bitget_uid`).
+   *
+   * Lo devuelve el propio exchange al validar la credencial; el operador nunca
+   * lo escribe. Es lo unico de esta ficha que **sobrevive a un cambio de API
+   * Key**, y por eso es el identificador con el que se reconoce a la subcuenta
+   * cuando se vuelve a registrar.
+   */
   uid: string;
+  /**
+   * UID de la cuenta principal a la que pertenece (`bitget_parent_uid`).
+   *
+   * Cadena vacia si Bitget no lo informa, que es lo que pasa con una cuenta que
+   * no es subcuenta de nadie. Como el `uid`, sale del exchange y no del
+   * formulario.
+   */
+  uidPadre: string;
   credencialId: string;
   /** Solo los primeros 2 y ultimos 4 caracteres. El valor completo no cruza el IPC. */
   apiKeyEnmascarada: string;
-  orden: number;
+  /**
+   * Casilla fija dentro de la cuenta principal, de 1 a SUBCUENTAS_POR_GRUPO.
+   *
+   * No es la posicion en una lista: es el numero que el operador ve en la
+   * rejilla y que aprende de memoria. La casilla 7 sigue siendo la 7 aunque se
+   * borre la 3, porque una rejilla que se recoloca sola le haria perder la
+   * referencia justo cuando mas rapido necesita actuar. docs/04 pregunta P-6.
+   */
+  slot: number;
   activa: boolean;
   modoPosicion: ModoPosicion;
   modoMargen: ModoMargen;
@@ -106,7 +130,13 @@ export interface FilaMonitor {
 
 /* ---------- lotes de ejecucion ---------- */
 
-export type AccionLote = 'abrir' | 'cerrar' | 'take-profit' | 'agregar-margen' | 'apalancamiento';
+export type AccionLote =
+  | 'abrir'
+  | 'cerrar'
+  | 'take-profit'
+  | 'quitar-take-profit'
+  | 'agregar-margen'
+  | 'apalancamiento';
 
 /**
  * Cuatro desenlaces, no dos. `indeterminado` no es un fallo: es la ausencia de
@@ -117,6 +147,17 @@ export type EstadoJob = 'pendiente' | 'enviando' | 'exito' | 'fallo' | 'omitida'
 
 export interface Job {
   cuentaId: string;
+  /**
+   * Lado sobre el que actua este trabajo.
+   *
+   * Forma parte de la identidad del trabajo, no es un adorno: en modo cobertura
+   * una misma subcuenta puede recibir una apertura long y otra short en el
+   * mismo lote, y sin el lado serian dos trabajos indistinguibles en el informe.
+   * docs/adr/0006.
+   */
+  lado: Lado;
+  /** Nombre visible de la subcuenta. El informe lo lee un operador, no una maquina. */
+  etiqueta: string;
   clientOid: string;
   estado: EstadoJob;
   codigoBitget: string | null;

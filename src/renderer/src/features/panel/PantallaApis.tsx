@@ -13,8 +13,8 @@ import type { FormularioApiKey } from './tipos';
  * guardar.
  */
 
-const REJILLA = '150px 80px minmax(150px,1fr) 130px 160px';
-const ANCHO_MINIMO = 660;
+const REJILLA = '150px 80px minmax(150px,1fr) 110px 130px 160px';
+const ANCHO_MINIMO = 790;
 
 const recorte: CSSProperties = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
 const etiquetaCampo: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 5, fontSize: 11.5, fontWeight: 600, letterSpacing: '.06em', color: T.texto2 };
@@ -94,6 +94,37 @@ function CampoSecreto({
   );
 }
 
+/**
+ * Una linea de la confirmacion posterior a validar.
+ *
+ * El visto va al final y no al principio a proposito: lo que confirma no es que
+ * el panel haya hecho algo, sino que Bitget devolvio ese dato concreto.
+ */
+function Detectado({
+  rotulo,
+  valor,
+  vacio,
+  soloMarca = false
+}: {
+  rotulo: string;
+  valor: string;
+  vacio?: string;
+  soloMarca?: boolean;
+}) {
+  const hayDato = soloMarca || valor !== '';
+  return (
+    <span style={{ display: 'flex', alignItems: 'baseline', gap: 6, fontSize: 12.5, color: T.texto }}>
+      <span style={{ fontWeight: 600 }}>{rotulo}{soloMarca ? '' : ':'}</span>
+      {!soloMarca && (
+        <span style={{ fontFamily: FUENTE.mono, color: hayDato ? T.texto : T.texto3 }}>
+          {hayDato ? valor : (vacio ?? '—')}
+        </span>
+      )}
+      {hayDato && <span style={{ color: T.largo, fontWeight: 700 }}>✓</span>}
+    </span>
+  );
+}
+
 export function PantallaApis() {
   const abierta = usarPanel((s) => s.apisAbierto);
   const apiKeys = usarPanel((s) => s.apiKeys);
@@ -101,6 +132,7 @@ export function PantallaApis() {
   const formulario = usarPanel((s) => s.formulario);
   const escribirFormulario = usarPanel((s) => s.escribirFormulario);
   const guardarApi = usarPanel((s) => s.guardarApi);
+  const ultimaValidacion = usarPanel((s) => s.ultimaValidacion);
   const probarApi = usarPanel((s) => s.probarApi);
   const eliminarApi = usarPanel((s) => s.eliminarApi);
   const carga = usarPanel((s) => s.cargaApis);
@@ -138,6 +170,7 @@ export function PantallaApis() {
               <div style={{ whiteSpace: 'nowrap' }}>SUBCUENTA</div>
               <div>CUENTA</div>
               <div style={{ whiteSpace: 'nowrap' }}>API KEY</div>
+              <div style={{ whiteSpace: 'nowrap' }}>UID BITGET</div>
               <div style={{ whiteSpace: 'nowrap' }}>ESTADO</div>
               <div style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>ACCIONES</div>
             </div>
@@ -172,6 +205,10 @@ export function PantallaApis() {
                   <div style={{ ...recorte, fontSize: 13.5, fontWeight: 600, color: T.texto }}>{fila.subAccountLabel}</div>
                   <div style={{ fontSize: 12.5, fontWeight: 600, color: T.marcaTexto, fontFamily: FUENTE.mono }}>{fila.accountName}</div>
                   <div style={{ ...recorte, fontSize: 12.5, fontFamily: FUENTE.mono, color: T.texto2 }}>{fila.maskedKey || '— sin credenciales —'}</div>
+                  {/* El UID no se enmascara: no sirve para firmar y es lo que identifica la cuenta. */}
+                  <div style={{ ...recorte, fontSize: 12.5, fontFamily: FUENTE.mono, color: T.texto2 }} title={fila.parentUid === '' ? undefined : `Cuenta principal ${fila.parentUid}`}>
+                    {fila.uid === '' ? '—' : fila.uid}
+                  </div>
                   <div style={{ minWidth: 0 }}>
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 9px', borderRadius: 20, fontSize: 11.5, fontWeight: 600, whiteSpace: 'nowrap', background: distintivo.fondo, color: distintivo.texto }}>
                       <span style={{ width: 6, height: 6, borderRadius: '50%', background: distintivo.punto, display: 'block' }} />
@@ -223,6 +260,32 @@ export function PantallaApis() {
           >
             Guardar y validar
           </button>
+
+          {ultimaValidacion !== null && (
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 5,
+                padding: '11px 13px',
+                borderRadius: 9,
+                border: `1px solid ${T.largo}33`,
+                background: `${T.largo}12`
+              }}
+            >
+              <Detectado rotulo="UID detectado" valor={ultimaValidacion.uid} />
+              <Detectado
+                rotulo="Cuenta principal"
+                valor={ultimaValidacion.uidPadre}
+                vacio="Bitget no la informa (no es subcuenta)"
+              />
+              <Detectado rotulo="API validada correctamente" valor="" soloMarca />
+              <span style={{ fontSize: 11.5, lineHeight: 1.4, color: T.texto3 }}>
+                Los identificadores los devolvió Bitget al validar la clave y quedan guardados con
+                la subcuenta. No hay que escribirlos.
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -35,17 +35,40 @@ const botonBarra: CSSProperties = {
   color: '#ffffff'
 };
 
+/**
+ * Estado de conexión del panel, a partir de las subcuentas registradas.
+ *
+ * Antes era un punto verde fijo en el código: decía «en línea» siempre, sin
+ * consultar nada. Un indicador que no puede decir «no» no informa de nada, y
+ * en una herramienta que manda órdenes con dinero de por medio es peor que no
+ * tenerlo. RF-002.
+ */
+function conexionDelPanel(cuentas: { subAccounts: { status: string }[] }[]): {
+  texto: string;
+  color: string;
+} {
+  const subs = cuentas.flatMap((c) => c.subAccounts);
+  if (subs.length === 0) return { texto: 'sin cuentas', color: '#8794a0' };
+
+  const caidas = subs.filter((s) => s.status === 'error' || s.status === 'sin-api').length;
+  if (caidas === 0) return { texto: 'en línea', color: '#35b6f5' };
+  if (caidas === subs.length) return { texto: 'sin conexión', color: '#e03131' };
+  return { texto: `${caidas} sin conexión`, color: '#f2b705' };
+}
+
 export function Encabezado() {
   const numeroPanel = usarPanel((s) => s.numeroPanel);
   const fijarNumeroPanel = usarPanel((s) => s.fijarNumeroPanel);
   const tema = usarPanel((s) => s.tema);
   const fijarTema = usarPanel((s) => s.fijarTema);
   const apiKeys = usarPanel((s) => s.apiKeys);
+  const cuentas = usarPanel((s) => s.cuentas);
   const abrirApis = usarPanel((s) => s.abrirApis);
   const abrirSeguridad = usarPanel((s) => s.abrirSeguridad);
   const bloquear = usarPanel((s) => s.bloquear);
 
   const conectadas = apiKeys.filter((a) => a.status === 'ok').length;
+  const conexion = conexionDelPanel(cuentas);
 
   return (
     <div style={barra}>
@@ -86,9 +109,12 @@ export function Encabezado() {
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#95c9ea' }}>
-          <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#35b6f5', display: 'block' }} />
-          en línea
+        <div
+          title="Estado de las credenciales registradas, según la última comprobación contra Bitget"
+          style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#95c9ea' }}
+        >
+          <span style={{ width: 7, height: 7, borderRadius: '50%', background: conexion.color, display: 'block' }} />
+          {conexion.texto}
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 2, padding: 2, borderRadius: 20, border: '1px solid #ffffff2e', background: '#ffffff14' }}>

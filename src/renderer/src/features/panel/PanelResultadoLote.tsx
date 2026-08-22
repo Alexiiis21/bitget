@@ -1,3 +1,4 @@
+import type { BatchFailure } from '@shared/domain/panel-view';
 import { T } from '@/lib/tokens';
 import { usarPanel } from '@/store/panel';
 
@@ -5,11 +6,46 @@ import { usarPanel } from '@/store/panel';
  * Resultado del último lote enviado.
  *
  * Aparece sobre la matriz de cuentas tras cualquier acción masiva. Distingue
- * tres desenlaces por casilla: correcta, con error (con el motivo exacto que
- * dio Bitget) y omitida (la casilla no tenía posición de ese lado, así que
- * la acción no aplicaba). «Reintentar solo las fallidas» reconstruye el
- * mismo lote acotado a los objetivos que fallaron.
+ * **cuatro** desenlaces por casilla, no dos:
+ *
+ *   correcta        entró.
+ *   con error       no entró, y con el motivo exacto que dio Bitget.
+ *   omitida         no aplicaba: la casilla no tenía posición de ese lado.
+ *   sin confirmar   se envió y no se sabe si entró.
+ *
+ * El cuarto es el que obliga a separarlos. Contarlo como error invitaría a
+ * reintentarlo, y reintentar a ciegas algo que quizá entró es lo único capaz de
+ * duplicar una posición. Por eso sale aparte, con su propio aviso, y
+ * «reintentar solo las fallidas» **no lo incluye**: ese botón reenvía el mismo
+ * plan acotado a lo que falló de verdad, reutilizando sus identificadores de
+ * orden, que es lo que hace inofensivo el reintento.
  */
+/** Las casillas de un desenlace, con su motivo. Igual para fallos y dudas. */
+function Lista({
+  casillas,
+  punto,
+  nombreSub
+}: {
+  casillas: readonly BatchFailure[];
+  punto: string;
+  nombreSub: (id: string) => string;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      {casillas.map((f) => (
+        <div key={`${f.subAccountId}-${f.side}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10.5, minWidth: 0 }}>
+          <span style={{ flex: 'none', width: 5, height: 5, borderRadius: '50%', background: punto, display: 'block' }} />
+          <span style={{ flex: 'none', fontWeight: 600, color: T.texto }}>{nombreSub(f.subAccountId)}</span>
+          <span style={{ flex: 'none', padding: '0 5px', borderRadius: 4, fontSize: 8.5, fontWeight: 700, color: '#ffffff', background: f.side === 'long' ? T.largo : T.corto }}>
+            {f.side === 'long' ? 'LONG' : 'SHORT'}
+          </span>
+          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: T.texto2 }}>{f.reason}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function PanelResultadoLote() {
   const batch = usarPanel((s) => s.batch);
   const reintentarFallidas = usarPanel((s) => s.reintentarFallidas);
@@ -34,6 +70,7 @@ export function PanelResultadoLote() {
         <span style={{ fontSize: 11.5, fontWeight: 700, color: T.texto, whiteSpace: 'nowrap' }}>Resultado del lote · {batch.label}</span>
         <span style={{ fontSize: 11, fontWeight: 600, color: T.texto2, whiteSpace: 'nowrap' }}>
           {batch.ok} correctas · {batch.failures.length} con error · {batch.skipped} omitidas
+          {batch.undetermined.length > 0 && ` · ${batch.undetermined.length} sin confirmar`}
         </span>
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
           {reintentarFallidas && (
@@ -55,18 +92,14 @@ export function PanelResultadoLote() {
         </span>
       </div>
 
-      {batch.failures.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {batch.failures.map((f) => (
-            <div key={`${f.subAccountId}-${f.side}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10.5, minWidth: 0 }}>
-              <span style={{ flex: 'none', width: 5, height: 5, borderRadius: '50%', background: '#e03131', display: 'block' }} />
-              <span style={{ flex: 'none', fontWeight: 600, color: T.texto }}>{nombreSub(f.subAccountId)}</span>
-              <span style={{ flex: 'none', padding: '0 5px', borderRadius: 4, fontSize: 8.5, fontWeight: 700, color: '#ffffff', background: f.side === 'long' ? T.largo : T.corto }}>
-                {f.side === 'long' ? 'LONG' : 'SHORT'}
-              </span>
-              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: T.texto2 }}>{f.reason}</span>
-            </div>
-          ))}
+      {batch.failures.length > 0 && <Lista casillas={batch.failures} punto="#e03131" nombreSub={nombreSub} />}
+
+      {batch.undetermined.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.08em', color: '#b7791f' }}>
+            SIN CONFIRMAR · COMPRUÉBELAS EN BITGET ANTES DE REPETIR
+          </span>
+          <Lista casillas={batch.undetermined} punto="#d9a441" nombreSub={nombreSub} />
         </div>
       )}
     </div>

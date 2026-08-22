@@ -19,6 +19,7 @@ import type { Decimal } from '../types';
 export type Side = 'long' | 'short';
 export type OrderType = 'market' | 'limit';
 export type ActionKey = 'tp' | 'mg' | 'ap' | 'oe';
+export type ApiKeyStatus = 'ok' | 'conectando' | 'error' | 'sin-api';
 
 /** Catálogo de activos operables. Futuros USDT-M. */
 export interface Asset {
@@ -28,6 +29,17 @@ export interface Asset {
   label: string;
   /** Decimales de precio propios del activo: PEPE necesita 8, PAXG necesita 2. */
   priceDecimals: number;
+  /**
+   * Tope de apalancamiento del activo, leído del contrato de Bitget.
+   *
+   * Cada activo tiene el suyo —BTC 150x, PEPE 75x, PAXG 50x— y en el mercado de
+   * pruebas son otros. Con este dato el campo puede proponer el máximo del
+   * activo elegido, que es como opera el cliente, sin que tenga que recordarlo.
+   */
+  maxLeverage: number;
+  minLeverage: number;
+  /** `false` si Bitget tiene el contrato suspendido: no se puede operar. */
+  tradable: boolean;
 }
 
 export interface SubAccount {
@@ -37,6 +49,16 @@ export interface SubAccount {
   /** Posición dentro de la cuenta principal, 1 a `CASILLAS_POR_CUENTA`. */
   slot: number;
   balance: Decimal;
+  /**
+   * Estado de la credencial de esta subcuenta contra Bitget.
+   *
+   * Vive aquí y no solo en la pantalla de API keys porque es lo que separa
+   * «esta casilla no tiene posición» de «esta casilla no responde», y esas dos
+   * piden reacciones opuestas del operador. RF-002.
+   */
+  status: ApiKeyStatus;
+  /** Texto del fallo cuando `status` no es `ok`. */
+  statusReason: string | null;
 }
 
 export interface Account {
@@ -131,6 +153,58 @@ export interface BatchResult {
   ok: number;
   skipped: number;
   failures: BatchFailure[];
+  /**
+   * Casillas cuyo desenlace **no se pudo determinar**.
+   *
+   * No son fallos y no se pueden reintentar como si lo fueran: la orden se
+   * envió, la respuesta no llegó y el panel tampoco pudo averiguar después qué
+   * pasó. Reintentarlas a ciegas es lo único que puede duplicar una posición,
+   * así que se cuentan aparte y quedan fuera de «reintentar las fallidas».
+   */
+  undetermined: BatchFailure[];
+}
+
+/* ---------- planes (lo que se aprueba antes de enviar) ---------- */
+
+export type PlanKind = 'open' | 'close' | 'tp' | 'tp-remove' | 'margin' | 'leverage';
+
+/** Una casilla que sí va a recibir la operación, con lo que le va a pasar. */
+export interface PlanEntry extends BatchTarget {
+  /** Nombre visible: «Sub-01 · A». */
+  label: string;
+  /** Lo concreto que se va a hacer ahí: «0,0157 BTC · margen 100 USDT». */
+  detail: string;
+}
+
+/** Una casilla que se queda fuera, y por qué. Se enseña igual que las demás. */
+export interface PlanDiscard extends BatchTarget {
+  label: string;
+  reason: string;
+}
+
+/**
+ * Lo que el operador aprueba antes de que salga una sola orden.
+ *
+ * Es la pieza que sostiene la promesa del contrato: no se aprueba «abrir 100
+ * USDT a 150x», se aprueba «0,0157 BTC en estas 34 casillas, y estas 3 no
+ * pueden por saldo». Los números vienen del proceso principal, calculados con
+ * el precio y el saldo de ese momento.
+ *
+ * El plan vive en el proceso principal; aquí solo llega su `id` y lo que hay
+ * que enseñar. Confirmar devuelve ese `id`, de modo que ninguna cantidad puede
+ * cambiar entre lo aprobado y lo enviado.
+ */
+export interface BatchPlan {
+  kind: PlanKind;
+  id: string;
+  /** Título de la confirmación: «Abrir posiciones». */
+  title: string;
+  /** Una línea con lo común a todas: «100 USDT por casilla · a mercado». */
+  summary: string;
+  /** Precio con el que se calculó, cuando la operación depende de uno. */
+  reference: string | null;
+  entries: PlanEntry[];
+  discards: PlanDiscard[];
 }
 
 export interface OpenRequest {
@@ -139,6 +213,7 @@ export interface OpenRequest {
   orderType: OrderType;
   limitPrice: Decimal | null;
   initialMargin: Decimal;
+  leverage: number;
 }
 
 export interface CloseRequest {
@@ -148,22 +223,23 @@ export interface CloseRequest {
 
 export interface TpRequest {
   targets: BatchTarget[];
+  assetId: string;
   percent: Decimal;
 }
 
 export interface MarginRequest {
   targets: BatchTarget[];
+  assetId: string;
   amount: Decimal;
 }
 
 export interface LeverageRequest {
   targets: BatchTarget[];
+  assetId: string;
   leverage: number;
 }
 
 /* ---------- credenciales ---------- */
-
-export type ApiKeyStatus = 'ok' | 'conectando' | 'error' | 'sin-api';
 
 export interface ApiKeyRow {
   id: string;
@@ -171,6 +247,15 @@ export interface ApiKeyRow {
   accountName: string;
   /** Nunca la clave completa: solo prefijo y sufijo. RNF-001. */
   maskedKey: string;
+  /**
+   * UID que Bitget asigna a la subcuenta. Lo detecta el panel al validar.
+   *
+   * A diferencia de la clave, no se enmascara: no sirve para firmar nada y es
+   * justamente lo que permite reconocer la cuenta cuando la clave cambia.
+   */
+  uid: string;
+  /** UID de la cuenta principal segun Bitget. Vacio si Bitget no lo informa. */
+  parentUid: string;
   status: ApiKeyStatus;
   reason: string | null;
 }
@@ -194,6 +279,10 @@ export interface ValidationResult {
   reason: string | null;
   warnings: Warning[];
   latencyMs: number | null;
+  /** UID detectado en Bitget. `null` cuando la credencial no llego a validar. */
+  uid: string | null;
+  /** UID de la cuenta principal detectado en Bitget, si la cuenta es subcuenta. */
+  parentUid: string | null;
 }
 
 /** Resultado de crear o abrir el almacén. `reason` distingue contraseña incorrecta de archivo dañado. */

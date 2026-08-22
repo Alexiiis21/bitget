@@ -22,6 +22,8 @@ export default defineConfig({
     alias: {
       '@main': resolve('src/main'),
       '@shared': resolve('src/shared'),
+      /* El store del renderer es JavaScript corriente y se prueba como tal. */
+      '@': resolve('src/renderer/src'),
       /*
        * El modulo real de Electron arrastra la resolucion del binario y anade
        * ~30 s al arranque de la suite. Ver test/stubs/electron.ts.
@@ -40,6 +42,8 @@ export default defineConfig({
     include: [
       'test/unit/**/*.test.ts',
       'test/integration/**/*.test.ts',
+      /* El store del renderer: misma suite, carpeta propia por la frontera. */
+      'test/renderer/**/*.test.ts',
       ...(process.argv.some((arg) => arg.includes('test/red')) ? ['test/red/**/*.test.ts'] : [])
     ],
     coverage: {

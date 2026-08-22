@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react';
 import { FUENTE, T } from '@/lib/tokens';
 import { usarPanel } from '@/store/panel';
+import type { PlanKind } from '@shared/domain/panel-view';
 import type { AlcanceLado, ValoresHerramientas } from './tipos';
 
 /**
@@ -70,8 +71,8 @@ function SelectorActivo() {
 }
 
 function ControlesEjecucion() {
-  const pedirPaso = usarPanel((s) => s.pedirPaso);
-  const cerrarSeleccionados = usarPanel((s) => s.cerrarSeleccionados);
+  const planear = usarPanel((s) => s.planear);
+  const planCargando = usarPanel((s) => s.planCargando);
   const alcance = usarPanel((s) => s.alcance);
   const fijarAlcance = usarPanel((s) => s.fijarAlcance);
 
@@ -85,23 +86,46 @@ function ControlesEjecucion() {
     <div style={seccion}>
       <span style={tituloSeccion}>EJECUCIÓN</span>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+        {/*
+          * Los dos botones planifican: ninguno envía. Lo que sale de aquí es la
+          * consulta de precios y saldos que arma la confirmación, y hasta que el
+          * operador no la apruebe no hay ninguna orden en Bitget.
+          */}
         <button
           type="button"
-          onClick={pedirPaso}
-          title="Abrir posición en las casillas seleccionadas"
-          style={{ padding: '9px 6px', borderRadius: 7, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', border: `1px solid ${T.marcaRelleno}`, background: T.marcaRelleno, color: '#ffffff' }}
+          disabled={planCargando}
+          onClick={() => void planear('open')}
+          title="Revisar la apertura en las casillas seleccionadas"
+          style={{ padding: '9px 6px', borderRadius: 7, fontSize: 12.5, fontWeight: 700, cursor: planCargando ? 'wait' : 'pointer', opacity: planCargando ? 0.6 : 1, border: `1px solid ${T.marcaRelleno}`, background: T.marcaRelleno, color: '#ffffff' }}
         >
           Abrir
         </button>
         <button
           type="button"
-          onClick={() => void cerrarSeleccionados()}
-          title="Cerrar posición en las casillas seleccionadas"
-          style={{ padding: '9px 6px', borderRadius: 7, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', border: `1px solid ${T.bordeFuerte}`, background: T.superficie, color: T.texto }}
+          disabled={planCargando}
+          onClick={() => void planear('close')}
+          title="Cierre rápido en las casillas seleccionadas"
+          style={{ padding: '9px 6px', borderRadius: 7, fontSize: 12.5, fontWeight: 700, cursor: planCargando ? 'wait' : 'pointer', opacity: planCargando ? 0.6 : 1, border: `1px solid ${T.bordeFuerte}`, background: T.superficie, color: T.texto }}
         >
           Cerrar
         </button>
       </div>
+
+      {/*
+        * Quitar el Take Profit va aparte de los otros dos y con aspecto de
+        * acción secundaria: no es una operación frecuente, y ponerla junto a
+        * «Cerrar» invitaría a pulsarla por inercia. El cliente la pidió porque
+        * a veces opera sin Take Profit y cierra a mano.
+        */}
+      <button
+        type="button"
+        disabled={planCargando}
+        onClick={() => void planear('tp-remove')}
+        title="Quitar el Take Profit de las casillas seleccionadas"
+        style={{ padding: '6px', borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: planCargando ? 'wait' : 'pointer', opacity: planCargando ? 0.6 : 1, border: `1px dashed ${T.bordeFuerte}`, background: 'transparent', color: T.texto3 }}
+      >
+        Quitar Take Profit
+      </button>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         {ALCANCES.map((a) => {
           const activa = alcance === a.id;
@@ -138,22 +162,31 @@ function ControlesEjecucion() {
 interface DefinicionCampo {
   campo: keyof ValoresHerramientas;
   clave: 'tp' | 'mg' | 'ap';
+  /** La operación que planifica su botón, o `null` si el campo no es una. */
+  plan: PlanKind | null;
   etiqueta: string;
   unidad: string;
   marcador: string;
 }
 
+/**
+ * `plan: null` significa que el campo no es una operación por sí mismo.
+ *
+ * Es el caso del margen inicial: no se aplica suelto, viaja dentro de la
+ * apertura. Su botón está ahí para que la fila se vea igual que las demás, pero
+ * no dispara nada.
+ */
 const CAMPOS: DefinicionCampo[] = [
-  { campo: 'tp', clave: 'tp', etiqueta: 'Take Profit %', unidad: '%', marcador: '0.00' },
-  { campo: 'mgi', clave: 'mg', etiqueta: 'Margen inicial', unidad: 'USDT', marcador: '0.000' },
-  { campo: 'mga', clave: 'mg', etiqueta: 'Margen adicional', unidad: 'USDT', marcador: '0.000' },
-  { campo: 'ap', clave: 'ap', etiqueta: 'Apalancamiento', unidad: 'x', marcador: '10' }
+  { campo: 'tp', clave: 'tp', plan: 'tp', etiqueta: 'Take Profit %', unidad: '%', marcador: '0.00' },
+  { campo: 'mgi', clave: 'mg', plan: null, etiqueta: 'Margen inicial', unidad: 'USDT', marcador: '0.000' },
+  { campo: 'mga', clave: 'mg', plan: 'margin', etiqueta: 'Margen adicional', unidad: 'USDT', marcador: '0.000' },
+  { campo: 'ap', clave: 'ap', plan: 'leverage', etiqueta: 'Apalancamiento', unidad: 'x', marcador: '10' }
 ];
 
 function CamposParametro() {
   const valores = usarPanel((s) => s.valores);
   const fijarValor = usarPanel((s) => s.fijarValor);
-  const aplicarHerramienta = usarPanel((s) => s.aplicarHerramienta);
+  const planear = usarPanel((s) => s.planear);
 
   return (
     <div style={seccion}>
@@ -166,11 +199,11 @@ function CamposParametro() {
             <button
               type="button"
               onClick={() => {
-                if (c.campo === 'mgi') return; // el margen inicial solo se estampa al abrir, no es un lote aparte
-                void aplicarHerramienta(c.clave, c.campo, c.etiqueta);
+                if (c.plan === null) return; // el margen inicial solo se estampa al abrir, no es un lote aparte
+                void planear(c.plan);
               }}
               title={`Aplicar ${c.etiqueta} a las casillas seleccionadas`}
-              aria-disabled={c.campo === 'mgi'}
+              aria-disabled={c.plan === null}
               style={{
                 width: '100%',
                 textAlign: 'left',
@@ -275,20 +308,76 @@ function InterruptorValoresFijos() {
 }
 
 function BotonAplicarTodo() {
-  const aplicarTodo = usarPanel((s) => s.aplicarTodo);
+  const planearVarios = usarPanel((s) => s.planearVarios);
   const valores = usarPanel((s) => s.valores);
   const activo = ['tp', 'mgi', 'mga', 'ap'].some((k) => valores[k as keyof ValoresHerramientas].trim() !== '');
 
   return (
     <button
       type="button"
-      onClick={() => void aplicarTodo()}
-      title="Aplica Take Profit, margen adicional y apalancamiento a la vez"
+      onClick={() => void planearVarios(['tp', 'margin', 'leverage'])}
+      title="Take Profit, margen adicional y apalancamiento, uno detrás de otro y aprobando cada uno"
       style={{ marginTop: 2, padding: '10px 8px', borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${activo ? T.marcaRelleno : T.bordeFuerte}`, background: activo ? T.marcaRelleno : T.superficie, color: activo ? '#ffffff' : T.texto3, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7 }}
     >
       <span style={{ width: 6, height: 6, borderRadius: 2, background: activo ? '#8ccdf5' : T.bordeFuerte, display: 'block' }} />
       Aplicar todo
     </button>
+  );
+}
+
+/**
+ * Selección de todas las casillas y su contrario.
+ *
+ * El contrato pide poder operar «sobre una cuenta, varias o todas». Sin estos
+ * dos botones, «todas» era pulsar una vez por cada cuenta principal, y deshacer
+ * la selección era destildar a mano — con el riesgo de que una casilla olvidada
+ * reciba la siguiente acción.
+ */
+function ControlesSeleccion() {
+  const seleccionarTodo = usarPanel((s) => s.seleccionarTodo);
+  const limpiarSeleccion = usarPanel((s) => s.limpiarSeleccion);
+  const seleccionadas = usarPanel((s) => s.contarSeleccion());
+  const hayCuentas = usarPanel((s) => s.cuentas.length > 0);
+
+  const boton: CSSProperties = {
+    flex: '1 1 0',
+    padding: '6px 2px',
+    borderRadius: 6,
+    fontSize: 10.5,
+    fontWeight: 700,
+    cursor: 'pointer',
+    border: `1.5px solid ${T.bordeFuerte}`,
+    background: T.superficie,
+    color: T.texto2
+  };
+
+  return (
+    <div style={{ display: 'flex', gap: 6 }}>
+      <button
+        type="button"
+        className="pcb-boton-claro"
+        onClick={seleccionarTodo}
+        disabled={!hayCuentas}
+        title="Marcar todas las casillas de todas las cuentas principales"
+        style={{ ...boton, opacity: hayCuentas ? 1 : 0.45, cursor: hayCuentas ? 'pointer' : 'default' }}
+      >
+        Todas
+      </button>
+      <button
+        type="button"
+        className="pcb-boton-claro"
+        onClick={limpiarSeleccion}
+        disabled={seleccionadas === 0}
+        title="Quitar la selección de todas las casillas"
+        style={{
+          ...boton,
+          opacity: seleccionadas === 0 ? 0.45 : 1,
+          cursor: seleccionadas === 0 ? 'default' : 'pointer'
+        }}
+      >
+        Ninguna
+      </button>
+    </div>
   );
 }
 
@@ -306,7 +395,7 @@ function EtiquetaSeleccion() {
 
 export function BarraLateral() {
   return (
-    <div style={{ flex: 'none', width: 228, display: 'flex', flexDirection: 'column', gap: 10, padding: 10, background: T.superficie, borderLeft: `1px solid ${T.bordeFuerte}`, overflowY: 'auto', overflowX: 'hidden' }}>
+    <div style={{ height: '100%', flex: 'none', width: 228, display: 'flex', flexDirection: 'column', gap: 10, padding: 10, background: T.superficie, borderLeft: `1px solid ${T.bordeFuerte}`, overflowY: 'auto', overflowX: 'hidden' }}>
       <SelectorActivo />
       <div style={{ height: 1, background: T.borde }} />
       <ControlesEjecucion />
@@ -316,6 +405,8 @@ export function BarraLateral() {
       <SelectorTipoOrden />
       <InterruptorValoresFijos />
       <BotonAplicarTodo />
+      <div style={{ height: 1, background: T.borde }} />
+      <ControlesSeleccion />
       <EtiquetaSeleccion />
     </div>
   );

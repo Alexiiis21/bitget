@@ -3,7 +3,7 @@ import { usarPanel } from '@/store/panel';
 import { PantallaDesbloqueo } from '@/features/login/PantallaDesbloqueo';
 import { Avisos } from '@/features/panel/Avisos';
 import { BarraLateral } from '@/features/panel/BarraLateral';
-import { DialogoPaso } from '@/features/panel/DialogoPaso';
+import { DialogoPlan } from '@/features/panel/DialogoPlan';
 import { DialogoSeguridad } from '@/features/panel/DialogoSeguridad';
 import { Encabezado } from '@/features/panel/Encabezado';
 import { MatrizCuentas } from '@/features/panel/MatrizCuentas';
@@ -45,14 +45,14 @@ export default function App() {
           <PanelResultadoLote />
           <MatrizCuentas />
         </div>
-        <div style={{ order: 2 }}>
+        <div style={{ order: 2, height: '100%', display: 'flex' }}>
           <BarraLateral />
         </div>
       </div>
 
       <PantallaApis />
       <DialogoSeguridad />
-      <DialogoPaso />
+      <DialogoPlan />
       <ModalDetalleSubcuenta />
       {pantalla === 'login' && <PantallaDesbloqueo />}
       <Avisos />

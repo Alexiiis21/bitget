@@ -102,6 +102,18 @@ export const REINTENTO_TICK_MS = 1_000;
  */
 export const REINTENTO_CONCURRENCIA = 4;
 
+/* ---------- Ejecucion de lotes ---------- */
+/**
+ * Cuanto vale un plan de apertura desde que se calcula.
+ *
+ * Un plan lleva dentro el precio con el que se calcularon las cantidades. Si el
+ * operador lo deja abierto y lo confirma diez minutos despues, esas cantidades
+ * ya no corresponden al mercado y el margen comprometido no seria el que
+ * aprobo. Pasado este plazo hay que volver a planificar, que cuesta una
+ * peticion publica.
+ */
+export const PLAN_VIGENCIA_MS = 120_000;
+
 /* ---------- Interfaz ---------- */
 /** Retardo del boton de confirmacion, contra el doble clic reflejo. docs/04 W-09. */
 export const CONFIRMACION_RETARDO_MS = 2_000;

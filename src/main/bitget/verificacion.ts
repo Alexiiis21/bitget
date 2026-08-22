@@ -32,6 +32,7 @@
  */
 import type { ModoMargen, ModoPosicion } from '@shared/types';
 import { ErrorBitget } from './errors';
+import { MERCADO_REAL, type Mercado } from './mercado';
 import type { ClienteBitget } from './rest/client';
 import type { Credencial } from './rest/signer';
 import { obtenerCuentaSimbolo, obtenerInfoCuenta } from './rest/endpoints/cuenta';
@@ -69,8 +70,22 @@ import { obtenerCuentaSimbolo, obtenerInfoCuenta } from './rest/endpoints/cuenta
 const PERMISOS_ACEPTADOS: Record<string, string> = {
   coow: 'Futuros: ordenes',
   cpow: 'Futuros: posiciones',
-  ttow: 'Futuros: operar (alta por API)'
+  ttow: 'Futuros: operar (alta por API)',
+  chow: 'Subcuentas: administrar'
 };
+
+/**
+ * El `parentId` de Bitget, normalizado a cadena.
+ *
+ * Verificado el 19/08/2026 contra la API real: una subcuenta devuelve
+ * `userId: '5476143713'` -cadena- y `parentId: 1513226215` -numero-. Los dos
+ * son UIDs y tienen que compararse entre si, asi que aqui se igualan al tipo
+ * del primero. Un cero o un ausente significan «no es subcuenta de nadie».
+ */
+function uidPadreDe(parentId: number | null | undefined): string | null {
+  if (typeof parentId !== 'number' || !Number.isFinite(parentId) || parentId <= 0) return null;
+  return String(parentId);
+}
 
 export type VeredictoCredencial = 'valida' | 'rechazada' | 'invalida';
 
@@ -92,6 +107,15 @@ export interface ResultadoVerificacion {
   veredicto: VeredictoCredencial;
   /** Presente salvo que la credencial ni siquiera autentique. */
   uid: string | null;
+  /**
+   * UID de la cuenta principal, tal como lo declara Bitget (`parentId`).
+   *
+   * `null` cuando la credencial no autentica o cuando la cuenta no es subcuenta
+   * de nadie. Se guarda **como cadena** aunque Bitget lo envie como numero: es
+   * un identificador, no una cantidad, y mezclar los dos tipos haria que
+   * `'1513226215' === 1513226215` diera falso justo donde se comparan cuentas.
+   */
+  uidPadre: string | null;
   esSubcuenta: boolean;
   permisos: string[];
   /** Codigos fuera del catalogo. Si hay alguno, el veredicto es `rechazada`. */
@@ -101,6 +125,13 @@ export interface ResultadoVerificacion {
   modoMargen: ModoMargen | null;
   apalancamientoLong: number | null;
   apalancamientoShort: number | null;
+  /**
+   * Apalancamiento en margen cruzado, que es uno solo para los dos lados.
+   *
+   * Se guarda aparte porque en cruzado Bitget ignora los dos anteriores, y
+   * confundirlos daria por bueno un apalancamiento que la cuenta no usa.
+   */
+  apalancamientoCruzado: number | null;
   saldoDisponible: string | null;
   advertencias: Advertencia[];
   /** Motivo en espanol cuando el veredicto no es `valida`. */
@@ -111,7 +142,30 @@ export interface ResultadoVerificacion {
 }
 
 export interface OpcionesVerificacion {
-  /** Simbolo con el que se leen modo de posicion y apalancamiento. */
+  /**
+   * Mercado en el que se comprueba la cuenta.
+   *
+   * --------------------------------------------------------------------------
+   * Por que no puede quedarse implicito
+   * --------------------------------------------------------------------------
+   * La verificacion no solo dice si la credencial vale: trae el **saldo** y el
+   * **apalancamiento**, y el panel los usa despues para decidir si una apertura
+   * cabe. Real y simulado son mercados distintos con saldos distintos, asi que
+   * verificar contra `USDT-FUTURES` estando el panel en `SUSDT-FUTURES` guarda
+   * un saldo de cero y toda apertura se descarta por «saldo insuficiente»
+   * aunque la cuenta tenga fondos simulados de sobra.
+   *
+   * Detectado el 20/08/2026 por la prueba de QA `test/fisica/qa-panel.test.ts`,
+   * que recorre el panel entero: las pruebas del motor no lo veian porque le
+   * pasan el mercado a mano.
+   */
+  mercado?: Mercado;
+  /**
+   * Simbolo con el que se leen modo de posicion y apalancamiento.
+   *
+   * Por defecto, el primero del mercado indicado. Solo hace falta darlo para
+   * comprobar un activo concreto.
+   */
   simbolo?: string;
 }
 
@@ -128,12 +182,14 @@ export async function verificarCredencial(
   credencial: Credencial,
   opciones: OpcionesVerificacion = {}
 ): Promise<ResultadoVerificacion> {
-  const simbolo = opciones.simbolo ?? 'BTCUSDT';
+  const mercado = opciones.mercado ?? MERCADO_REAL;
+  const simbolo = opciones.simbolo ?? mercado.simbolos[0] ?? 'BTCUSDT';
   const inicio = Date.now();
 
   const base = (): ResultadoVerificacion => ({
     veredicto: 'invalida',
     uid: null,
+    uidPadre: null,
     esSubcuenta: false,
     permisos: [],
     permisosDesconocidos: [],
@@ -142,6 +198,7 @@ export async function verificarCredencial(
     modoMargen: null,
     apalancamientoLong: null,
     apalancamientoShort: null,
+    apalancamientoCruzado: null,
     saldoDisponible: null,
     advertencias: [],
     motivo: null,
@@ -168,14 +225,17 @@ export async function verificarCredencial(
   const permisos = info.datos.authorities;
   const desconocidos = permisos.filter((p) => !(p in PERMISOS_ACEPTADOS));
   const ips = info.datos.ips
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+    ? info.datos.ips
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+    : [];
 
   const parcial: ResultadoVerificacion = {
     ...base(),
     uid: info.datos.userId,
-    esSubcuenta: typeof info.datos.parentId === 'number' && info.datos.parentId > 0,
+    uidPadre: uidPadreDe(info.datos.parentId),
+    esSubcuenta: uidPadreDe(info.datos.parentId) !== null,
     permisos,
     permisosDesconocidos: desconocidos,
     ipsLigadas: ips
@@ -208,7 +268,13 @@ export async function verificarCredencial(
 
   let cuenta;
   try {
-    cuenta = await obtenerCuentaSimbolo(cliente, credencial, simbolo);
+    cuenta = await obtenerCuentaSimbolo(
+      cliente,
+      credencial,
+      simbolo,
+      mercado.productType,
+      mercado.marginCoin
+    );
   } catch (e) {
     if (e instanceof ErrorBitget && e.reintentable) throw e;
     const err = e as ErrorBitget;
@@ -276,6 +342,7 @@ export async function verificarCredencial(
     modoMargen,
     apalancamientoLong: cuenta.datos.isolatedLongLever ?? null,
     apalancamientoShort: cuenta.datos.isolatedShortLever ?? null,
+    apalancamientoCruzado: cuenta.datos.crossedMarginLeverage ?? null,
     saldoDisponible: cuenta.datos.available,
     advertencias,
     latenciaMs: Date.now() - inicio

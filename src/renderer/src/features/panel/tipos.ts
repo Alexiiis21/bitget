@@ -27,13 +27,6 @@ export interface Aviso {
 }
 
 /** Acción en espera de la contraseña de paso. Solo la apertura pasa por aquí. */
-export interface AccionPendiente {
-  tipo: 'abrir';
-  etiqueta: string;
-  alcanceTexto: string;
-  margenInicial: string;
-}
-
 export interface ValoresHerramientas {
   tp: string;
   mgi: string;
