@@ -39,15 +39,35 @@ import type { Instancia } from '../storage/instancia';
 import type { Sesion } from './sesion';
 
 /**
+ * Un importe de dinero, listo para ensenarse.
+ *
+ * Dos decimales y **truncado**, nunca redondeado: es la misma regla que sigue
+ * `dimensionarApertura` al calcular la cantidad. Un importe redondeado hacia
+ * arriba le diria al operador que compromete 10,00 donde compromete 9,99, y de
+ * los dos errores posibles ese es el que le hace aprobar algo que no es.
+ *
+ * Solo afecta a lo que se mira. La cantidad que viaja en la orden es `size`, que
+ * sale intacto, y el plan de verdad -con sus decimales completos- se queda en el
+ * proceso principal.
+ */
+const importe = (v: string | null): string =>
+  v === null ? '0.00' : new Decimal(v || '0').toDecimalPlaces(2, Decimal.ROUND_DOWN).toFixed(2);
+
+/**
  * El plan, recortado a lo que la pantalla necesita ver.
  *
  * Se deja fuera el `clientOid` de cada entrada: no aporta nada a quien mira la
  * confirmacion y es un identificador de orden real. Para reintentar basta con
  * la cuenta y el lado; la traduccion a identificadores la hace la sesion.
+ *
+ * `monedaMargen` viaja con el plan porque cada cifra de dinero de la
+ * confirmacion se ensena con su moneda al lado, y esa moneda la decide el
+ * mercado -USDT o SUSDT-, no la pantalla.
  */
 const aVista = (plan: PlanApertura): PlanAperturaIpc => ({
   id: plan.id,
   mercado: plan.mercado.clave,
+  monedaMargen: plan.mercado.marginCoin,
   simbolo: plan.simbolo,
   apalancamiento: plan.apalancamiento,
   precioLimite: plan.precioLimite,
@@ -59,8 +79,8 @@ const aVista = (plan: PlanApertura): PlanAperturaIpc => ({
     etiqueta: e.etiqueta,
     lado: e.lado,
     size: e.size,
-    nocional: e.nocional,
-    margenReal: e.margenReal
+    nocional: importe(e.nocional),
+    margenReal: importe(e.margenReal)
   })),
   descartes: plan.descartes.map((d) => ({
     cuentaId: d.cuentaId,
@@ -76,9 +96,9 @@ const aVista = (plan: PlanApertura): PlanAperturaIpc => ({
     codigo: a.codigo,
     mensaje: a.mensaje
   })),
-  margenTotal: plan.entradas
-    .reduce((total, e) => total.plus(e.margenReal), new Decimal(0))
-    .toFixed(),
+  margenTotal: importe(
+    plan.entradas.reduce((total, e) => total.plus(e.margenReal), new Decimal(0)).toFixed()
+  ),
   creadoEn: plan.creadoEn,
   expiraEn: new Date(Date.parse(plan.creadoEn) + PLAN_VIGENCIA_MS).toISOString()
 });
@@ -93,6 +113,7 @@ const aVista = (plan: PlanApertura): PlanAperturaIpc => ({
 const aVistaCierre = (plan: PlanCierre): PlanCierreIpc => ({
   id: plan.id,
   mercado: plan.mercado.clave,
+  monedaMargen: plan.mercado.marginCoin,
   simbolo: plan.simbolo,
   entradas: plan.entradas.map((e) => ({
     cuentaId: e.cuentaId,
@@ -100,7 +121,7 @@ const aVistaCierre = (plan: PlanCierre): PlanCierreIpc => ({
     lado: e.lado,
     size: e.size,
     precioEntrada: e.precioEntrada,
-    margenLiberado: e.margenLiberado
+    margenLiberado: e.margenLiberado === null ? null : importe(e.margenLiberado)
   })),
   descartes: plan.descartes.map((d) => ({
     cuentaId: d.cuentaId,
@@ -109,9 +130,9 @@ const aVistaCierre = (plan: PlanCierre): PlanCierreIpc => ({
     motivo: d.motivo,
     mensaje: d.mensaje
   })),
-  margenLiberadoTotal: plan.entradas
-    .reduce((total, e) => total.plus(e.margenLiberado ?? '0'), new Decimal(0))
-    .toFixed(),
+  margenLiberadoTotal: importe(
+    plan.entradas.reduce((total, e) => total.plus(e.margenLiberado ?? '0'), new Decimal(0)).toFixed()
+  ),
   creadoEn: plan.creadoEn
 });
 
@@ -173,16 +194,17 @@ const descartesDe = (plan: { descartes: PlanApertura['descartes'] }) =>
 const aVistaMargen = (plan: PlanMargen): PlanMargenIpc => ({
   id: plan.id,
   mercado: plan.mercado.clave,
+  monedaMargen: plan.mercado.marginCoin,
   simbolo: plan.simbolo,
   cantidad: plan.cantidad,
-  totalComprometido: plan.totalComprometido,
+  totalComprometido: importe(plan.totalComprometido),
   entradas: plan.entradas.map((e) => ({
     cuentaId: e.cuentaId,
     etiqueta: e.etiqueta,
     lado: e.lado,
     cantidad: e.cantidad,
-    margenActual: e.margenActual,
-    margenResultante: e.margenResultante
+    margenActual: importe(e.margenActual),
+    margenResultante: importe(e.margenResultante)
   })),
   descartes: descartesDe(plan),
   creadoEn: plan.creadoEn

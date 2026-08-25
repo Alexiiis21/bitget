@@ -192,6 +192,64 @@ describe('el UID de Bitget como identidad', () => {
   });
 });
 
+/*
+ * El modo de margen viaja en la orden como `marginMode` y Bitget lo obedece:
+ * con la ficha desactualizada el panel abria en cruzado una cuenta que el
+ * operador tenia en aislado. Se capturaba solo en el alta, y el operador puede
+ * cambiarlo desde la web del exchange cuando quiera.
+ */
+describe('refresco de modos desde Bitget', () => {
+  it('adopta el modo que Bitget declara ahora', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    const cuenta = registro.agregar(alta(registro.reservarId('A', 'Sub-01'), 'Sub-01'));
+    expect(cuenta.modoMargen).toBe('aislado');
+
+    expect(registro.actualizarModos(cuenta.id, { modoMargen: 'cruzado' })).toBe(true);
+    expect(registro.cuenta(cuenta.id)?.modoMargen).toBe('cruzado');
+  });
+
+  it('no declara cambio cuando el modo es el que ya estaba', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    const cuenta = registro.agregar(alta(registro.reservarId('A', 'Sub-01'), 'Sub-01'));
+
+    /* El `false` es lo que evita reescribir cuentas.json en cada verificacion. */
+    expect(
+      registro.actualizarModos(cuenta.id, { modoPosicion: 'cobertura', modoMargen: 'aislado' })
+    ).toBe(false);
+  });
+
+  /*
+   * Un `null` es «la verificacion no llego a leerlo» -IP sin autorizar, red
+   * caida-, no «la cuenta ya no tiene modo». Pisar el ultimo valor bueno con un
+   * desconocido dejaria al motor sin dato justo cuando menos puede comprobarlo.
+   */
+  it('ignora un modo desconocido en vez de pisar el ultimo bueno', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    const cuenta = registro.agregar(alta(registro.reservarId('A', 'Sub-01'), 'Sub-01'));
+
+    expect(registro.actualizarModos(cuenta.id, { modoMargen: null, modoPosicion: null })).toBe(false);
+    expect(registro.cuenta(cuenta.id)?.modoMargen).toBe('aislado');
+    expect(registro.cuenta(cuenta.id)?.modoPosicion).toBe('cobertura');
+  });
+
+  it('el modo refrescado sobrevive al guardado', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    const cuenta = registro.agregar(alta(registro.reservarId('A', 'Sub-01'), 'Sub-01'));
+
+    registro.actualizarModos(cuenta.id, { modoMargen: 'cruzado', modoPosicion: 'unilateral' });
+    await registro.guardar();
+
+    const releido = await RegistroCuentas.cargar(ruta);
+    expect(releido.cuenta(cuenta.id)?.modoMargen).toBe('cruzado');
+    expect(releido.cuenta(cuenta.id)?.modoPosicion).toBe('unilateral');
+  });
+
+  it('una cuenta que no existe no se inventa', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    expect(registro.actualizarModos('cta_inexistente', { modoMargen: 'cruzado' })).toBe(false);
+  });
+});
+
 describe('baja', () => {
   it('retira la cuenta principal cuando se queda sin subcuentas', async () => {
     const registro = await RegistroCuentas.cargar(ruta);

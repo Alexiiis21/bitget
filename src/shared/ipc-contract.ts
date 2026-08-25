@@ -183,13 +183,36 @@ export interface PeticionAperturaIpc {
   precioLimite: string | null;
 }
 
+/**
+ * Una casilla del plan, tal como se ensena en la confirmacion.
+ *
+ * **Dos unidades distintas conviven en esta estructura**, y confundirlas es el
+ * error que la confirmacion existe para impedir:
+ *
+ *   size                    moneda base    331 XRP
+ *   nocional / margenReal   moneda margen  499,14 USDT / 9,98 USDT
+ *
+ * Por eso el plan lleva ademas `monedaMargen`: la pantalla no tiene que
+ * deducirla del simbolo, y ningun numero de dinero se ensena sin su moneda al
+ * lado. El operador que ve «331 · 9,98 · 499,14» sin unidades no tiene forma de
+ * saber cual de los tres es dinero.
+ *
+ * Los dos importes vienen **truncados a dos decimales** desde el proceso
+ * principal, con decimal.js y hacia abajo. Truncar y no redondear es la misma
+ * regla que sigue `dimensionarApertura`: de los dos errores posibles, ensenar un
+ * centimo de menos es el inofensivo; ensenar uno de mas seria decirle al
+ * operador que compromete mas de lo que compromete. El valor exacto que se envia
+ * vive en el plan del proceso principal y no cambia por esto.
+ */
 export interface EntradaPlanIpc {
   cuentaId: string;
   etiqueta: string;
   lado: Lado;
+  /** Cantidad en moneda base, exacta: es la que viaja en la orden. */
   size: string;
+  /** Valor de la posicion en moneda de margen, truncado a 2 decimales. */
   nocional: string;
-  /** Margen que de verdad se compromete tras ajustar la cantidad. */
+  /** Margen que de verdad se compromete tras ajustar la cantidad, truncado a 2 decimales. */
   margenReal: string;
 }
 
@@ -226,6 +249,16 @@ export interface AvisoPlanIpc {
 export interface PlanAperturaIpc {
   id: string;
   mercado: ClaveMercadoIpc;
+  /**
+   * Moneda en la que estan `nocional`, `margenReal` y `margenTotal`.
+   *
+   * `USDT` en el mercado real y `SUSDT` en el simulado: son mercados distintos
+   * con monedas de margen distintas, no el mismo con una bandera. Viaja con el
+   * plan y no se deduce en la pantalla porque es la etiqueta que acompana a cada
+   * cifra de dinero, y una etiqueta adivinada en el renderer podria decir USDT
+   * sobre importes que no lo son.
+   */
+  monedaMargen: string;
   simbolo: string;
   apalancamiento: number;
   precioLimite: string | null;
@@ -277,6 +310,8 @@ export interface EntradaCierreIpc {
 export interface PlanCierreIpc {
   id: string;
   mercado: ClaveMercadoIpc;
+  /** Moneda de `margenLiberado` y `margenLiberadoTotal`. Ver `PlanAperturaIpc`. */
+  monedaMargen: string;
   simbolo: string;
   entradas: EntradaCierreIpc[];
   descartes: DescartePlanIpc[];
@@ -395,6 +430,8 @@ export interface EntradaMargenIpc {
 export interface PlanMargenIpc {
   id: string;
   mercado: ClaveMercadoIpc;
+  /** Moneda de `cantidad`, `margenActual`, `margenResultante` y el total. Ver `PlanAperturaIpc`. */
+  monedaMargen: string;
   simbolo: string;
   cantidad: string;
   /** Suma de lo que sale del saldo. Es dinero nuevo comprometido. */

@@ -290,7 +290,8 @@ export class MockPanelService implements PanelService {
 
   async getSystemInfo(): Promise<SystemInfo> {
     await latencia(60, 60);
-    return { appVersion: '0.1.0-demo', panelNumber: this.panelNumero, portable: true };
+    /* El servicio de demostración no habla con ningún mercado; se anuncia como simulado. */
+    return { appVersion: '0.1.0-demo', panelNumber: this.panelNumero, portable: true, market: 'simulado' };
   }
 
   async setPanelNumber(numeroPanel: number): Promise<void> {
@@ -600,12 +601,17 @@ export class MockPanelService implements PanelService {
   async planOpen(req: OpenRequest): Promise<BatchPlan> {
     await latencia(180, 220);
     const precio = this.precios[req.assetId] ?? PRECIO_BASE[req.assetId] ?? 1;
+    /* Las mismas unidades que el panel real: la cantidad en moneda base y los importes en USDT. */
+    const margen = Number.parseFloat(req.initialMargin);
+    const nocional = margen * req.leverage;
     return this.planificar(
       'open',
       'Abrir posiciones',
-      `${req.initialMargin} de margen por casilla · ${req.leverage}x · ${req.orderType === 'limit' ? `límite ${req.limitPrice ?? '—'}` : 'a mercado'}`,
+      `${req.initialMargin} USDT de margen por casilla · ${req.leverage}x · ${req.orderType === 'limit' ? `límite ${req.limitPrice ?? '—'}` : 'a mercado'}`,
       req.targets,
-      () => dec((Number.parseFloat(req.initialMargin) * req.leverage) / precio, 6),
+      () =>
+        `${dec(nocional / precio, 6)} ${req.assetId} · margen real ${dec(margen, 2)} USDT · ` +
+        `nocional ${dec(nocional, 2)} USDT`,
       (solo) => this.abrir({ ...req, targets: solo ?? req.targets })
     );
   }

@@ -36,6 +36,44 @@ const botonBarra: CSSProperties = {
 };
 
 /**
+ * Contra qué mercado opera este panel, a la vista y siempre.
+ *
+ * El mismo ejecutable sirve para los dos: lo decide `config.json` en la carpeta
+ * de datos, no la compilación. Sin este distintivo, la única forma de saber si
+ * la próxima orden mueve dinero real sería abrir un archivo de texto — y es
+ * también la comprobación de que el `config.json` entregado se copió donde
+ * debía. Va en rojo cuando es real porque ahí el error se paga.
+ */
+function DistintivoMercado() {
+  const mercado = usarPanel((s) => s.mercado);
+  const real = mercado === 'real';
+
+  return (
+    <span
+      title={
+        real
+          ? 'Este panel opera contra el mercado real de Bitget: las órdenes mueven dinero de verdad.'
+          : 'Este panel opera contra el mercado simulado de Bitget: las órdenes no mueven dinero real.'
+      }
+      style={{
+        padding: '3px 9px',
+        borderRadius: 6,
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: '.1em',
+        whiteSpace: 'nowrap',
+        fontFamily: FUENTE.mono,
+        border: `1px solid ${real ? '#ff6b6b' : '#ffffff2e'}`,
+        background: real ? '#e0313166' : '#ffffff14',
+        color: real ? '#ffd7d7' : '#95c9ea'
+      }}
+    >
+      {real ? 'MERCADO REAL' : 'SIMULADO'}
+    </span>
+  );
+}
+
+/**
  * Estado de conexión del panel, a partir de las subcuentas registradas.
  *
  * Antes era un punto verde fijo en el código: decía «en línea» siempre, sin
@@ -106,6 +144,7 @@ export function Encabezado() {
             }}
           />
         </span>
+        <DistintivoMercado />
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>

@@ -38,6 +38,42 @@ export const esStaging = (): boolean => __ENTORNO__ === 'staging';
 
 export const esDev = (): boolean => __ENTORNO__ === 'dev';
 
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Mercado de Bitget contra el que opera el binario. **Tambien se fija al
+ * construir.**
+ *
+ *   simulado  productType `SUSDT-FUTURES`, simbolos `SBTCSUSDT`, margen `SUSDT`
+ *   real      productType `USDT-FUTURES`,  simbolos `BTCUSDT`,   margen `USDT`
+ *
+ * Es un eje distinto del entorno y por eso es un literal aparte: `staging`
+ * habla con la API real de Bitget y aun asi debe poder operar contra el mercado
+ * simulado mientras se prueba. De ahi que existan dos binarios de cliente, uno
+ * por mercado, con el nombre del archivo diciendo cual es cual.
+ *
+ * **Antes vivia en `config.json`, junto al ejecutable, y se cambiaba editando
+ * ese archivo.** Se movio aqui por lo mismo que `__ENTORNO__`: un archivo de
+ * texto en la carpeta de datos es algo que alguien tiene que copiar en el sitio
+ * correcto -y que se puede quedar del arranque anterior, o no copiarse-, y el
+ * fallo posible era un panel que opera con dinero real creyendo estar en
+ * pruebas. Un literal compilado no tiene esa clase de fallo: el binario real
+ * *es* real, y no hay nada que el operador pueda mover para que deje de serlo.
+ *
+ * El panel lo enseña siempre en su barra superior, para que la respuesta a
+ * «¿esto es dinero de verdad?» este en pantalla y no en el nombre del archivo.
+ */
+export const MERCADOS_COMPILABLES = ['simulado', 'real'] as const;
+
+export type MercadoCompilado = (typeof MERCADOS_COMPILABLES)[number];
+
+export const esMercadoCompilado = (valor: unknown): valor is MercadoCompilado =>
+  typeof valor === 'string' && (MERCADOS_COMPILABLES as readonly string[]).includes(valor);
+
+export const mercadoCompilado = (): MercadoCompilado => __MERCADO__;
+
+export const esMercadoReal = (): boolean => __MERCADO__ === 'real';
+
 /**
  * Corta cualquier pieza de simulacion que se invoque bajo staging.
  *
@@ -61,4 +97,7 @@ declare global {
    * Nunca se declara ni se asigna a mano en codigo de la aplicacion.
    */
   const __ENTORNO__: Entorno;
+
+  /** Igual que `__ENTORNO__`, y por el mismo mecanismo. Ver `mercadoCompilado`. */
+  const __MERCADO__: MercadoCompilado;
 }

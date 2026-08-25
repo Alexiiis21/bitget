@@ -66,7 +66,6 @@ export const rutas = () => {
     vault: join(base, 'vault.enc'),
     vaultBak: join(base, 'vault.enc.bak'),
     cuentas: join(base, 'cuentas.json'),
-    config: join(base, 'config.json'),
     ordenesPendientes: join(base, 'ordenes', 'pendientes.jsonl'),
     cacheSimbolos: join(base, 'cache', 'simbolos.json'),
     logs: join(base, 'logs')

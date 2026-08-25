@@ -39,7 +39,7 @@ import type {
   UnlockResult,
   ValidationResult
 } from '@shared/domain/panel-view';
-import type { CuentaPanel } from '@shared/ipc-contract';
+import type { ActivoIpc, CuentaPanel } from '@shared/ipc-contract';
 import type { EstadoConexion, EstadoJob, Lado, Lote } from '@shared/types';
 import { NotImplementedError, type PanelService, type Unsubscribe } from '@shared/ports/panel-service';
 
@@ -144,7 +144,12 @@ export class IpcPanelService implements PanelService {
 
   async getSystemInfo(): Promise<SystemInfo> {
     const info = await window.pcb.sistemaInfo();
-    return { appVersion: info.appVersion, panelNumber: info.numeroPanel, portable: info.portable };
+    return {
+      appVersion: info.appVersion,
+      panelNumber: info.numeroPanel,
+      portable: info.portable,
+      market: info.mercado
+    };
   }
 
   async setPanelNumber(): Promise<void> {
@@ -244,35 +249,48 @@ export class IpcPanelService implements PanelService {
   /* ---------------- escritura, en dos fases ---------------- */
 
   async planOpen(req: OpenRequest): Promise<BatchPlan> {
+    const activo = await this.activoDe(req.assetId);
     const plan = await window.pcb.aperturaPlanificar({
-      simbolo: await this.simboloDe(req.assetId),
+      simbolo: activo.simbolo,
       objetivos: req.targets.map(aObjetivo),
       margenInicial: req.initialMargin,
       apalancamiento: req.leverage,
       precioLimite: req.orderType === 'limit' ? req.limitPrice : null
     });
 
+    /*
+     * Cada cifra con su moneda al lado. La cantidad va en moneda base -331 XRP-
+     * y los dos importes en moneda de margen -USDT en el mercado real, SUSDT en
+     * el simulado-. Sin las unidades, «331 · 9,98 · 499,14» obliga a adivinar
+     * cuál de los tres es dinero, y esta pantalla existe justamente para que no
+     * se apruebe nada adivinando.
+     */
+    const moneda = plan.monedaMargen;
+
     return {
       kind: 'open',
       id: plan.id,
       title: 'Abrir posiciones',
       summary:
-        `${req.initialMargin} de margen por casilla · ${req.leverage}x · ` +
+        `${req.initialMargin} ${moneda} de margen por casilla · ${req.leverage}x · ` +
         (req.orderType === 'limit' ? `límite ${req.limitPrice ?? '—'}` : 'a mercado'),
       reference: plan.precioReferencia,
       entries: plan.entradas.map((e) => ({
         subAccountId: e.cuentaId,
         side: e.lado,
         label: e.etiqueta,
-        detail: `${e.size} · margen real ${e.margenReal} · nocional ${e.nocional}`
+        detail:
+          `${e.size} ${activo.id} · margen real ${e.margenReal} ${moneda} · ` +
+          `nocional ${e.nocional} ${moneda}`
       })),
       discards: aDescartes(plan.descartes)
     };
   }
 
   async planClose(req: CloseRequest): Promise<BatchPlan> {
+    const activo = await this.activoDe(req.assetId);
     const plan = await window.pcb.cierrePlanificar({
-      simbolo: await this.simboloDe(req.assetId),
+      simbolo: activo.simbolo,
       objetivos: req.targets.map(aObjetivo)
     });
 
@@ -287,8 +305,8 @@ export class IpcPanelService implements PanelService {
         side: e.lado,
         label: e.etiqueta,
         detail:
-          `${e.size} · entrada ${e.precioEntrada ?? '—'}` +
-          (e.margenLiberado === null ? '' : ` · libera ${e.margenLiberado}`)
+          `${e.size} ${activo.id} · entrada ${e.precioEntrada ?? '—'}` +
+          (e.margenLiberado === null ? '' : ` · libera ${e.margenLiberado} ${plan.monedaMargen}`)
       })),
       discards: aDescartes(plan.descartes)
     };
@@ -296,7 +314,7 @@ export class IpcPanelService implements PanelService {
 
   async planTakeProfit(req: TpRequest): Promise<BatchPlan> {
     const plan = await window.pcb.tpPlanificar({
-      simbolo: await this.simboloDe(req.assetId),
+      simbolo: (await this.activoDe(req.assetId)).simbolo,
       objetivos: req.targets.map(aObjetivo),
       porcentaje: req.percent
     });
@@ -321,7 +339,7 @@ export class IpcPanelService implements PanelService {
 
   async planRemoveTakeProfit(req: CloseRequest): Promise<BatchPlan> {
     const plan = await window.pcb.tpPlanificarQuitar({
-      simbolo: await this.simboloDe(req.assetId),
+      simbolo: (await this.activoDe(req.assetId)).simbolo,
       objetivos: req.targets.map(aObjetivo)
     });
 
@@ -343,7 +361,7 @@ export class IpcPanelService implements PanelService {
 
   async planMargin(req: MarginRequest): Promise<BatchPlan> {
     const plan = await window.pcb.margenPlanificar({
-      simbolo: await this.simboloDe(req.assetId),
+      simbolo: (await this.activoDe(req.assetId)).simbolo,
       objetivos: req.targets.map(aObjetivo),
       cantidad: req.amount
     });
@@ -352,13 +370,15 @@ export class IpcPanelService implements PanelService {
       kind: 'margin',
       id: plan.id,
       title: 'Agregar margen',
-      summary: `${req.amount} por casilla · compromete ${plan.totalComprometido} en total`,
+      summary:
+        `${req.amount} ${plan.monedaMargen} por casilla · ` +
+        `compromete ${plan.totalComprometido} ${plan.monedaMargen} en total`,
       reference: null,
       entries: plan.entradas.map((e) => ({
         subAccountId: e.cuentaId,
         side: e.lado,
         label: e.etiqueta,
-        detail: `margen ${e.margenActual} → ${e.margenResultante}`
+        detail: `margen ${e.margenActual} → ${e.margenResultante} ${plan.monedaMargen}`
       })),
       discards: aDescartes(plan.descartes)
     };
@@ -366,7 +386,7 @@ export class IpcPanelService implements PanelService {
 
   async planLeverage(req: LeverageRequest): Promise<BatchPlan> {
     const plan = await window.pcb.apalancamientoPlanificar({
-      simbolo: await this.simboloDe(req.assetId),
+      simbolo: (await this.activoDe(req.assetId)).simbolo,
       objetivos: req.targets.map(aObjetivo),
       apalancamiento: req.leverage
     });
@@ -407,18 +427,22 @@ export class IpcPanelService implements PanelService {
   }
 
   /**
-   * El símbolo de la API que corresponde al activo elegido en pantalla.
+   * El activo del catálogo que corresponde a lo elegido en pantalla.
    *
    * La pantalla trabaja con `BTC` y la API con `BTCUSDT` —o `SBTCSUSDT` en el
    * mercado de pruebas—. La correspondencia la decide el proceso principal, que
    * es quien sabe en qué mercado está el panel.
+   *
+   * Devuelve el activo entero y no solo el símbolo porque la confirmación
+   * necesita además su `id`: es el nombre de la moneda base con la que se
+   * rotula la cantidad —`331 XRP`—, ya sin el prefijo del mercado simulado.
    */
-  private async simboloDe(assetId: string): Promise<string> {
+  private async activoDe(assetId: string): Promise<ActivoIpc> {
     const activo = (await window.pcb.mercadoActivos()).find((a) => a.id === assetId);
     if (activo === undefined) {
       throw new Error(`El activo ${assetId} no está disponible en este mercado.`);
     }
-    return activo.simbolo;
+    return activo;
   }
 
   /* ---------------- credenciales y seguridad ---------------- */

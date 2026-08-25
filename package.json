@@ -1,7 +1,7 @@
 {
   "name": "pcb",
   "productName": "Panel de Control Bitget",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "Panel de control de escritorio para operar multiples cuentas de Bitget (futuros USDT-M) desde una sola interfaz.",
   "private": true,
   "license": "UNLICENSED",
@@ -13,8 +13,10 @@
   "scripts": {
     "dev": "electron-vite dev",
     "dev:staging": "electron-vite dev --mode staging",
+    "dev:real": "electron-vite dev --mode staging-real",
     "start": "electron-vite preview",
     "start:staging": "electron-vite preview --mode staging",
+    "start:real": "electron-vite preview --mode staging-real",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"test/**/*.ts\"",
@@ -28,7 +30,10 @@
     "test:e2e": "npm run build && playwright test",
     "build": "npm run typecheck && electron-vite build",
     "build:staging": "npm run typecheck && electron-vite build --mode staging",
+    "build:real": "npm run typecheck && electron-vite build --mode staging-real",
     "package:portable": "npm run build && electron-builder --win portable",
+    "package:portable:staging": "npm run build:staging && electron-builder --win portable --config electron-builder.staging.yml",
+    "package:portable:real": "npm run build:real && electron-builder --win portable --config electron-builder.real.yml",
     "package:dir": "npm run build && electron-builder --win --dir"
   },
   "dependencies": {
@@ -85,8 +90,13 @@
     "scripts": {
       "test": "Unitarias e integracion. La integracion habla con el exchange simulado de test/mock-exchange, no con Bitget.",
       "test:red": "Sale a api.bitget.com. Se omite si no hay credenciales en .env, para no estorbar en una maquina cualquiera.",
-      "test:staging": "Las mismas pruebas de red pero con el codigo compilado como staging (__ENTORNO__='staging'), igual que el binario del cliente. Exige credenciales reales: sin ellas falla en vez de omitirse. Es la que se ensena en una auditoria."
+      "dev:real": "Lo mismo que dev:staging pero con __MERCADO__='real': es el binario del cliente corriendo en la maquina del desarrollador, con terminal donde leer el log. Existe para reproducir aqui lo que el cliente ve alli; hasta ahora el modo `staging-real` solo se podia empaquetar, no arrancar. Comparte la carpeta de datos -y por tanto el vault- con dev:staging, igual que los dos .exe comparten datos-staging. Las ordenes que salgan de aqui mueven dinero de verdad.",
+      "test:staging": "Las mismas pruebas de red pero con el codigo compilado como staging (__ENTORNO__='staging'), igual que el binario del cliente. Exige credenciales reales: sin ellas falla en vez de omitirse. Es la que se ensena en una auditoria.",
+      "package:portable": "Empaqueta el modo `production`, que electron.vite.config.ts mapea al entorno `dev`: el binario resultante monta MockPanelService y ensena datos inventados. Es una demostracion de la interfaz, NO el binario del cliente.",
+      "package:portable:staging": "El binario del cliente para probar. Compila con --mode staging (__ENTORNO__='staging', __MERCADO__='simulado'; el mock ni entra en el bundle) y empaqueta con electron-builder.staging.yml, que solo cambia el nombre del artefacto. Existe como un unico comando a proposito: hacer los dos pasos a mano es como se manda por error el binario de demostracion.",
+      "package:portable:real": "El binario que opera con dinero real. Identico al anterior salvo --mode staging-real, que compila __MERCADO__='real': mercado USDT-FUTURES, simbolos BTCUSDT, margen USDT. Sale como PCB-<version>-REAL-portable.exe y no necesita ningun archivo al lado: el mercado va dentro del ejecutable, no en un config.json que alguien tenga que copiar. Comparte carpeta de datos con el binario de pruebas -mismo vault, mismas subcuentas- para que cambiar de mercado sea cambiar de .exe y nada mas."
     },
+    "version": "Sigue la fase entregada: 0.4.0 = fase 4. El cliente recibe un .exe cuyo nombre lleva la version, que es su unica forma de saber que build tiene. Subirla es parte de la entrega, no un tramite posterior.",
     "vite": "Fijado en 7.x, no en 8.x: electron-vite 5 declara peer vite ^5 || ^6 || ^7. Ver docs/adr/0002-vite-7-no-8.md. Revisar al liberarse electron-vite 6.",
     "@vitejs/plugin-react": "5.2.0 es la ultima que acepta vite 7; la 6.x exige vite 8.",
     "typescript": "Fijado con ~ en la linea 6.0: typescript-eslint 8.65 rechaza TS 7.0 en tiempo de ejecucion, no solo por peer. Un ^6 permitiria 6.1 y volveria a romper el lint. Ver docs/adr/0003-typescript-6-no-7.md."

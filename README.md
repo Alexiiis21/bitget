@@ -31,7 +31,8 @@ Las pruebas contra la API real necesitan un `.env` con las claves de la cuenta d
 | Comando | Qué hace |
 |---|---|
 | `npm run dev` | Aplicación en desarrollo, con recarga en caliente |
-| `npm run dev:staging` | Igual, contra la API real de Bitget. [ADR 0007](docs/adr/0007-entorno-staging-sin-docker.md) |
+| `npm run dev:staging` | Igual, contra la API real de Bitget, **mercado simulado**. [ADR 0007](docs/adr/0007-entorno-staging-sin-docker.md) |
+| `npm run dev:real` | Igual, contra el **mercado real**: es el binario del cliente, pero con terminal donde leer el log. Las órdenes mueven dinero de verdad |
 | `npm run typecheck` | `tsc --noEmit` sobre los dos proyectos (node y web) |
 | `npm run lint` | ESLint, cero avisos tolerados |
 | `npm run format` | Prettier sobre `src/` y `test/` |
@@ -43,7 +44,33 @@ Las pruebas contra la API real necesitan un `.env` con las claves de la cuenta d
 | `npm run test:e2e` | Compila y ejecuta la prueba de humo sobre la app real |
 | `npm run importar:subcuentas` | Carga al panel las subcuentas de `scripts/crear-subcuentas.mjs` |
 | `npm run build` | Typecheck + compilación de los tres bundles |
-| `npm run package:portable` | Genera `release/PCB-<version>-portable.exe` |
+| `npm run package:portable` | Demostración: `release/PCB-<version>-demo-portable.exe`. Datos inventados |
+| `npm run package:portable:staging` | **El binario del cliente, mercado simulado**: `release/PCB-<version>-staging-portable.exe` |
+| `npm run package:portable:real` | **El binario del cliente, dinero real**: `release/PCB-<version>-REAL-portable.exe` |
+
+Los dos hablan con la API real de Bitget; lo que cambia es contra cuál de sus dos mercados
+operan, y eso va **compilado dentro del ejecutable**, no en un archivo al lado. Se entrega
+el `.exe` y nada más. El panel enseña siempre en su barra superior —y en cada
+confirmación— contra cuál está operando. Ver
+[`docs/cliente/entrega-mercado-real.md`](docs/cliente/entrega-mercado-real.md).
+
+### Depuración temporal
+
+Dos interruptores, apagados por defecto, que vuelcan al terminal lo que normalmente no se
+ve. Son andamios: llevan su bloque de comentario diciendo cómo se borran, y no deben
+quedarse en el código entregado.
+
+| Variable | Qué imprime |
+|---|---|
+| `PCB_DEBUG_API=1` | Cada respuesta firmada de Bitget, cruda y redactada. [`rest/client.ts`](src/main/bitget/rest/client.ts) |
+| `PCB_DEBUG_SALDO=0` | **Apaga** el recorrido del saldo, que va encendido mientras dure la incidencia. [`debug-saldo.ts`](src/main/debug-saldo.ts) |
+
+```powershell
+$env:PCB_DEBUG_API = '1'; npm run dev:real
+```
+
+En el `.exe` portable no hay terminal donde leerlo: esto sirve para reproducir en esta
+máquina lo que el cliente ve en la suya.
 
 ## Estructura
 
@@ -88,6 +115,7 @@ filtró lógica hacia el renderer.
 | [`docs/00-fase-4-margen-apalancamiento.md`](docs/00-fase-4-margen-apalancamiento.md) | Fase 4, funciones 4 y 5: agregar margen y apalancamiento |
 | [`docs/00-fase-4-pantalla.md`](docs/00-fase-4-pantalla.md) | Fase 4: las seis funciones conectadas a la pantalla, con la prueba de QA |
 | [`docs/00-resumen-para-daniel.md`](docs/00-resumen-para-daniel.md) | Resumen para el cliente: lo que dijo y cómo quedó |
+| [`docs/cliente/entrega-mercado-real.md`](docs/cliente/entrega-mercado-real.md) | Los dos binarios del cliente, cómo se generan y cómo se distinguen |
 | [`docs/cotizacion-traspasos-entre-subcuentas.md`](docs/cotizacion-traspasos-entre-subcuentas.md) | Propuesta y estimación: traspaso de saldo entre subcuentas |
 | [`docs/01-stack-tecnologico.md`](docs/01-stack-tecnologico.md) | Stack, hallazgos sobre la API de Bitget, pool de sockets, cola de ejecución |
 | [`docs/02-arquitectura.html`](docs/02-arquitectura.html) | Arquitectura técnica, flujo de una operación, estados de un lote |

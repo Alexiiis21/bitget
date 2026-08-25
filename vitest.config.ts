@@ -17,7 +17,7 @@ if (process.env['APP_ENV'] === 'staging') {
 
 export default defineConfig({
   /* Las pruebas corren siempre en dev. Ver src/shared/entorno.ts. */
-  define: { __ENTORNO__: JSON.stringify('dev') },
+  define: { __ENTORNO__: JSON.stringify('dev'), __MERCADO__: JSON.stringify('simulado') },
   resolve: {
     alias: {
       '@main': resolve('src/main'),

@@ -42,6 +42,8 @@ export function DialogoPlan() {
   const cancelarPlan = usarPanel((s) => s.cancelarPlan);
   const activos = usarPanel((s) => s.activos);
   const activoId = usarPanel((s) => s.activoId);
+  const tp = usarPanel((s) => s.valores.tp);
+  const mercado = usarPanel((s) => s.mercado);
 
   if (!plan) return null;
 
@@ -56,8 +58,17 @@ export function DialogoPlan() {
     <div style={velo}>
       <div style={tarjeta}>
         <div style={{ flex: 'none', padding: '16px 22px', background: T.marca, color: '#ffffff', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {/*
+            * El mercado va en la primera línea que se lee, no escondido en la
+            * cabecera del panel: esta es la pantalla donde se aprueba el envío,
+            * y «real» aquí significa que lo que se confirma mueve dinero.
+            */}
           <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.14em', color: '#8ccdf5', fontFamily: FUENTE.mono, whiteSpace: 'nowrap' }}>
-            REVISAR ANTES DE ENVIAR{cola.length > 0 ? ` · QUEDAN ${cola.length}` : ''}
+            REVISAR ANTES DE ENVIAR ·{' '}
+            <span style={{ color: mercado === 'real' ? '#ffb3b3' : '#8ccdf5' }}>
+              {mercado === 'real' ? 'MERCADO REAL' : 'MERCADO SIMULADO'}
+            </span>
+            {cola.length > 0 ? ` · QUEDAN ${cola.length}` : ''}
           </span>
           <span style={{ fontSize: 18, fontWeight: 600 }}>{plan.title}</span>
           <span style={{ fontSize: 12, color: '#c8e4f5' }}>{plan.summary}</span>
@@ -76,6 +87,26 @@ export function DialogoPlan() {
             <span style={{ color: T.texto2 }}>
               Casillas <span style={valorMono}>{plan.entries.length}</span>
             </span>
+            {/*
+              * El Take Profit del formulario, para repasarlo aquí.
+              *
+              * No viaja en esta orden —se coloca después, con su propio plan y
+              * su propia confirmación— y por eso se rotula «se pone aparte» en
+              * vez de dejarlo junto a los demás datos como si saliera con ella.
+              * Lo que resuelve es lo que pidió el operador: comprobar de un
+              * vistazo, antes de abrir, que el porcentaje escrito es el que
+              * quiere, sin tener que mirar la barra lateral por detrás del
+              * diálogo.
+              */}
+            {plan.kind === 'open' && (
+              <span
+                style={{ color: T.texto2 }}
+                title="El Take Profit no sale con esta orden: se coloca después con el botón «Take Profit %», y también se aprueba antes de enviarse. Aquí se enseña el valor que tiene el campo ahora mismo."
+              >
+                Take Profit <span style={valorMono}>{tp.trim() === '' ? '—' : `${tp.trim()} %`}</span>
+                <span style={{ marginLeft: 6, fontSize: 10.5, color: T.texto3 }}>se pone aparte</span>
+              </span>
+            )}
           </div>
 
           <div>

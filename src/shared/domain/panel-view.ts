@@ -298,4 +298,14 @@ export interface SystemInfo {
   /** Número visible del panel. Editable por el operador; no es el id de instancia. */
   panelNumber: number;
   portable: boolean;
+  /**
+   * Mercado contra el que opera este binario, leído de `config.json`.
+   *
+   * La pantalla lo enseña siempre. Un mismo ejecutable sirve para los dos
+   * mercados —lo decide un archivo en la carpeta de datos, no la compilación—,
+   * así que sin este distintivo no hay forma de saber si la próxima orden mueve
+   * dinero de verdad, ni de comprobar que el `config.json` entregado se copió
+   * donde debía.
+   */
+  market: 'real' | 'simulado';
 }

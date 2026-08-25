@@ -28,7 +28,7 @@ import { resolve } from 'node:path';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
-  define: { __ENTORNO__: JSON.stringify('staging') },
+  define: { __ENTORNO__: JSON.stringify('staging'), __MERCADO__: JSON.stringify('simulado') },
   resolve: {
     alias: {
       '@main': resolve('src/main'),

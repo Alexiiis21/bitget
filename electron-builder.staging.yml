@@ -1,0 +1,15 @@
+# Empaquetado del binario del cliente.
+#
+# Lo usa `npm run package:portable:staging`, nunca a mano: el nombre del
+# artefacto de nada sirve si los bundles de `out/` se compilaron en el modo
+# equivocado. El script encadena las dos mitades -compilar con --mode staging y
+# empaquetar con este config- porque separarlas es como se manda por error el
+# panel de demostracion.
+#
+# Solo cambia el nombre del archivo. Todo lo demas (appId, files, asar,
+# compresion, portable.unpackDirName) se hereda de electron-builder.yml, para
+# que un cambio de empaquetado no tenga que aplicarse dos veces.
+extends: ./electron-builder.yml
+
+win:
+  artifactName: PCB-${version}-staging-portable.exe

@@ -5,12 +5,11 @@ import {
   MOSAICO_ANCHO_MIN,
   PUBLICACION_COALESCIDA_MS
 } from '@shared/constants';
-import { entorno, esStaging } from '@shared/entorno';
+import { entorno, esStaging, mercadoCompilado } from '@shared/entorno';
 import { ClienteBitget } from './bitget/rest/client';
 import { SupervisorReconexion } from './execution/supervisor-reconexion';
 import { registrarIpc } from './ipc/handlers';
 import { Sesion } from './ipc/sesion';
-import { cargarConfiguracion } from './storage/configuracion';
 import { cargarInstancia } from './storage/instancia';
 import { fijarCarpetaDeEntorno, rutas } from './storage/paths';
 
@@ -153,19 +152,17 @@ if (!app.requestSingleInstanceLock()) {
      * docs/01 seccion 8.
      */
     /*
-     * Contra que mercado opera este panel. Arranca en `simulado` y solo cambia
-     * si alguien edita `config.json` a proposito: pasar a dinero real no puede
-     * ser un descuido. Ver storage/configuracion.ts.
+     * Contra que mercado opera este panel: un literal compilado, no un archivo
+     * que alguien tenga que colocar. Este binario *es* de este mercado y no hay
+     * nada en la carpeta de datos que pueda cambiarlo. Ver shared/entorno.ts.
      */
-    const config = await cargarConfiguracion(r.config);
-    if (config.mercado === 'real') {
+    const mercado = mercadoCompilado();
+    if (mercado === 'real') {
       console.warn('[PCB] mercado=real — las ordenes de este panel mueven dinero de verdad.');
     }
 
     cliente = new ClienteBitget();
-    sesion = new Sesion({ vault: r.vault, cuentas: r.cuentas }, cliente, {
-      mercado: config.mercado
-    });
+    sesion = new Sesion({ vault: r.vault, cuentas: r.cuentas }, cliente, { mercado });
 
     /*
      * El reintento automatico de las cuentas caidas. Late desde el arranque y
@@ -182,7 +179,7 @@ if (!app.requestSingleInstanceLock()) {
     });
     supervisor.iniciar();
 
-    registrarIpc(sesion, instancia, config.mercado);
+    registrarIpc(sesion, instancia, mercado);
     publicarCambios(sesion);
     crearVentana();
 

@@ -98,6 +98,15 @@ export interface EstadoPanel {
   numeroPanel: number;
   ocupado: boolean;
   tema: 'light' | 'dark';
+  /**
+   * Mercado contra el que opera este panel. Lo dice el proceso principal.
+   *
+   * Arranca en `simulado` a propósito: si la consulta al proceso principal
+   * falla, el distintivo de la cabecera dirá «simulado» y no «real». De los dos
+   * errores posibles, el que no se puede cometer es enseñar el mercado de
+   * pruebas cuando se está operando con dinero de verdad.
+   */
+  mercado: 'real' | 'simulado';
 
   /* ---- activos ---- */
   activos: Asset[];
@@ -321,6 +330,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   numeroPanel: 1,
   ocupado: false,
   tema: temaInicial(),
+  mercado: 'simulado',
 
   activos: [],
   precios: {},
@@ -383,6 +393,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       const primero = activos[0];
       set((estado) => ({
         numeroPanel: info.panelNumber,
+        mercado: info.market,
         activos,
         activoId: primero?.id ?? 'BTC',
         valores: { ...estado.valores, ap: primero === undefined ? estado.valores.ap : String(primero.maxLeverage) }

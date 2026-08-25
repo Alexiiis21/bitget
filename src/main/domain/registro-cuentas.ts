@@ -353,6 +353,47 @@ export class RegistroCuentas {
     return { ...cuenta };
   }
 
+  /**
+   * Refresca modo de posicion y de margen con lo que Bitget acaba de declarar.
+   *
+   * Los dos se capturaban solo en el alta y no se volvian a mirar, asi que una
+   * cuenta que el operador cambiaba a margen aislado en Bitget seguia figurando
+   * como cruzada aqui. No era cosmetico: `cuentaEjecutable` alimenta con este
+   * campo el `marginMode` de la orden, y Bitget lo obedece -abre en cruzado una
+   * cuenta configurada en aislado-. Ademas hacia descartar por «no es aislado»
+   * las cuentas que si lo eran al agregar margen.
+   *
+   * Devuelve `true` solo si algo cambio, para que quien llama persista el
+   * archivo unicamente entonces: esto se invoca en cada ciclo de verificacion y
+   * reescribir `cuentas.json` cuatro veces por minuto sin motivo seria gratuito.
+   */
+  actualizarModos(
+    cuentaId: string,
+    modos: { modoPosicion?: ModoPosicion | null; modoMargen?: ModoMargen | null }
+  ): boolean {
+    const cuenta = this.cuentas.find((c) => c.id === cuentaId);
+    if (cuenta === undefined) return false;
+
+    let cambio = false;
+
+    /*
+     * Un `null` es «la verificacion no llego a leerlo» -credencial invalida, IP
+     * sin autorizar, error de red-, no «la cuenta ya no tiene modo». Se ignora:
+     * pisar el ultimo valor bueno con un desconocido dejaria al motor sin dato
+     * justo cuando menos puede comprobarlo.
+     */
+    if (modos.modoPosicion != null && modos.modoPosicion !== cuenta.modoPosicion) {
+      cuenta.modoPosicion = modos.modoPosicion;
+      cambio = true;
+    }
+    if (modos.modoMargen != null && modos.modoMargen !== cuenta.modoMargen) {
+      cuenta.modoMargen = modos.modoMargen;
+      cambio = true;
+    }
+
+    return cambio;
+  }
+
   /** Baja de una subcuenta. La cuenta principal vacia se retira con ella. */
   eliminar(cuentaId: string): boolean {
     const indice = this.cuentas.findIndex((c) => c.id === cuentaId);

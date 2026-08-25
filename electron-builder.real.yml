@@ -1,0 +1,19 @@
+# Empaquetado del binario que opera con dinero real.
+#
+# Lo usa `npm run package:portable:real`, nunca a mano: el nombre del artefacto
+# de nada sirve si los bundles de `out/` se compilaron en el modo equivocado.
+# El script encadena las dos mitades -compilar con --mode staging-real y
+# empaquetar con este config- porque separarlas es como se manda por error el
+# binario del mercado simulado con el nombre del real, o al reves.
+#
+# El mercado va en MAYUSCULAS en el nombre del archivo a proposito. Es el unico
+# dato que distingue este ejecutable del de pruebas antes de abrirlo, y quien lo
+# recibe por correo lo lee ahi o no lo lee en ninguna parte.
+#
+# Solo cambia el nombre del archivo. Todo lo demas (appId, files, asar,
+# compresion, portable.unpackDirName) se hereda de electron-builder.yml, para
+# que un cambio de empaquetado no tenga que aplicarse tres veces.
+extends: ./electron-builder.yml
+
+win:
+  artifactName: PCB-${version}-REAL-portable.exe

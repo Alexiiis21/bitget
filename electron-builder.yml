@@ -19,7 +19,14 @@ win:
   target:
     - target: portable
       arch: [x64]
-  artifactName: PCB-${version}-portable.exe
+  # El entorno va en el nombre del archivo, no solo en la version.
+  #
+  # Este config empaqueta el modo `production`, que electron.vite.config.ts
+  # mapea al entorno `dev`: datos de demostracion. Sin el sufijo, el .exe de
+  # demostracion y el del cliente salian con el mismo nombre y el ultimo en
+  # construirse borraba al otro, sin que nada en el archivo dijera cual era
+  # cual. El binario del cliente lo produce electron-builder.staging.yml.
+  artifactName: PCB-${version}-demo-portable.exe
 
 portable:
   # El .exe se descomprime en una carpeta fija en lugar de una temporal

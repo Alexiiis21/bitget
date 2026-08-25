@@ -2,7 +2,7 @@ import { resolve } from 'node:path';
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import react from '@vitejs/plugin-react';
 import { loadEnv } from 'vite';
-import { esEntorno, type Entorno } from './src/shared/entorno';
+import { esEntorno, type Entorno, type MercadoCompilado } from './src/shared/entorno';
 
 /*
  * Algunos entornos (la terminal integrada de VS Code, entre otros) exportan
@@ -12,11 +12,20 @@ import { esEntorno, type Entorno } from './src/shared/entorno';
 delete process.env['ELECTRON_RUN_AS_NODE'];
 
 /**
- * El entorno sale del `--mode` de la linea de comandos, y de ningun otro sitio.
+ * Cada modo declara dos cosas, y las dos salen del `--mode` de la linea de
+ * comandos y de ningun otro sitio: **contra que backend** habla el panel y
+ * **contra que mercado** de Bitget opera.
  *
- *   npm run dev           -> mode `development` -> entorno `dev`
- *   npm run dev:staging   -> mode `staging`     -> entorno `staging`
- *   npm run build         -> mode `production`  -> entorno `dev`
+ *   npm run dev                       development   dev      simulado
+ *   npm run build                     production    dev      simulado
+ *   npm run dev:staging               staging       staging  simulado
+ *   npm run package:portable:staging  staging       staging  simulado
+ *   npm run package:portable:real     staging-real  staging  real
+ *
+ * Son dos ejes distintos: `staging` significa «API real de Bitget, vault real,
+ * cero simulacion», y aun asi debe poder operar contra el mercado simulado
+ * mientras se prueba. Por eso el mercado no se deduce del entorno; tiene su
+ * propio modo y su propio binario, con el mercado en el nombre del archivo.
  *
  * Que `production` mapee a `dev` no es un descuido: hoy el unico backend
  * completo es el de demostracion, y `npm run build` sigue produciendo el panel
@@ -24,8 +33,22 @@ delete process.env['ELECTRON_RUN_AS_NODE'];
  * principal cubra posiciones y ordenes (Fase 6), este mapeo es la linea que hay
  * que revisar.
  */
-function entornoDeModo(mode: string): Entorno {
-  return mode === 'staging' ? 'staging' : 'dev';
+const MODOS: Record<string, { entorno: Entorno; mercado: MercadoCompilado }> = {
+  development: { entorno: 'dev', mercado: 'simulado' },
+  production: { entorno: 'dev', mercado: 'simulado' },
+  staging: { entorno: 'staging', mercado: 'simulado' },
+  'staging-real': { entorno: 'staging', mercado: 'real' }
+};
+
+/**
+ * Un modo desconocido cae en lo inofensivo: demostracion y mercado simulado.
+ *
+ * Es la misma regla que sigue todo lo demas aqui. De los dos errores posibles
+ * ante un `--mode` mal escrito, construir un panel de pruebas es el que no
+ * cuesta dinero.
+ */
+function configuracionDeModo(mode: string): { entorno: Entorno; mercado: MercadoCompilado } {
+  return MODOS[mode] ?? { entorno: 'dev', mercado: 'simulado' };
 }
 
 /**
@@ -37,7 +60,7 @@ function entornoDeModo(mode: string): Entorno {
  * ver docs/01-stack-tecnologico.md seccion 15.
  */
 export default defineConfig(({ mode }) => {
-  const entorno = entornoDeModo(mode);
+  const { entorno, mercado } = configuracionDeModo(mode);
 
   /*
    * El archivo `.env` del modo es la configuracion visible del entorno; el
@@ -67,8 +90,18 @@ export default defineConfig(({ mode }) => {
     );
   }
 
-  /* Un unico literal, compartido por los tres bundles. Ver src/shared/entorno.ts. */
-  const define = { __ENTORNO__: JSON.stringify(entorno) };
+  /* Dos literales, compartidos por los tres bundles. Ver src/shared/entorno.ts. */
+  const define = {
+    __ENTORNO__: JSON.stringify(entorno),
+    __MERCADO__: JSON.stringify(mercado)
+  };
+
+  if (mercado === 'real') {
+    console.warn(
+      `[PCB] mode="${mode}" — este binario opera contra el MERCADO REAL de Bitget: ` +
+        'sus ordenes mueven dinero de verdad.'
+    );
+  }
 
   return {
     main: {

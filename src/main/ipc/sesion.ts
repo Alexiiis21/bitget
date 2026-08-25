@@ -23,6 +23,7 @@ import type {
 import { PLAN_VIGENCIA_MS } from '@shared/constants';
 import type { EstadoConexion, Lado, Lote } from '@shared/types';
 import { ErrorBitget } from '../bitget/errors';
+import { depurandoSaldo, trazaSaldo } from '../debug-saldo';
 import { MERCADOS, type ClaveMercado } from '../bitget/mercado';
 import type { ClienteBitget } from '../bitget/rest/client';
 import type { Credencial } from '../bitget/rest/signer';
@@ -100,6 +101,8 @@ export class Sesion implements FuenteCuentas {
    * cuenta se verifica.
    */
   private readonly saldos = new Map<string, string>();
+  /* DEPURACIÓN TEMPORAL · ver src/main/debug-saldo.ts */
+  private sinSaldoUltimo: number | null = null;
   /**
    * Apalancamiento por cuenta, tambien de la ultima verificacion.
    *
@@ -191,6 +194,14 @@ export class Sesion implements FuenteCuentas {
 
       for (const cuenta of registro.listarCuentas()) this.conexiones.registrar(cuenta.id);
 
+      /* DEPURACIÓN TEMPORAL · ver src/main/debug-saldo.ts */
+      trazaSaldo('0·vault abierto', {
+        mercado: this.mercado,
+        cuentas: registro.listarCuentas().length,
+        credenciales: vivas.length,
+        saldos: this.saldos.size
+      });
+
       this.anunciar();
       return { ok: true, motivo: null, mensaje: null };
     } catch (e) {
@@ -217,6 +228,8 @@ export class Sesion implements FuenteCuentas {
     this.vault = null;
     this.registro = null;
     this.saldos.clear();
+    /* DEPURACIÓN TEMPORAL · que el proximo desbloqueo vuelva a trazar desde cero. */
+    this.sinSaldoUltimo = null;
     this.apalancamientos.clear();
     /* Un plan sin sesion no se puede ejecutar: se tira con las credenciales. */
     this.planes.clear();
@@ -277,6 +290,29 @@ export class Sesion implements FuenteCuentas {
   cuentasPanel(): CuentaPanel[] {
     if (this.vault === null || this.registro === null || this.vault.estaCerrado) return [];
     const registro = this.registro;
+
+    /*
+     * DEPURACIÓN TEMPORAL · ver src/main/debug-saldo.ts
+     *
+     * Esto se publica cada 250 ms, asi que solo se traza cuando cambia el
+     * recuento: lo que interesa es cuantas casillas siguen enseñando el `0` de
+     * «aun no verificada» y si ese numero baja, no repetirlo cuatro veces por
+     * segundo.
+     */
+    if (depurandoSaldo()) {
+      const cuentas = registro.listarCuentas();
+      const sinSaldo = cuentas.filter((c) => !this.saldos.has(c.id));
+      if (sinSaldo.length !== this.sinSaldoUltimo) {
+        this.sinSaldoUltimo = sinSaldo.length;
+        trazaSaldo('4·matriz', {
+          mercado: this.mercado,
+          cuentas: cuentas.length,
+          conSaldo: cuentas.length - sinSaldo.length,
+          enCero: sinSaldo.length,
+          pendientes: sinSaldo.slice(0, 8).map((c) => c.id).join(',') || '—'
+        });
+      }
+    }
 
     return registro
       .listarGrupos()
@@ -829,8 +865,22 @@ export class Sesion implements FuenteCuentas {
       short: verificacion.apalancamientoShort,
       cruzado: verificacion.apalancamientoCruzado
     });
-    if (verificacion.saldoDisponible === null) return;
+    if (verificacion.saldoDisponible === null) {
+      /* DEPURACIÓN TEMPORAL · ver src/main/debug-saldo.ts */
+      trazaSaldo('3·NO se anota', {
+        cuentaId,
+        veredicto: verificacion.veredicto,
+        motivo: verificacion.motivo
+      });
+      return;
+    }
     this.saldos.set(cuentaId, verificacion.saldoDisponible);
+    /* DEPURACIÓN TEMPORAL */
+    trazaSaldo('3·anotado', {
+      cuentaId,
+      saldo: verificacion.saldoDisponible,
+      conocidos: `${this.saldos.size}/${this.registro?.listarCuentas().length ?? 0}`
+    });
   }
 
   /**
@@ -993,6 +1043,8 @@ export class Sesion implements FuenteCuentas {
 
     const credencial = vault.credencialDe(cuentaId);
     if (credencial === null) {
+      /* DEPURACIÓN TEMPORAL · ver src/main/debug-saldo.ts */
+      trazaSaldo('0·SIN CREDENCIAL', { cuentaId });
       return {
         ok: false,
         estado: 'desconectada',
@@ -1001,6 +1053,13 @@ export class Sesion implements FuenteCuentas {
         advertencias: []
       };
     }
+
+    /* DEPURACIÓN TEMPORAL · que se vea que la verificacion arranca siquiera. */
+    trazaSaldo('0·verificar', {
+      cuentaId,
+      etiqueta: registro.cuenta(cuentaId)?.etiqueta,
+      mercado: this.mercado
+    });
 
     this.conexiones.marcarConectando(cuentaId);
 
@@ -1021,6 +1080,31 @@ export class Sesion implements FuenteCuentas {
     }
 
     this.anotarSaldo(cuentaId, verificacion);
+
+    /*
+     * Modo de posicion y de margen, tal como estan **ahora** en Bitget.
+     *
+     * Se capturaban solo en el alta, y el operador puede cambiarlos desde la web
+     * del exchange cuando quiera. `cuentaEjecutable` alimenta con `modoMargen` el
+     * `marginMode` de la orden, y Bitget obedece ese campo: con la ficha
+     * desactualizada el panel abria en cruzado una cuenta puesta en aislado. Es
+     * la unica lectura fresca que hay de estos dos campos, asi que aqui se
+     * escribe o no se escribe en ningun sitio.
+     */
+    if (
+      registro.actualizarModos(cuentaId, {
+        modoPosicion: verificacion.modoPosicion,
+        modoMargen: verificacion.modoMargen
+      })
+    ) {
+      /*
+       * Fallar al guardar no invalida la verificacion: la ficha en memoria ya
+       * quedo al dia y es la que consulta el motor. Se reintentara en el
+       * siguiente ciclo, que llega solo.
+       */
+      await registro.guardar().catch(() => undefined);
+    }
+
     const estado: EstadoConexion = this.conexiones.registrarVerificacion(cuentaId, verificacion);
     /*
      * Se anuncia siempre, no solo cuando cambia el estado: una cuenta que ya

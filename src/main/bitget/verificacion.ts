@@ -31,6 +31,7 @@
  * beneficio es que ninguna key con permiso de retiro entra por descuido.
  */
 import type { ModoMargen, ModoPosicion } from '@shared/types';
+import { trazaSaldo } from '../debug-saldo';
 import { ErrorBitget } from './errors';
 import { MERCADO_REAL, type Mercado } from './mercado';
 import type { ClienteBitget } from './rest/client';
@@ -268,6 +269,14 @@ export async function verificarCredencial(
 
   let cuenta;
   try {
+    /* DEPURACIÓN TEMPORAL · ver src/main/debug-saldo.ts */
+    trazaSaldo('1·consulta', {
+      uid: parcial.uid,
+      mercado: mercado.clave,
+      simbolo,
+      productType: mercado.productType,
+      marginCoin: mercado.marginCoin
+    });
     cuenta = await obtenerCuentaSimbolo(
       cliente,
       credencial,
@@ -278,6 +287,12 @@ export async function verificarCredencial(
   } catch (e) {
     if (e instanceof ErrorBitget && e.reintentable) throw e;
     const err = e as ErrorBitget;
+    /* DEPURACIÓN TEMPORAL */
+    trazaSaldo('1·consulta FALLÓ', {
+      uid: parcial.uid,
+      codigo: err.codigo,
+      motivo: err.message
+    });
     return {
       ...parcial,
       motivo: `Autentica, pero no se pudo leer la cuenta de futuros: ${err.message}`,
@@ -285,6 +300,16 @@ export async function verificarCredencial(
       latenciaMs: Date.now() - inicio
     };
   }
+
+  /* DEPURACIÓN TEMPORAL · lo que Bitget respondio, antes de interpretarlo */
+  trazaSaldo('2·respuesta', {
+    uid: parcial.uid,
+    available: cuenta.datos.available,
+    accountEquity: cuenta.datos.accountEquity,
+    marginCoin: cuenta.datos.marginCoin,
+    marginMode: cuenta.datos.marginMode,
+    posMode: cuenta.datos.posMode
+  });
 
   const modoPosicion: ModoPosicion =
     cuenta.datos.posMode === 'hedge_mode' ? 'cobertura' : 'unilateral';
