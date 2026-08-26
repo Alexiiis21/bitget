@@ -30,6 +30,7 @@ import {
   iniciarExchangeSimulado,
   sobreOk,
   type ExchangeSimulado,
+  type PeticionRecibida,
   type Respuesta
 } from '../mock-exchange/servidor';
 
@@ -85,14 +86,6 @@ class Cuentas implements FuenteCuentas {
     this.mapa.delete(cuentaId);
   }
 
-  fijarApalancamiento(
-    cuentaId: string,
-    a: { long: number | null; short: number | null; cruzado: number | null }
-  ): void {
-    const c = this.mapa.get(cuentaId);
-    if (c) c.apalancamiento = a;
-  }
-
   objetivos(cuantas: number, lado: 'long' | 'short' = 'long'): ObjetivoApertura[] {
     return Array.from({ length: cuantas }, (_, i) => ({
       cuentaId: `cta_${String(i + 1).padStart(3, '0')}`,
@@ -106,9 +99,81 @@ let cliente: ClienteBitget;
 let cuentas: Cuentas;
 let motor: MotorLotes;
 let progreso: Lote[];
+/**
+ * Estado del simbolo en Bitget: en que modo esta y con que apalancamiento.
+ *
+ * Es mutable a proposito. El modo de margen no es solo una lectura: `place-order`
+ * lo lleva dentro y `set-margin-mode` lo cambia, asi que la unica forma de
+ * comprobar que el panel **no** reconfigura un simbolo por la puerta de atras es
+ * que el exchange simulado recuerde como quedo.
+ */
+let cuentaSimbolo: Record<string, unknown> = {};
+/** Lo mismo, pero para las cuentas que se aparten del valor comun. */
+const cuentaSimboloPropio = new Map<string, Record<string, unknown>>();
+/** Con que rechaza Bitget el cambio de modo, o `null` si lo acepta. */
+let rechazoSetModo: unknown = null;
+
+const CUENTA_SIMBOLO_BASE = {
+  marginCoin: 'SUSDT',
+  available: '3000',
+  accountEquity: '3000',
+  marginMode: 'isolated',
+  posMode: 'hedge_mode',
+  isolatedLongLever: 10,
+  isolatedShortLever: 10,
+  crossedMarginLeverage: 10
+};
 
 /**
- * Responde el catalogo y el ticker; delega las ordenes en `alOrdenar`.
+ * Que cuenta firma la peticion, deducido de su API Key.
+ *
+ * `Cuentas` las genera como `key_cta_001`, asi que la cabecera basta para
+ * responder distinto a cada una. Es lo que permite probar que el aviso de
+ * apalancamiento sale **solo** en la cuenta que difiere y no en las demas.
+ */
+const cuentaQueFirma = (p: PeticionRecibida): string =>
+  String(p.cabeceras['access-key'] ?? '').replace(/^key_/, '');
+
+/** Cambia la configuracion que Bitget devolvera para una cuenta concreta. */
+function configDe(cuentaId: string, parcial: Record<string, unknown>): void {
+  cuentaSimboloPropio.set(cuentaId, {
+    ...CUENTA_SIMBOLO_BASE,
+    ...(cuentaSimboloPropio.get(cuentaId) ?? {}),
+    ...parcial
+  });
+}
+
+/**
+ * Lo que toda prueba de apertura necesita responder ademas de las ordenes.
+ *
+ * El catalogo y el precio ya estaban. La configuracion del simbolo es nueva: la
+ * apertura la lee para saber si tiene que cambiar el modo de margen antes de
+ * abrir. Sin esta ruta, el motor descarta cada casilla con `modo-margen-ilegible`
+ * -que es lo correcto, no se abre a ciegas- y ninguna prueba mediria lo suyo.
+ *
+ * `set-margin-mode` **muta** el estado del simbolo, no responde y se olvida: es
+ * lo unico que permite comprobar que el panel deja el activo como el operador
+ * pidio, y que no lo toca cuando ya estaba bien.
+ */
+function rutasComunes(p: PeticionRecibida): Respuesta | null {
+  if (p.url.startsWith('/api/v2/mix/market/contracts')) return { cuerpo: sobreOk([CONTRATO]) };
+  if (p.url.startsWith('/api/v2/mix/market/ticker')) return { cuerpo: sobreOk(TICKER) };
+  if (p.url.startsWith('/api/v2/mix/account/account')) {
+    return { cuerpo: sobreOk(cuentaSimboloPropio.get(cuentaQueFirma(p)) ?? cuentaSimbolo) };
+  }
+  if (p.url.startsWith('/api/v2/mix/account/set-margin-mode')) {
+    if (rechazoSetModo !== null) return { cuerpo: rechazoSetModo };
+    const cuerpo = JSON.parse(p.cuerpo) as Record<string, unknown>;
+    const modo = String(cuerpo['marginMode'] ?? 'isolated');
+    configDe(cuentaQueFirma(p), { marginMode: modo });
+    cuentaSimbolo = { ...cuentaSimbolo, marginMode: modo };
+    return { cuerpo: sobreOk({ symbol: SIMBOLO, marginCoin: 'SUSDT' }) };
+  }
+  return null;
+}
+
+/**
+ * Responde el catalogo, el precio y la configuracion; delega las ordenes.
  *
  * `alOrdenar` devuelve una **respuesta completa**, no solo el sobre: hace falta
  * poder simular tambien un 500 o un cuerpo que no es JSON, que es justo lo que
@@ -116,8 +181,8 @@ let progreso: Lote[];
  */
 function enrutar(alOrdenar: (cuerpo: Record<string, unknown>) => Respuesta): void {
   exchange.responderCon((p) => {
-    if (p.url.startsWith('/api/v2/mix/market/contracts')) return { cuerpo: sobreOk([CONTRATO]) };
-    if (p.url.startsWith('/api/v2/mix/market/ticker')) return { cuerpo: sobreOk(TICKER) };
+    const comun = rutasComunes(p);
+    if (comun !== null) return comun;
     if (p.url.startsWith('/api/v2/mix/order/place-order')) {
       return alOrdenar(JSON.parse(p.cuerpo) as Record<string, unknown>);
     }
@@ -142,6 +207,9 @@ beforeEach(async () => {
     limitador: new LimitadorPeticiones({ dormir: async () => undefined })
   });
   cuentas = new Cuentas(20);
+  cuentaSimbolo = { ...CUENTA_SIMBOLO_BASE };
+  cuentaSimboloPropio.clear();
+  rechazoSetModo = null;
   progreso = [];
   motor = new MotorLotes(cliente, cuentas, {
     dormir: async () => undefined,
@@ -164,7 +232,8 @@ describe('planificacion: nada sale sin haberse calculado antes', () => {
       objetivos: cuentas.objetivos(5),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
 
     expect(plan.entradas).toHaveLength(5);
@@ -188,7 +257,8 @@ describe('planificacion: nada sale sin haberse calculado antes', () => {
         objetivos: cuentas.objetivos(5),
         margenInicial: '100',
         apalancamiento: 10,
-        precioLimite: null
+        precioLimite: null,
+        modoMargen: 'isolated',
       })
     ).rejects.toThrow(/no existe/);
   });
@@ -202,7 +272,8 @@ describe('planificacion: nada sale sin haberse calculado antes', () => {
         objetivos: [],
         margenInicial: '100',
         apalancamiento: 10,
-        precioLimite: null
+        precioLimite: null,
+        modoMargen: 'isolated',
       })
     ).rejects.toThrow(/casilla/);
   });
@@ -219,7 +290,8 @@ describe('planificacion: nada sale sin haberse calculado antes', () => {
       objetivos: cuentas.objetivos(10),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
 
     expect(plan.entradas).toHaveLength(8);
@@ -236,8 +308,9 @@ describe('planificacion: nada sale sin haberse calculado antes', () => {
       objetivos: cuentas.objetivos(2),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
-    };
+      precioLimite: null,
+      modoMargen: 'isolated'
+    } as const;
 
     await motor.planificar(peticion);
     await motor.planificar(peticion);
@@ -252,10 +325,15 @@ describe('el apalancamiento de la cuenta', () => {
    * fijo: la apertura no lo cambia. Pero el margen comprometido depende de el,
    * asi que una cuenta en otro apalancamiento no es un fallo -la orden sale
    * igual- pero si algo que el operador tiene que leer antes de confirmar.
+   *
+   * El valor sale de `/mix/account/account` **del simbolo que se va a operar**,
+   * no de la ficha de la cuenta: en Bitget el apalancamiento es por simbolo, y
+   * la ficha guarda el del primero del mercado. Con ella se avisaba de
+   * diferencias que no existian en el activo elegido y se callaban las que si.
    */
   it('avisa cuando la cuenta esta en otro apalancamiento, con el margen real', async () => {
     enrutar(ordenAceptada);
-    cuentas.fijarApalancamiento('cta_002', { long: 20, short: 20, cruzado: 20 });
+    configDe('cta_002', { isolatedLongLever: 20, isolatedShortLever: 20 });
 
     const plan = await motor.planificar({
       mercado: MERCADO_SIMULADO,
@@ -263,7 +341,8 @@ describe('el apalancamiento de la cuenta', () => {
       objetivos: cuentas.objetivos(4),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
 
     expect(plan.entradas).toHaveLength(4);
@@ -277,7 +356,7 @@ describe('el apalancamiento de la cuenta', () => {
 
   it('no avisa cuando coincide', async () => {
     enrutar(ordenAceptada);
-    cuentas.fijarApalancamiento('cta_001', { long: 10, short: 10, cruzado: 10 });
+    configDe('cta_001', { isolatedLongLever: 10, isolatedShortLever: 10 });
 
     const plan = await motor.planificar({
       mercado: MERCADO_SIMULADO,
@@ -285,7 +364,8 @@ describe('el apalancamiento de la cuenta', () => {
       objetivos: cuentas.objetivos(3),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
 
     expect(plan.avisos).toEqual([]);
@@ -294,6 +374,10 @@ describe('el apalancamiento de la cuenta', () => {
   /* No saberlo no es lo mismo que saber que difiere: no se inventa un aviso. */
   it('no avisa de lo que no sabe', async () => {
     enrutar(ordenAceptada);
+    /* Bitget no devuelve el apalancamiento de ese lado: no hay con que comparar. */
+    configDe('cta_001', { isolatedLongLever: null });
+    configDe('cta_002', { isolatedLongLever: null });
+    configDe('cta_003', { isolatedLongLever: null });
 
     const plan = await motor.planificar({
       mercado: MERCADO_SIMULADO,
@@ -301,16 +385,26 @@ describe('el apalancamiento de la cuenta', () => {
       objetivos: cuentas.objetivos(3),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
 
     expect(plan.avisos).toEqual([]);
   });
 
-  it('en margen cruzado manda el apalancamiento cruzado, no el del lado', async () => {
+  /*
+   * En cruzado hay un solo apalancamiento para los dos lados, y es el que hay
+   * que comparar. Mirar el del lado -que en cruzado no aplica- daria un aviso
+   * sobre un numero que no se va a usar.
+   */
+  it('en margen cruzado compara el apalancamiento cruzado, no el del lado', async () => {
     enrutar(ordenAceptada);
-    /* La cuenta es `crossed`: los valores por lado no aplican. */
-    cuentas.fijarApalancamiento('cta_001', { long: 10, short: 10, cruzado: 25 });
+    configDe('cta_001', {
+      marginMode: 'crossed',
+      isolatedLongLever: 10,
+      isolatedShortLever: 10,
+      crossedMarginLeverage: 25
+    });
 
     const plan = await motor.planificar({
       mercado: MERCADO_SIMULADO,
@@ -318,11 +412,276 @@ describe('el apalancamiento de la cuenta', () => {
       objetivos: cuentas.objetivos(1),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'crossed',
     });
 
     expect(plan.avisos).toHaveLength(1);
     expect(plan.avisos[0]?.mensaje).toContain('25x');
+  });
+});
+
+/**
+ * El modo de margen, que hasta el 26/08/2026 salia de la ficha de la cuenta.
+ *
+ * --------------------------------------------------------------------------
+ * El defecto que estas pruebas impiden que vuelva
+ * --------------------------------------------------------------------------
+ * En Bitget el modo de margen es **por simbolo**, y `marginMode` viaja dentro
+ * de `place-order`. El panel lo leia de un solo simbolo -el primero del
+ * mercado- y lo aplicaba a todos, de modo que abrir SOL con la ficha de BTC
+ * mandaba `crossed` y **dejaba SOL en cruzado**. La posicion quedaba en un modo
+ * que el operador no habia pedido, y en cruzado «agregar margen» no existe.
+ *
+ * Lo reporto el cliente el 25/08/2026: «el TP ya quedo, pero esta en modo
+ * cruzado» y «no me deja aumentar solo el margen adicional».
+ */
+describe('el modo de margen lo elige el operador, no la ficha de la cuenta', () => {
+  it('lee el modo real del simbolo y lo enseña en el plan', async () => {
+    enrutar(ordenAceptada);
+    configDe('cta_001', { marginMode: 'crossed' });
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(2),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated'
+    });
+
+    expect(plan.modoMargen).toBe('isolated');
+    expect(plan.entradas[0]?.modoMargenActual).toBe('crossed');
+    expect(plan.entradas[1]?.modoMargenActual).toBe('isolated');
+    /* Planificar no cambia nada: solo mira. */
+    expect(exchange.peticiones.filter((p) => p.url.includes('set-margin-mode'))).toHaveLength(0);
+  });
+
+  it('fija el modo antes de abrir cuando el simbolo esta en el otro', async () => {
+    const cuerpos: Record<string, unknown>[] = [];
+    enrutar((cuerpo) => {
+      cuerpos.push(cuerpo);
+      return ordenAceptada(cuerpo);
+    });
+    configDe('cta_001', { marginMode: 'crossed' });
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(1),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated'
+    });
+    const lote = await motor.ejecutar(plan);
+
+    expect(lote.jobs[0]?.estado).toBe('exito');
+    expect(cuerpos[0]?.['marginMode']).toBe('isolated');
+
+    /* Y el cambio salio **antes** que la orden, no despues. */
+    const rutas = exchange.peticiones.map((p) => p.url);
+    const iModo = rutas.findIndex((u) => u.includes('set-margin-mode'));
+    const iOrden = rutas.findIndex((u) => u.includes('place-order'));
+    expect(iModo).toBeGreaterThanOrEqual(0);
+    expect(iModo).toBeLessThan(iOrden);
+  });
+
+  /*
+   * Bitget no deja cambiar el modo con la posicion abierta, asi que tocarlo
+   * cuando ya coincide romperia cada ampliacion de una posicion existente.
+   */
+  it('no toca el modo cuando el simbolo ya esta en el pedido', async () => {
+    enrutar(ordenAceptada);
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(3),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated'
+    });
+    await motor.ejecutar(plan);
+
+    expect(exchange.peticiones.filter((p) => p.url.includes('set-margin-mode'))).toHaveLength(0);
+  });
+
+  /*
+   * De los dos errores posibles -no abrir, o abrir reconfigurando el activo a
+   * espaldas del operador-, el inofensivo es no abrir.
+   */
+  it('si no puede fijar el modo, no envia la orden', async () => {
+    enrutar(ordenAceptada);
+    configDe('cta_001', { marginMode: 'crossed' });
+    rechazoSetModo = rechazoBitget('40774', 'position exists').cuerpo;
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(1),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated'
+    });
+    const lote = await motor.ejecutar(plan);
+
+    expect(lote.jobs[0]?.estado).toBe('fallo');
+    expect(lote.jobs[0]?.mensaje).toContain('AISLADO');
+    expect(exchange.peticiones.filter((p) => p.url.includes('place-order'))).toHaveLength(0);
+  });
+
+  /*
+   * Un rechazo de `set-margin-mode` con el modo **ya correcto** no es un fallo:
+   * es «ya estaba hecho». Pasa al reintentar las fallidas y con dos casillas de
+   * la misma cuenta, porque Bitget rechaza el cambio con la posicion abierta.
+   */
+  it('si el rechazo llega con el modo ya correcto, sigue y abre', async () => {
+    enrutar(ordenAceptada);
+    configDe('cta_001', { marginMode: 'crossed' });
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(1),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated'
+    });
+
+    /* Entre planificar y enviar, el simbolo ya quedo en aislado por otra via. */
+    configDe('cta_001', { marginMode: 'isolated' });
+    rechazoSetModo = rechazoBitget('40774', 'position exists').cuerpo;
+
+    const lote = await motor.ejecutar(plan);
+
+    expect(lote.jobs[0]?.estado).toBe('exito');
+    expect(exchange.peticiones.filter((p) => p.url.includes('place-order'))).toHaveLength(1);
+  });
+
+  it('si no puede leer el modo del simbolo, descarta la casilla sin abrir', async () => {
+    exchange.responderCon((p) => {
+      if (p.url.startsWith('/api/v2/mix/market/contracts')) return { cuerpo: sobreOk([CONTRATO]) };
+      if (p.url.startsWith('/api/v2/mix/market/ticker')) return { cuerpo: sobreOk(TICKER) };
+      if (p.url.startsWith('/api/v2/mix/account/account')) return { estado: 502, cuerpo: 'corte' };
+      if (p.url.startsWith('/api/v2/mix/order/place-order')) {
+        return ordenAceptada(JSON.parse(p.cuerpo) as Record<string, unknown>);
+      }
+      return null;
+    });
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(2),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated'
+    });
+
+    expect(plan.entradas).toEqual([]);
+    expect(plan.descartes).toHaveLength(2);
+    expect(plan.descartes[0]?.motivo).toBe('modo-margen-ilegible');
+    expect(exchange.peticiones.filter((p) => p.url.includes('place-order'))).toHaveLength(0);
+  });
+});
+
+/**
+ * El margen adicional que sale con la apertura.
+ *
+ * Lo pidio el cliente el 25/08/2026 con estas palabras: «si no se puede agregar
+ * el margen adicional, pues no abrir la operacion, porque eso indica que hay
+ * algun parametro que esta mal». En cruzado Bitget no admite agregarlo -el
+ * margen sale del saldo total de la cuenta-, asi que el plan entero se rechaza
+ * antes de que salga una sola orden.
+ */
+describe('el margen adicional viaja con la apertura', () => {
+  it('en cruzado no se abre nada, y lo dice', async () => {
+    enrutar(ordenAceptada);
+
+    await expect(
+      motor.planificar({
+        mercado: MERCADO_SIMULADO,
+        simbolo: SIMBOLO,
+        objetivos: cuentas.objetivos(5),
+        margenInicial: '100',
+        apalancamiento: 10,
+        precioLimite: null,
+        modoMargen: 'crossed',
+        margenAdicional: '50'
+      })
+    ).rejects.toThrow(/CRUZADO/);
+
+    expect(exchange.peticiones.filter((p) => p.url.includes('place-order'))).toHaveLength(0);
+  });
+
+  /* Sin margen adicional, abrir en cruzado sigue siendo una apertura valida. */
+  it('en cruzado sin margen adicional, se abre con normalidad', async () => {
+    enrutar(ordenAceptada);
+    configDe('cta_001', { marginMode: 'crossed' });
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(1),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'crossed'
+    });
+
+    expect(plan.entradas).toHaveLength(1);
+    expect(plan.margenAdicional).toBeNull();
+  });
+
+  /*
+   * Los dos importes salen del saldo en la misma pulsacion. Comprobar solo el
+   * inicial dejaria abrir posiciones a las que despues no cabe el margen
+   * prometido, que es abrir a medias.
+   */
+  it('el saldo tiene que dar para el margen inicial y el adicional juntos', async () => {
+    enrutar(ordenAceptada);
+    cuentas.fijarSaldo('cta_001', '120');
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(2),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated',
+      margenAdicional: '50'
+    });
+
+    expect(plan.entradas).toHaveLength(1);
+    expect(plan.entradas[0]?.cuentaId).toBe('cta_002');
+    expect(plan.descartes[0]?.cuentaId).toBe('cta_001');
+    expect(plan.descartes[0]?.motivo).toBe('margen-insuficiente');
+    expect(plan.descartes[0]?.mensaje).toContain('150');
+  });
+
+  it('cada entrada lleva el margen adicional aprobado', async () => {
+    enrutar(ordenAceptada);
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(2),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated',
+      margenAdicional: '50'
+    });
+
+    expect(plan.margenAdicional).toBe('50');
+    expect(plan.entradas.every((e) => e.margenAdicional === '50')).toBe(true);
   });
 });
 
@@ -340,7 +699,8 @@ describe('ejecucion: la orden que sale es la que se planifico', () => {
       objetivos: [{ cuentaId: 'cta_001', lado: 'long' }, { cuentaId: 'cta_002', lado: 'short' }],
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const lote = await motor.ejecutar(plan);
 
@@ -371,7 +731,8 @@ describe('ejecucion: la orden que sale es la que se planifico', () => {
       objetivos: cuentas.objetivos(1),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: '60000'
+      precioLimite: '60000',
+      modoMargen: 'isolated',
     });
     await motor.ejecutar(plan);
 
@@ -399,7 +760,8 @@ describe('un fallo no arrastra a los demas', () => {
       objetivos: cuentas.objetivos(10),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const lote = await motor.ejecutar(plan);
 
@@ -426,7 +788,8 @@ describe('un fallo no arrastra a los demas', () => {
       objetivos: cuentas.objetivos(6),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const lote = await motor.ejecutar(plan);
 
@@ -444,7 +807,8 @@ describe('un fallo no arrastra a los demas', () => {
       objetivos: cuentas.objetivos(5),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const lote = await motor.ejecutar(plan);
 
@@ -465,7 +829,8 @@ describe('no se duplica una posicion', () => {
       objetivos: cuentas.objetivos(3),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
 
     expect(plan.entradas[0]?.clientOid).toBe(clientOidDe(plan.id, 0, 'long'));
@@ -489,7 +854,8 @@ describe('no se duplica una posicion', () => {
       objetivos: cuentas.objetivos(4),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
 
     const primera = motor.ejecutar(plan);
@@ -514,7 +880,8 @@ describe('no se duplica una posicion', () => {
       objetivos: cuentas.objetivos(4),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const primera = await motor.ejecutar(plan);
     const fallido = primera.jobs.find((j) => j.estado === 'fallo');
@@ -551,7 +918,8 @@ describe('reintento automatico de lo transitorio', () => {
       objetivos: cuentas.objetivos(3),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const lote = await motor.ejecutar(plan);
 
@@ -574,7 +942,8 @@ describe('reintento automatico de lo transitorio', () => {
       objetivos: cuentas.objetivos(1),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const lote = await motor.ejecutar(plan);
 
@@ -597,7 +966,8 @@ describe('reintento automatico de lo transitorio', () => {
       objetivos: cuentas.objetivos(1),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     await motor.ejecutar(plan);
 
@@ -608,8 +978,8 @@ describe('reintento automatico de lo transitorio', () => {
 describe('lo enviado sin respuesta se consulta, no se reintenta', () => {
   it('si la orden si habia entrado, el lote la da por buena', async () => {
     exchange.responderCon((p) => {
-      if (p.url.startsWith('/api/v2/mix/market/contracts')) return { cuerpo: sobreOk([CONTRATO]) };
-      if (p.url.startsWith('/api/v2/mix/market/ticker')) return { cuerpo: sobreOk(TICKER) };
+      const comun = rutasComunes(p);
+      if (comun !== null) return comun;
       if (p.url.startsWith('/api/v2/mix/order/place-order')) return { estado: 502, cuerpo: 'corte' };
       if (p.url.startsWith('/api/v2/mix/order/detail')) {
         return {
@@ -631,7 +1001,8 @@ describe('lo enviado sin respuesta se consulta, no se reintenta', () => {
       objetivos: cuentas.objetivos(1),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const lote = await motor.ejecutar(plan);
 
@@ -643,8 +1014,8 @@ describe('lo enviado sin respuesta se consulta, no se reintenta', () => {
 
   it('si Bitget no la conoce, se marca fallo reintentable y no queda a medias', async () => {
     exchange.responderCon((p) => {
-      if (p.url.startsWith('/api/v2/mix/market/contracts')) return { cuerpo: sobreOk([CONTRATO]) };
-      if (p.url.startsWith('/api/v2/mix/market/ticker')) return { cuerpo: sobreOk(TICKER) };
+      const comun = rutasComunes(p);
+      if (comun !== null) return comun;
       if (p.url.startsWith('/api/v2/mix/order/place-order')) return { estado: 502, cuerpo: 'corte' };
       if (p.url.startsWith('/api/v2/mix/order/detail')) {
         return { cuerpo: { code: '40109', msg: 'order not exist', requestTime: 1, data: null } };
@@ -658,7 +1029,8 @@ describe('lo enviado sin respuesta se consulta, no se reintenta', () => {
       objetivos: cuentas.objetivos(1),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const lote = await motor.ejecutar(plan);
 
@@ -672,8 +1044,8 @@ describe('lo enviado sin respuesta se consulta, no se reintenta', () => {
    */
   it('si tampoco se puede consultar, queda indeterminada', async () => {
     exchange.responderCon((p) => {
-      if (p.url.startsWith('/api/v2/mix/market/contracts')) return { cuerpo: sobreOk([CONTRATO]) };
-      if (p.url.startsWith('/api/v2/mix/market/ticker')) return { cuerpo: sobreOk(TICKER) };
+      const comun = rutasComunes(p);
+      if (comun !== null) return comun;
       return { estado: 502, cuerpo: 'corte' };
     });
 
@@ -683,7 +1055,8 @@ describe('lo enviado sin respuesta se consulta, no se reintenta', () => {
       objetivos: cuentas.objetivos(1),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const lote = await motor.ejecutar(plan);
 
@@ -709,7 +1082,8 @@ describe('escala: el lote de 300 cuentas', () => {
       objetivos: cuentas.objetivos(300),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const lote = await motor.ejecutar(plan);
 
@@ -730,8 +1104,8 @@ describe('escala: el lote de 300 cuentas', () => {
     let enVuelo = 0;
     let maximo = 0;
     exchange.responderCon((p) => {
-      if (p.url.startsWith('/api/v2/mix/market/contracts')) return { cuerpo: sobreOk([CONTRATO]) };
-      if (p.url.startsWith('/api/v2/mix/market/ticker')) return { cuerpo: sobreOk(TICKER) };
+      const comun = rutasComunes(p);
+      if (comun !== null) return comun;
       enVuelo += 1;
       maximo = Math.max(maximo, enVuelo);
       setTimeout(() => {
@@ -746,7 +1120,8 @@ describe('escala: el lote de 300 cuentas', () => {
       objetivos: cuentas.objetivos(120),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     await motor.ejecutar(plan);
 
@@ -765,7 +1140,8 @@ describe('escala: el lote de 300 cuentas', () => {
       objetivos: cuentas.objetivos(300),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const lote = await motor.ejecutar(plan);
 
@@ -789,7 +1165,8 @@ describe('informe de progreso', () => {
       objetivos: cuentas.objetivos(6),
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     await motor.ejecutar(plan);
 

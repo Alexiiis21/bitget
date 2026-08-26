@@ -26,7 +26,7 @@ export interface Aviso {
   meta: string;
 }
 
-/** Acción en espera de la contraseña de paso. Solo la apertura pasa por aquí. */
+/** Lo que el operador teclea en la barra lateral: los cuatro campos. */
 export interface ValoresHerramientas {
   tp: string;
   mgi: string;

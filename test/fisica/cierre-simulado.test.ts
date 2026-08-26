@@ -49,7 +49,9 @@ class UnaCuenta implements FuenteCuentas {
       etiqueta: 'Cuenta demo',
       credencial: credencialReal,
       saldoDisponible: this.saldo,
-      modoMargen: 'crossed'
+      /* Aislado: el modo viaja en la orden y reconfigura el simbolo. Ver
+         `apertura-simulada.test.ts`. */
+      modoMargen: 'isolated'
     };
   }
 }
@@ -92,7 +94,8 @@ describe.skipIf(!hayCredenciales)('abrir y cerrar contra el mercado simulado', (
       objetivos: [{ cuentaId: CUENTA_ID, lado: 'long' }],
       margenInicial: MARGEN,
       apalancamiento: APALANCAMIENTO,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated'
     });
     const lote = await motor.ejecutar(plan);
     const job = lote.jobs[0];

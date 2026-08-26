@@ -18,6 +18,16 @@ import type { Decimal } from '../types';
 
 export type Side = 'long' | 'short';
 export type OrderType = 'market' | 'limit';
+/**
+ * Aislado o cruzado, con los nombres de la API.
+ *
+ * Se conserva el vocabulario de Bitget -`isolated`/`crossed`- en vez de
+ * traducirlo, como el resto de este puerto: lo que se traduce es la etiqueta
+ * que lee el operador, no el valor que viaja. Un `aislado` aquí obligaría a
+ * traducir en los dos sentidos en cada frontera, y esa es justo la clase de
+ * traducción en la que se pierde un modo de margen.
+ */
+export type MarginMode = 'isolated' | 'crossed';
 export type ActionKey = 'tp' | 'mg' | 'ap' | 'oe';
 export type ApiKeyStatus = 'ok' | 'conectando' | 'error' | 'sin-api';
 
@@ -214,6 +224,34 @@ export interface OpenRequest {
   limitPrice: Decimal | null;
   initialMargin: Decimal;
   leverage: number;
+  /**
+   * Modo de margen con el que se abre.
+   *
+   * Lo elige el operador y viaja con la orden. Antes salía de la ficha de la
+   * cuenta, que guardaba el modo de **un solo símbolo** y lo aplicaba a todos:
+   * como Bitget lo configura por símbolo y lo lee de la propia orden, abrir
+   * reconfiguraba en silencio el activo que se estaba operando.
+   */
+  marginMode: MarginMode;
+  /**
+   * Margen adicional que se agrega con la **misma** confirmación, o `null`.
+   *
+   * Va con la apertura por lo mismo que el Take Profit: se escribe en el mismo
+   * formulario y en la misma pulsación. Y en margen cruzado no se abre nada —
+   * Bitget solo admite agregar margen en aislado, y abrir sin el margen que se
+   * aprobó deja la posición con menos colchón del que el operador cree.
+   */
+  additionalMargin: Decimal | null;
+  /**
+   * Take Profit que se coloca con la **misma** confirmación, en porcentaje de
+   * ganancia sobre el margen inicial. `null` para abrir sin él.
+   *
+   * Antes era una operación aparte con su propio botón y su propia
+   * confirmación, y el porcentaje escrito en el formulario se enseñaba junto a
+   * la apertura como si saliera con ella. No salía: quedaban posiciones
+   * abiertas sin protección creyendo que la tenían.
+   */
+  takeProfitPercent: Decimal | null;
 }
 
 export interface CloseRequest {

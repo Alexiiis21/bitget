@@ -46,6 +46,7 @@ import { randomUUID } from 'node:crypto';
 import Decimal from 'decimal.js';
 import { CONCURRENCIA_MAXIMA } from '@shared/constants';
 import type { AccionLote, Job, Lado, Lote } from '@shared/types';
+import { trazaApertura, trazaFallo } from '../debug-apertura';
 import { ErrorBitget } from '../bitget/errors';
 import type { Mercado } from '../bitget/mercado';
 import type { ClienteBitget } from '../bitget/rest/client';
@@ -64,6 +65,7 @@ import {
 import {
   ajustarMargen,
   fijarApalancamiento,
+  fijarModoMargen,
   obtenerCuentaSimbolo
 } from '../bitget/rest/endpoints/cuenta';
 import { obtenerContratos, obtenerTicker, type Contrato } from '../bitget/rest/endpoints/simbolos';
@@ -110,6 +112,31 @@ export function apalancamientoVigente(cuenta: CuentaEjecutable, lado: Lado): num
   if (cuenta.modoMargen === 'crossed') return a.cruzado;
   return lado === 'long' ? a.long : a.short;
 }
+
+/**
+ * Como esta configurado **un simbolo concreto** en una cuenta, ahora mismo.
+ *
+ * Es lo que devuelve `/mix/account/account`, que lleva `symbol`: en Bitget
+ * tanto el modo de margen como el apalancamiento son por simbolo. La ficha de
+ * la cuenta guarda los del primer simbolo del mercado y no sirve para los
+ * demas; de ahi que la apertura los lea aqui, del simbolo que se va a operar.
+ */
+interface ConfiguracionSimbolo {
+  modoMargen: ModoMargenApi;
+  apalancamiento: ApalancamientoCuenta;
+}
+
+/** El apalancamiento de ese lado segun el modo con el que se va a abrir. */
+const apalancamientoDe = (
+  configuracion: ConfiguracionSimbolo,
+  modo: ModoMargenApi,
+  lado: Lado
+): number | null =>
+  modo === 'crossed'
+    ? configuracion.apalancamiento.cruzado
+    : lado === 'long'
+      ? configuracion.apalancamiento.long
+      : configuracion.apalancamiento.short;
 
 /**
  * De donde salen las credenciales y los saldos.
@@ -183,6 +210,57 @@ export interface PeticionApertura {
   apalancamiento: number;
   /** `null` para orden a mercado. */
   precioLimite: string | null;
+  /**
+   * Modo de margen con el que se abre, **elegido por el operador**.
+   *
+   * --------------------------------------------------------------------------
+   * Por que lo dice el panel y no la ficha de la cuenta
+   * --------------------------------------------------------------------------
+   * Hasta el 26/08/2026 salia de `cuenta.modoMargen`, que la verificacion leia
+   * de **un solo simbolo** -el primero del mercado- y aplicaba a todos. En
+   * Bitget el modo es por simbolo: con BTC en cruzado, abrir SOL mandaba
+   * `marginMode: crossed`, y como ese campo viaja dentro de `place-order`,
+   * **reconfiguraba SOL a cruzado**. La posicion quedaba abierta en un modo que
+   * el operador no habia pedido y en el que «agregar margen» no existe.
+   *
+   * Ahora es una eleccion explicita: se comprueba contra el modo real de ese
+   * simbolo y, si no coincide, se fija antes de abrir. Ver `ejecutar`.
+   */
+  modoMargen: ModoMargenApi;
+  /**
+   * Margen adicional que se agrega **con la misma confirmacion**, o `null`.
+   *
+   * Viaja con la apertura por la misma razon que el Take Profit: el operador lo
+   * escribe en el mismo formulario y en la misma pulsacion, y enseñarselo en la
+   * confirmacion de abrir sin que salga con ella es la forma de que crea que
+   * tiene una proteccion que no tiene.
+   *
+   * Bitget solo admite agregar margen en aislado, asi que pedirlo en cruzado no
+   * es un descarte de una casilla: es un plan inviable. Ver `planificar`.
+   */
+  margenAdicional?: string | null;
+  /**
+   * Take Profit que se coloca **con la misma confirmacion**, en porcentaje de
+   * ganancia sobre el margen inicial. `null` para abrir sin el.
+   *
+   * --------------------------------------------------------------------------
+   * Por que viaja con la apertura y no como plan aparte
+   * --------------------------------------------------------------------------
+   * Hasta el 25/08/2026 eran dos operaciones con dos confirmaciones: se abria,
+   * y despues habia que pulsar «Take Profit %» y aprobar un segundo plan. El
+   * porcentaje escrito en el formulario se enseñaba en la confirmacion de la
+   * apertura rotulado «se pone aparte», y el operador lo leia como que salia
+   * con la orden. No salia: quedaban posiciones abiertas **sin proteccion**
+   * creyendo que la tenian, que es la peor forma de fallar de las dos.
+   *
+   * Ahora una sola confirmacion hace las dos cosas. El precio de disparo se
+   * calcula dos veces a proposito -ver `precioDisparoTp`-, porque en el momento
+   * de aprobar todavia no existe la posicion de la que depende.
+   *
+   * Es opcional -y no obligatorio- porque abrir sin Take Profit sigue siendo
+   * una apertura valida: omitirlo es exactamente lo que el panel hacia antes.
+   */
+  takeProfitPorcentaje?: string | null;
 }
 
 /** Un objetivo que va a salir: ya tiene cantidad calculada y credencial. */
@@ -190,7 +268,32 @@ export interface EntradaPlan extends EntradaLote {
   size: string;
   nocional: string;
   margenReal: string;
+  /** El modo con el que se va a abrir. Es el que eligio el operador. */
   modoMargen: ModoMargenApi;
+  /**
+   * El modo en el que **esta ahora** ese simbolo en esa cuenta, leido al
+   * planificar.
+   *
+   * Existe para dos cosas. La confirmacion puede decir «cambia de cruzado a
+   * aislado» en vez de callarselo, y la ejecucion sabe si hay que fijarlo: si
+   * ya coincide no se toca, que es lo que permite abrir sobre una posicion ya
+   * existente -Bitget no deja cambiar el modo con la posicion abierta-.
+   */
+  modoMargenActual: ModoMargenApi;
+  /** Margen adicional que se agrega tras abrir, o `null`. */
+  margenAdicional: string | null;
+  /**
+   * Precio de disparo del Take Profit, **estimado** con el precio de
+   * referencia. `null` cuando se abre sin Take Profit.
+   *
+   * No es el que se envia. El que se envia se calcula despues de abrir, desde
+   * el precio de entrada **real** de la posicion, que es el unico con el que el
+   * porcentaje significa lo que el operador espera. Este esta para que la
+   * confirmacion pueda enseñar un precio concreto en vez de un porcentaje
+   * -misma regla que el resto del plan- y, sobre todo, para que un porcentaje
+   * imposible se detecte **antes** de abrir: ver el descarte de `planificar`.
+   */
+  precioDisparoTp: string | null;
 }
 
 /** Motivo por el que un objetivo no llega a enviarse. */
@@ -204,6 +307,8 @@ export type MotivoDescarte =
   | 'posiciones-ilegibles'
   /** Bitget solo permite agregar margen en aislado. */
   | 'margen-cruzado'
+  /** No se pudo leer en que modo de margen esta el simbolo, asi que no se abre. */
+  | 'modo-margen-ilegible'
   /** No hay ningun Take Profit puesto: no habia nada que quitar. */
   | 'sin-take-profit'
   /** No se pudo consultar que Take Profit hay puestos, asi que no se toca. */
@@ -238,8 +343,27 @@ export interface PlanApertura extends PlanBase<EntradaPlan> {
   /** Precio de marca con el que se calcularon las cantidades. */
   precioReferencia: string;
   margenInicial: string;
+  /** El modo de margen aprobado. Se fija en Bitget antes de abrir si hace falta. */
+  modoMargen: ModoMargenApi;
+  /**
+   * Margen adicional que se agrega tras abrir, o `null`.
+   *
+   * Viaja dentro del plan por la misma razon que `takeProfitPorcentaje`: es
+   * parte de lo que el operador aprobo, y un importe que llegara aparte en el
+   * momento de ejecutar podria no ser el que se confirmo.
+   */
+  margenAdicional: string | null;
   /** Lo que conviene mirar antes de confirmar. Ver `AvisoPlan`. */
   avisos: AvisoPlan[];
+  /**
+   * Porcentaje del Take Profit que se coloca tras abrir, o `null`.
+   *
+   * Viaja dentro del plan -y no como argumento de `ejecutar`- porque es parte
+   * de lo que el operador aprobo: lo que sale hacia Bitget tiene que ser
+   * exactamente lo que se enseño, y un porcentaje que llegara por separado en
+   * el momento de ejecutar podria no ser el mismo que se confirmo.
+   */
+  takeProfitPorcentaje: string | null;
 }
 
 /* ---------------- cierre de operaciones ---------------- */
@@ -315,6 +439,11 @@ export interface EntradaQuitarTakeProfit extends EntradaLote {
   orderId: string;
   /** Precio de disparo que tenia puesto, para poder ensenarlo. */
   precioDisparo: string;
+  /**
+   * El tipo que Bitget dio a ese plan -`pos_profit`-. Viaja hasta la
+   * cancelacion porque cancelar con otro tipo responde exito y no quita nada.
+   */
+  planType: string;
 }
 
 export type PlanQuitarTakeProfit = PlanBase<EntradaQuitarTakeProfit>;
@@ -466,6 +595,35 @@ export class MotorLotes {
       throw new ErrorPlan('sin-objetivos', 'No hay ninguna casilla seleccionada.');
     }
 
+    /* Sin margen adicional y «margen adicional vacio» son lo mismo: no se agrega. */
+    const margenAdicional =
+      peticion.margenAdicional === undefined ||
+      peticion.margenAdicional === null ||
+      peticion.margenAdicional.trim() === ''
+        ? null
+        : peticion.margenAdicional.trim();
+
+    /*
+     * Margen adicional en cruzado: el plan entero es inviable y **no sale ni una
+     * orden**.
+     *
+     * No es un descarte por cuenta porque no depende de ninguna cuenta: el modo
+     * lo elige el operador para todo el lote, asi que o vale para todas o no
+     * vale para ninguna. Y no se abre «al menos la posicion»: el cliente lo
+     * pidio con estas palabras el 25/08/2026 -«si no se puede agregar el margen
+     * adicional, no abrir la operacion, porque eso indica que hay algun
+     * parametro mal»-, y tiene razon: abrir sin el margen que se aprobo deja la
+     * posicion con menos colchon del que el operador cree que tiene.
+     */
+    if (margenAdicional !== null && peticion.modoMargen === 'crossed') {
+      throw new ErrorPlan(
+        'margen-adicional-en-cruzado',
+        'Se pidió margen adicional y el modo elegido es CRUZADO, donde Bitget no admite agregarlo: ' +
+          'en cruzado el margen sale del saldo total de la cuenta y lo reparte el propio exchange. ' +
+          'No se abre ninguna posición. Cambie el modo a AISLADO o deje vacío el margen adicional.'
+      );
+    }
+
     const contrato = await this.contrato(peticion.mercado, peticion.simbolo);
 
     const ticker = await obtenerTicker(this.cliente, peticion.mercado, peticion.simbolo);
@@ -481,6 +639,71 @@ export class MotorLotes {
     const entradas: EntradaPlan[] = [];
     const descartes: DescartePlan[] = [];
     const avisos: AvisoPlan[] = [];
+    /* Sin Take Profit y «Take Profit vacio» son lo mismo: no se pone ninguno. */
+    const tpPorcentaje =
+      peticion.takeProfitPorcentaje === undefined ||
+      peticion.takeProfitPorcentaje === null ||
+      peticion.takeProfitPorcentaje.trim() === ''
+        ? null
+        : peticion.takeProfitPorcentaje.trim();
+
+    /*
+     * En que modo de margen esta **este simbolo** en cada cuenta, ahora mismo.
+     *
+     * Una lectura por cuenta, no por casilla: long y short de la misma
+     * subcuenta comparten el modo del simbolo. Es la unica forma de saber si
+     * hay que fijarlo antes de abrir, y de poder decirlo en la confirmacion.
+     *
+     * `null` en el mapa significa «no se pudo leer», que no es lo mismo que
+     * cruzado: quien no lo sabe no abre. Abrir a ciegas es lo que reconfiguraba
+     * simbolos en silencio.
+     */
+    const configuracion = new Map<string, ConfiguracionSimbolo | null>();
+    /*
+     * Por que no se pudo leer, cuenta por cuenta.
+     *
+     * El `catch` se tragaba el motivo y el descarte decia solo «no se pudo
+     * comprobar», sin el mensaje de Bitget. Es el mismo dato que ya llevan
+     * `posiciones-ilegibles` y `planes-ilegibles`, y sin el no hay forma de
+     * distinguir un corte de red de una credencial sin permiso.
+     */
+    const motivoIlegible = new Map<string, string>();
+    const cuentaIds = [...new Set(peticion.objetivos.map((o) => o.cuentaId))];
+
+    /* Por bloques, como los envios: cien cuentas no encolan cien lecturas de golpe. */
+    for (let i = 0; i < cuentaIds.length; i += this.tamanoBloque) {
+      await Promise.all(
+        cuentaIds.slice(i, i + this.tamanoBloque).map(async (cuentaId) => {
+          const cuenta = this.fuente.cuentaEjecutable(cuentaId);
+          if (cuenta === null) return;
+          try {
+            const r = await obtenerCuentaSimbolo(
+              this.cliente,
+              cuenta.credencial,
+              peticion.simbolo,
+              peticion.mercado.productType,
+              peticion.mercado.marginCoin
+            );
+            configuracion.set(cuentaId, {
+              modoMargen: r.datos.marginMode === 'isolated' ? 'isolated' : 'crossed',
+              apalancamiento: {
+                long: r.datos.isolatedLongLever ?? null,
+                short: r.datos.isolatedShortLever ?? null,
+                cruzado: r.datos.crossedMarginLeverage ?? null
+              }
+            });
+          } catch (e) {
+            configuracion.set(cuentaId, null);
+            motivoIlegible.set(cuentaId, e instanceof Error ? e.message : String(e));
+            /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+            trazaFallo('1·leer-config-simbolo-FALLÓ', e, {
+              cuentaId,
+              simbolo: peticion.simbolo
+            });
+          }
+        })
+      );
+    }
 
     peticion.objetivos.forEach((objetivo, indice) => {
       const cuenta = this.fuente.cuentaEjecutable(objetivo.cuentaId);
@@ -495,10 +718,36 @@ export class MotorLotes {
         return;
       }
 
+      /*
+       * Sin saber en que modo esta el simbolo no se abre.
+       *
+       * Podria abrirse igualmente mandando el modo pedido, y es justo lo que no
+       * debe hacerse: `marginMode` viaja dentro de `place-order`, asi que abrir
+       * con un modo que no se ha comprobado reconfigura el simbolo en Bitget.
+       * De los dos errores posibles -no abrir, o abrir cambiando la
+       * configuracion de una cuenta a espaldas del operador-, el inofensivo es
+       * no abrir.
+       */
+      const config = configuracion.get(objetivo.cuentaId) ?? null;
+      if (config === null) {
+        descartes.push({
+          cuentaId: cuenta.cuentaId,
+          etiqueta: cuenta.etiqueta,
+          lado: objetivo.lado,
+          motivo: 'modo-margen-ilegible',
+          mensaje:
+            `No se pudo comprobar en qué modo de margen está ${peticion.simbolo} en esta cuenta: ` +
+            `${motivoIlegible.get(objetivo.cuentaId) ?? 'motivo desconocido'}. ` +
+            'No se abre: el modo viaja dentro de la orden y abrir sin comprobarlo reconfiguraría el activo en Bitget.'
+        });
+        return;
+      }
+
       const calculo = dimensionarApertura({
         contrato,
         precio,
         margenInicial: peticion.margenInicial,
+        margenAdicional,
         apalancamiento: peticion.apalancamiento,
         saldoDisponible: cuenta.saldoDisponible,
         aMercado: peticion.precioLimite === null
@@ -515,6 +764,41 @@ export class MotorLotes {
         return;
       }
 
+      /*
+       * El Take Profit se comprueba **antes** de dar la casilla por buena.
+       *
+       * Un porcentaje que no llega ni a un paso de precio del simbolo no se
+       * puede colocar, y abrir igualmente dejaria una posicion sin la
+       * proteccion que el operador pidio en la misma pulsacion. Entre abrir sin
+       * Take Profit y no abrir, el error inofensivo es no abrir: la posicion
+       * que no existe no se puede liquidar. Por eso es un descarte con el
+       * motivo del propio calculo, y no un aviso.
+       */
+      let precioDisparoTp: string | null = null;
+      if (tpPorcentaje !== null) {
+        const tp = precioTakeProfit({
+          contrato,
+          precioEntrada: precio,
+          lado: objetivo.lado,
+          apalancamiento: peticion.apalancamiento,
+          porcentaje: tpPorcentaje
+        });
+
+        if (!tp.ok) {
+          descartes.push({
+            cuentaId: cuenta.cuentaId,
+            etiqueta: cuenta.etiqueta,
+            lado: objetivo.lado,
+            motivo: tp.motivo,
+            mensaje:
+              `${tp.mensaje} No se abre la posición: se pidió abrirla con Take Profit y ` +
+              'sin él quedaría desprotegida.'
+          });
+          return;
+        }
+        precioDisparoTp = tp.disparo.precioDisparo;
+      }
+
       entradas.push({
         cuentaId: cuenta.cuentaId,
         etiqueta: cuenta.etiqueta,
@@ -523,7 +807,25 @@ export class MotorLotes {
         size: calculo.dimension.size,
         nocional: calculo.dimension.nocional,
         margenReal: calculo.dimension.margenReal,
-        modoMargen: cuenta.modoMargen
+        modoMargen: peticion.modoMargen,
+        modoMargenActual: config.modoMargen,
+        margenAdicional,
+        precioDisparoTp
+      });
+
+      /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+      trazaApertura('1·planificar-apertura', {
+        cuentaId: cuenta.cuentaId,
+        lado: objetivo.lado,
+        modoMargenPedido: peticion.modoMargen,
+        modoMargenSimbolo: config.modoMargen,
+        margenPedido: peticion.margenInicial,
+        margenAdicional,
+        apalancamientoPedido: peticion.apalancamiento,
+        apalancamientoVigente: apalancamientoDe(config, peticion.modoMargen, objetivo.lado),
+        size: calculo.dimension.size,
+        margenReal: calculo.dimension.margenReal,
+        nocional: calculo.dimension.nocional
       });
 
       /*
@@ -533,8 +835,13 @@ export class MotorLotes {
        * en otro apalancamiento del que el operador escribio, el margen que se
        * le enseña no seria el que se compromete, y eso es lo primero que hay
        * que decirle. No bloquea el envio: avisa.
+       *
+       * Sale de la lectura fresca de **este** simbolo y para el modo con el que
+       * se va a abrir, no de la ficha de la cuenta: la ficha guarda el del
+       * primer simbolo del mercado, y con el se avisaba de diferencias que no
+       * existian y se callaban las que si.
        */
-      const vigente = apalancamientoVigente(cuenta, objetivo.lado);
+      const vigente = apalancamientoDe(config, peticion.modoMargen, objetivo.lado);
       if (vigente !== null && vigente !== peticion.apalancamiento) {
         const margenEfectivo = new Decimal(calculo.dimension.nocional).dividedBy(vigente);
         avisos.push({
@@ -550,6 +857,22 @@ export class MotorLotes {
       }
     });
 
+    /*
+     * DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts
+     *
+     * El desenlace del plan entero, en una linea. Las trazas por casilla solo
+     * salen de las que **si** entran, asi que un plan que se queda sin ninguna
+     * -el caso de «no manda la operacion»- no dejaba rastro de por que.
+     */
+    trazaApertura('1·plan-apertura', {
+      planId: id,
+      simbolo: peticion.simbolo,
+      entradas: entradas.length,
+      descartes: descartes.length,
+      motivos: descartes.map((d) => d.motivo).join(',') || '—',
+      avisos: avisos.length
+    });
+
     return {
       id,
       mercado: peticion.mercado,
@@ -558,6 +881,9 @@ export class MotorLotes {
       precioLimite: peticion.precioLimite,
       precioReferencia: precio,
       margenInicial: peticion.margenInicial,
+      modoMargen: peticion.modoMargen,
+      margenAdicional,
+      takeProfitPorcentaje: tpPorcentaje,
       entradas,
       descartes,
       avisos,
@@ -777,6 +1103,17 @@ export class MotorLotes {
           apalancamiento,
           movimientoPorcentaje: calculo.disparo.movimientoPorcentaje
         });
+
+        /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+        trazaApertura('1·planificar-take-profit', {
+          cuentaId,
+          lado: objetivo.lado,
+          porcentajePedido: peticion.porcentaje,
+          precioEntrada: posicion.openPriceAvg,
+          apalancamientoPosicion: posicion.leverage,
+          apalancamientoUsado: apalancamiento,
+          precioDisparo: calculo.disparo.precioDisparo
+        });
         indice += 1;
       }
     }
@@ -883,7 +1220,8 @@ export class MotorLotes {
           lado: objetivo.lado,
           clientOid: clientOidDe(id, indice, objetivo.lado),
           orderId: puesto.orderId ?? '',
-          precioDisparo: puesto.triggerPrice ?? ''
+          precioDisparo: puesto.triggerPrice ?? '',
+          planType: puesto.planType ?? 'pos_profit'
         });
         indice += 1;
       }
@@ -997,8 +1335,17 @@ export class MotorLotes {
             etiqueta: cuenta.etiqueta,
             lado: objetivo.lado,
             motivo: 'margen-cruzado',
+            /*
+             * El mensaje dice **por que** no se puede, no solo que no se puede.
+             * Lo explico el cliente el 25/08/2026 y es la diferencia entre un
+             * error del panel y una propiedad del exchange: en cruzado no hay
+             * margen por posicion que agregar, porque lo toma del saldo de la
+             * cuenta segun lo va necesitando.
+             */
             mensaje:
-              'La posición está en margen cruzado y Bitget solo permite agregar margen en aislado.'
+              'La posición está en margen CRUZADO, donde no se agrega margen por posición: ' +
+              'Bitget lo toma del saldo total de la cuenta según lo necesita. ' +
+              'Para poder agregarlo, la posición tiene que estar en margen AISLADO.'
           });
           continue;
         }
@@ -1028,6 +1375,23 @@ export class MotorLotes {
         indice += 1;
       }
     }
+
+    /*
+     * DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts
+     *
+     * `set-margin` es la unica peticion del panel sin `clientOid`, asi que dos
+     * planes de margen sobre la misma posicion la dejan con el doble del que se
+     * aprobo y nada lo impide. Contarlos es la unica forma de verlo.
+     */
+    trazaApertura('1·plan-margen', {
+      planId: id,
+      simbolo: peticion.simbolo,
+      cantidadPorCasilla: cantidad.toFixed(),
+      entradas: entradas.length,
+      totalComprometido: cantidad.times(entradas.length).toFixed(),
+      descartes: descartes.length,
+      motivos: descartes.map((d) => d.motivo).join(',') || '—'
+    });
 
     return {
       id,
@@ -1125,6 +1489,45 @@ export class MotorLotes {
   async ejecutar(plan: PlanApertura, soloEstos?: readonly string[]): Promise<Lote> {
     return this.correrLote(plan, 'abrir', soloEstos, {
       enviar: async (cuenta, entrada) => {
+        /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+        trazaApertura('2·enviar-apertura', {
+          cuentaId: cuenta.cuentaId,
+          lado: entrada.lado,
+          modoMargenPedido: entrada.modoMargen,
+          modoMargenSimbolo: entrada.modoMargenActual,
+          size: entrada.size,
+          precioLimite: plan.precioLimite,
+          clientOid: entrada.clientOid
+        });
+
+        /*
+         * El modo de margen se fija **antes** de abrir, y solo si de verdad
+         * difiere.
+         *
+         * Solo si difiere porque Bitget rechaza el cambio con la posicion
+         * abierta, y eso es correcto: cambiar el modo bajo una posicion viva
+         * moveria su precio de liquidacion. Como al planificar se leyo el modo
+         * real de este simbolo, aqui se sabe si hay algo que cambiar; cuando ya
+         * coincide no se gasta ni una peticion y ampliar una posicion existente
+         * sigue funcionando.
+         *
+         * Si el cambio falla, la excepcion sube y esta casilla queda como fallo
+         * **sin haber enviado ninguna orden**. Es lo que hay que hacer: abrir
+         * igualmente mandaria el modo pedido dentro de `place-order` y
+         * reconfiguraria el simbolo por la puerta de atras, que es exactamente
+         * el fallo del 25/08/2026.
+         */
+        if (entrada.modoMargenActual !== entrada.modoMargen) {
+          /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+          trazaApertura('2·cambiar-modo-margen', {
+            cuentaId: cuenta.cuentaId,
+            simbolo: plan.simbolo,
+            de: entrada.modoMargenActual,
+            a: entrada.modoMargen
+          });
+          await this.asegurarModoMargen(cuenta, plan.mercado, plan.simbolo, entrada.modoMargen);
+        }
+
         const r = await abrirPosicion(this.cliente, cuenta.credencial, {
           mercado: plan.mercado,
           simbolo: plan.simbolo,
@@ -1244,6 +1647,16 @@ export class MotorLotes {
   async ejecutarTakeProfit(plan: PlanTakeProfit, soloEstos?: readonly string[]): Promise<Lote> {
     return this.correrLote(plan, 'take-profit', soloEstos, {
       enviar: async (cuenta, entrada) => {
+        /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+        trazaApertura('2·enviar-take-profit', {
+          cuentaId: cuenta.cuentaId,
+          lado: entrada.lado,
+          precioDisparo: entrada.precioDisparo,
+          precioEntrada: entrada.precioEntrada,
+          apalancamiento: entrada.apalancamiento,
+          clientOid: entrada.clientOid
+        });
+
         const r = await colocarTakeProfit(this.cliente, cuenta.credencial, {
           mercado: plan.mercado,
           simbolo: plan.simbolo,
@@ -1307,7 +1720,8 @@ export class MotorLotes {
         const r = await cancelarPlan(this.cliente, cuenta.credencial, {
           mercado: plan.mercado,
           simbolo: plan.simbolo,
-          orderId: entrada.orderId
+          orderId: entrada.orderId,
+          planType: entrada.planType
         });
 
         const fallo = r.datos.failureList?.[0];
@@ -1376,6 +1790,16 @@ export class MotorLotes {
   async ejecutarMargen(plan: PlanMargen, soloEstos?: readonly string[]): Promise<Lote> {
     return this.correrLote(plan, 'agregar-margen', soloEstos, {
       enviar: async (cuenta, entrada) => {
+        /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+        trazaApertura('2·enviar-margen', {
+          planId: plan.id,
+          cuentaId: cuenta.cuentaId,
+          lado: entrada.lado,
+          cantidad: entrada.cantidad,
+          margenActual: entrada.margenActual,
+          margenResultante: entrada.margenResultante
+        });
+
         await ajustarMargen(this.cliente, cuenta.credencial, {
           simbolo: plan.simbolo,
           productType: plan.mercado.productType,
@@ -1473,6 +1897,78 @@ export class MotorLotes {
   }
 
   /* ---------------- maquinaria comun ---------------- */
+
+  /**
+   * Deja el simbolo en el modo de margen pedido, o lanza.
+   *
+   * --------------------------------------------------------------------------
+   * Por que un fallo al fijarlo no basta para dar la casilla por perdida
+   * --------------------------------------------------------------------------
+   * Bitget rechaza el cambio si el simbolo tiene posiciones u ordenes vivas, y
+   * hay dos caminos legitimos hasta ese rechazo con el modo **ya correcto**:
+   *
+   *  - **Reintentar las fallidas.** El plan lleva el modo que se leyo al
+   *    planificar; si el primer envio ya lo cambio y abrio, el reintento lo
+   *    encuentra distinto en el plan e intenta cambiarlo otra vez, ahora con
+   *    posicion abierta.
+   *  - **Otra casilla de la misma cuenta.** Dos casillas del mismo simbolo y la
+   *    misma subcuenta van en el mismo bloque: la primera cambia el modo y
+   *    abre, la segunda se encuentra la posicion puesta.
+   *
+   * En los dos casos el rechazo no significa «no se puede operar», significa
+   * «ya estaba hecho». Por eso se relee el modo antes de rendirse, y solo se
+   * propaga el error si de verdad sigue siendo el que no es. Si sigue siendo el
+   * que no es, la casilla falla **sin enviar ninguna orden**, que es lo unico
+   * aceptable: abrir mandaria el modo pedido dentro de `place-order` y
+   * reconfiguraria el simbolo sin que nadie lo aprobara.
+   */
+  private async asegurarModoMargen(
+    cuenta: CuentaEjecutable,
+    mercado: Mercado,
+    simbolo: string,
+    modo: ModoMargenApi
+  ): Promise<void> {
+    try {
+      await fijarModoMargen(this.cliente, cuenta.credencial, {
+        simbolo,
+        productType: mercado.productType,
+        marginCoin: mercado.marginCoin,
+        modoMargen: modo
+      });
+      return;
+    } catch (e) {
+      let vigente: string;
+      try {
+        const r = await obtenerCuentaSimbolo(
+          this.cliente,
+          cuenta.credencial,
+          simbolo,
+          mercado.productType,
+          mercado.marginCoin
+        );
+        vigente = r.datos.marginMode === 'isolated' ? 'isolated' : 'crossed';
+      } catch {
+        /* No se pudo comprobar como quedo: se propaga el fallo original. */
+        throw e;
+      }
+
+      if (vigente === modo) return;
+
+      const nombre = modo === 'isolated' ? 'AISLADO' : 'CRUZADO';
+      throw new ErrorBitget(
+        `No se pudo poner ${simbolo} en margen ${nombre}: ${e instanceof Error ? e.message : String(e)}. ` +
+          'No se abrió nada. Bitget no permite cambiar el modo con posiciones u órdenes abiertas en ese activo: ' +
+          'ciérrelas, o abra en el modo que ya tiene el activo.',
+        {
+          clase: 'fatal-cuenta',
+          codigo: e instanceof ErrorBitget ? e.codigo : null,
+          mensajeOriginal: e instanceof Error ? e.message : null,
+          httpStatus: null,
+          reintentarEnMs: null
+        }
+      );
+    }
+  }
 
   /**
    * El recorrido de un lote, sea de la accion que sea.

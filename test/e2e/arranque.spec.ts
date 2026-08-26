@@ -65,7 +65,16 @@ test('los canales de apertura existen y exigen el panel abierto', async () => {
         objetivos: [{ cuentaId: 'x', lado: 'long' }],
         margenInicial: '100',
         apalancamiento: 10,
-        precioLimite: null
+        precioLimite: null,
+        /*
+         * El modo de margen y el margen adicional son obligatorios en el canal
+         * desde el 26/08/2026. Sin ellos la peticion no llega a la sesion: la
+         * rechaza el esquema, y este caso comprobaria la validacion en vez del
+         * cerrojo del panel bloqueado.
+         */
+        modoMargen: 'isolated',
+        margenAdicional: null,
+        takeProfitPorcentaje: null
       });
       return 'planifico';
     } catch (e) {

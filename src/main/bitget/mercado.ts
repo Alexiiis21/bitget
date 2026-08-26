@@ -35,12 +35,16 @@ export interface Mercado {
    * Los simbolos que el panel deja operar, en el orden en que se enseñan.
    *
    * Es una lista corta y explicita, no «todo lo que devuelva Bitget». El
-   * cliente opera cinco activos y solo cinco; un selector con los 754 contratos
+   * cliente opera ocho activos y solo ocho; un selector con los 754 contratos
    * del exchange convertiria una eleccion de un vistazo en una busqueda, y
    * abriria la puerta a operar por error un activo que no es el suyo.
    *
    * El mercado simulado no tiene los mismos: Bitget solo ofrece tres para
    * practicar, y XRP esta ahi porque es lo que hay, no porque se opere.
+   *
+   * Un simbolo que el exchange no devuelva se omite del catalogo en vez de
+   * inventarse -ver `catalogo-activos.ts`-, asi que sobrar en esta lista no
+   * rompe nada; solo hace que la lista mienta sobre lo que se puede elegir.
    */
   simbolos: readonly string[];
 }
@@ -59,13 +63,19 @@ export const MERCADO_REAL: Mercado = {
  * Es donde se hacen las pruebas fisicas de la Fase 4: precios reales, motor de
  * emparejamiento real y saldo simulado. Solo tiene tres simbolos -SBTCSUSDT,
  * SETHSUSDT y SXRPSUSDT-, suficientes para demostrar la ejecucion.
+ *
+ * SSUISUSDT y SDOGESUSDT estuvieron aqui y se retiraron el 25/08/2026:
+ * `/api/v2/mix/market/contracts?productType=SUSDT-FUTURES` no los devuelve. El
+ * catalogo los omitia sin decir nada, asi que la lista prometia dos activos que
+ * el selector nunca llego a enseñar. Si Bitget los añade al trading demo,
+ * vuelven aqui.
  */
 export const MERCADO_SIMULADO: Mercado = {
   clave: 'simulado',
   productType: 'SUSDT-FUTURES',
   marginCoin: 'SUSDT',
   prefijoSimbolo: 'S',
-  simbolos: ['SBTCSUSDT', 'SETHSUSDT', 'SXRPSUSDT', 'SSUISUSDT', 'SDOGESUSDT']
+  simbolos: ['SBTCSUSDT', 'SETHSUSDT', 'SXRPSUSDT']
 };
 
 export const MERCADOS: Record<ClaveMercado, Mercado> = {

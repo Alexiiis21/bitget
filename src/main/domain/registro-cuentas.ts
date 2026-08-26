@@ -358,10 +358,15 @@ export class RegistroCuentas {
    *
    * Los dos se capturaban solo en el alta y no se volvian a mirar, asi que una
    * cuenta que el operador cambiaba a margen aislado en Bitget seguia figurando
-   * como cruzada aqui. No era cosmetico: `cuentaEjecutable` alimenta con este
-   * campo el `marginMode` de la orden, y Bitget lo obedece -abre en cruzado una
-   * cuenta configurada en aislado-. Ademas hacia descartar por «no es aislado»
-   * las cuentas que si lo eran al agregar margen.
+   * como cruzada aqui, y se descartaba por «no es aislado» al agregar margen.
+   *
+   * Lo que se guarda es el modo del **primer simbolo del mercado**, que es el
+   * que la verificacion consulta. En Bitget el modo es por simbolo, asi que
+   * este valor no describe la cuenta entera y **no decide con que modo se
+   * abre**: eso lo elige el operador en el panel y lo comprueba el motor contra
+   * el simbolo que se va a operar. Hasta el 26/08/2026 si alimentaba el
+   * `marginMode` de la orden, y como Bitget lo obedece, abrir un activo
+   * reconfiguraba ese activo con el modo de otro.
    *
    * Devuelve `true` solo si algo cambio, para que quien llama persista el
    * archivo unicamente entonces: esto se invoca en cada ciclo de verificacion y

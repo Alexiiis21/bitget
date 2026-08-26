@@ -420,16 +420,45 @@ export class MockPanelService implements PanelService {
           : (this.precios[req.assetId] ?? PRECIO_BASE[req.assetId] ?? 1);
       const dir = objetivo.side === 'long' ? 1 : -1;
 
+      /*
+       * El Take Profit sale con la misma orden, como en el panel real: si no
+       * quedara puesto aquí, la demostración enseñaría una posición sin él
+       * después de haber confirmado un diálogo que dice «sale con esta orden».
+       */
+      const pct = req.takeProfitPercent === null ? null : Number.parseFloat(req.takeProfitPercent);
+      const tp =
+        pct === null || !Number.isFinite(pct) || pct <= 0
+          ? null
+          : dec(precio * (1 + dir * (pct / 100 / 10)), 6);
+
+      /*
+       * El margen adicional también sale con la misma orden. En la demostración
+       * solo se ve en el distintivo MGA de la casilla, que es lo que el operador
+       * mira para saber si esa posición lo lleva: sin esto, confirmaría un
+       * diálogo que lo anuncia y la casilla no lo enseñaría.
+       *
+       * No entra en `initialMarginAccum`: ese acumulador es del margen inicial,
+       * y el Take Profit se calcula sobre él. Ver `panel-view.ts`.
+       */
+      const extra = req.additionalMargin;
+
       this.posiciones.set(claveObjetivo(objetivo.subAccountId, objetivo.side), {
         subAccountId: objetivo.subAccountId,
         side: objetivo.side,
         assetId: req.assetId,
         entryPrice: dec(precio, 6),
         liquidationPrice: dec(precio * (1 - dir * 0.061), 6),
-        takeProfitPrice: null,
+        takeProfitPrice: tp,
         initialMarginAccum: req.initialMargin,
         leverage: 10,
-        actions: { ...accionesVacias(), oe: true, ap: true, apDisplay: '10x' },
+        actions: {
+          ...accionesVacias(),
+          oe: true,
+          ap: true,
+          apDisplay: '10x',
+          ...(tp === null ? {} : { tp: true, tpDisplay: `${req.takeProfitPercent ?? ''}%` }),
+          ...(extra === null ? {} : { mg: true, mgDisplay: extra })
+        },
         marginCritical: false,
         hasError: false,
         errorReason: null,
@@ -607,7 +636,15 @@ export class MockPanelService implements PanelService {
     return this.planificar(
       'open',
       'Abrir posiciones',
-      `${req.initialMargin} USDT de margen por casilla · ${req.leverage}x · ${req.orderType === 'limit' ? `límite ${req.limitPrice ?? '—'}` : 'a mercado'}`,
+      `${req.initialMargin} USDT de margen por casilla · ${req.leverage}x · ` +
+        `${req.marginMode === 'isolated' ? 'AISLADO' : 'CRUZADO'} · ` +
+        `${req.orderType === 'limit' ? `límite ${req.limitPrice ?? '—'}` : 'a mercado'}` +
+        (req.takeProfitPercent === null
+          ? ''
+          : ` · Take Profit ${req.takeProfitPercent}%, con la misma orden`) +
+        (req.additionalMargin === null
+          ? ''
+          : ` · margen adicional ${req.additionalMargin} USDT por casilla, con la misma orden`),
       req.targets,
       () =>
         `${dec(nocional / precio, 6)} ${req.assetId} · margen real ${dec(margen, 2)} USDT · ` +

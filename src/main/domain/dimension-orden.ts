@@ -93,6 +93,16 @@ export interface PeticionDimension {
   /** Margen que el operador quiere comprometer, en moneda de margen. */
   margenInicial: string;
   apalancamiento: number;
+  /**
+   * Margen adicional que sale **con la misma orden**, o `null` si no se pidio.
+   *
+   * No entra en el calculo de la cantidad -el nocional lo fija el margen
+   * inicial, y anadir margen despues no agranda la posicion, solo aleja la
+   * liquidacion-, pero si en la comprobacion de saldo: los dos importes salen
+   * del disponible en la misma pulsacion, y comprobar solo el primero dejaria
+   * abrir posiciones a las que luego no se les puede anadir lo prometido.
+   */
+  margenAdicional?: string | null;
   /** Saldo disponible de la subcuenta. Se comprueba el primero. */
   saldoDisponible: string;
   /** `true` si la orden va a mercado; cambia el tope de cantidad aplicable. */
@@ -126,10 +136,25 @@ export function dimensionarApertura(p: PeticionDimension): ResultadoDimension {
     return rechazo('margen-invalido', 'El margen inicial debe ser un número mayor que cero.');
   }
 
-  if (saldo.lessThan(margen)) {
+  const adicional = new Decimal(p.margenAdicional ?? '0');
+  if (!adicional.isFinite() || adicional.lessThan(0)) {
+    return rechazo('margen-invalido', 'El margen adicional debe ser un número mayor que cero.');
+  }
+
+  /*
+   * El saldo se comprueba contra los dos importes juntos. Abrir sabiendo que el
+   * margen adicional no va a caber seria abrir a medias: la posicion quedaria
+   * con la mitad de la proteccion que el operador aprobo en esa confirmacion.
+   */
+  const comprometido = margen.plus(adicional);
+  if (saldo.lessThan(comprometido)) {
     return rechazo(
       'margen-insuficiente',
-      `Saldo insuficiente: hacen falta ${margen.toString()} y hay ${saldo.toString()}.`
+      adicional.isZero()
+        ? `Saldo insuficiente: hacen falta ${margen.toString()} y hay ${saldo.toString()}.`
+        : `Saldo insuficiente: hacen falta ${comprometido.toString()} ` +
+          `(${margen.toString()} de margen inicial y ${adicional.toString()} de margen adicional) ` +
+          `y hay ${saldo.toString()}.`
     );
   }
 

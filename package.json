@@ -1,7 +1,7 @@
 {
   "name": "pcb",
   "productName": "Panel de Control Bitget",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Panel de control de escritorio para operar multiples cuentas de Bitget (futuros USDT-M) desde una sola interfaz.",
   "private": true,
   "license": "UNLICENSED",
@@ -23,7 +23,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:red": "vitest run test/red",
+    "test:red": "vitest run test/red --no-file-parallelism",
     "test:staging": "vitest run --config vitest.staging.config.ts",
     "test:fisica": "vitest run --config vitest.fisica.config.ts --disable-console-intercept",
     "importar:subcuentas": "vitest run --config vitest.importar.config.ts",
@@ -89,7 +89,7 @@
     },
     "scripts": {
       "test": "Unitarias e integracion. La integracion habla con el exchange simulado de test/mock-exchange, no con Bitget.",
-      "test:red": "Sale a api.bitget.com. Se omite si no hay credenciales en .env, para no estorbar en una maquina cualquiera.",
+      "test:red": "Sale a api.bitget.com. Se omite si no hay credenciales en .env, para no estorbar en una maquina cualquiera. Va con --no-file-parallelism por lo mismo que vitest.staging.config.ts lo fija: los tres archivos comparten el cupo de peticiones de una sola IP y, lanzados a la vez, se lo quitan entre ellos y la suite falla con 429 que no dicen nada del panel. El config general no puede fijarlo porque tambien gobierna las 369 pruebas sin red, que si van en paralelo.",
       "dev:real": "Lo mismo que dev:staging pero con __MERCADO__='real': es el binario del cliente corriendo en la maquina del desarrollador, con terminal donde leer el log. Existe para reproducir aqui lo que el cliente ve alli; hasta ahora el modo `staging-real` solo se podia empaquetar, no arrancar. Comparte la carpeta de datos -y por tanto el vault- con dev:staging, igual que los dos .exe comparten datos-staging. Las ordenes que salgan de aqui mueven dinero de verdad.",
       "test:staging": "Las mismas pruebas de red pero con el codigo compilado como staging (__ENTORNO__='staging'), igual que el binario del cliente. Exige credenciales reales: sin ellas falla en vez de omitirse. Es la que se ensena en una auditoria.",
       "package:portable": "Empaqueta el modo `production`, que electron.vite.config.ts mapea al entorno `dev`: el binario resultante monta MockPanelService y ensena datos inventados. Es una demostracion de la interfaz, NO el binario del cliente.",

@@ -36,14 +36,21 @@ import {
 
 const SIMBOLO = 'SBTCSUSDT';
 
-/** Un Take Profit puesto sobre la posicion entera. */
+/**
+ * Un Take Profit puesto sobre la posicion entera.
+ *
+ * El lado va en `posSide` porque es el campo que devuelve Bitget al listar
+ * -capturado el 25/08/2026-. Estos dobles decian `holdSide`, que es como se
+ * llama al enviar, y por eso la suite pasaba en verde mientras el panel era
+ * incapaz de encontrar un solo Take Profit contra la API de verdad.
+ */
 const takeProfit = (lado: 'long' | 'short', orderId = 'plan_1', disparo = '63220.5'): unknown => ({
   orderId,
   clientOid: `oid_${orderId}`,
   symbol: SIMBOLO,
   planType: 'pos_profit',
   triggerPrice: disparo,
-  holdSide: lado,
+  posSide: lado,
   status: 'live'
 });
 
@@ -54,7 +61,7 @@ const stopLoss = (lado: 'long' | 'short', orderId = 'plan_sl'): unknown => ({
   symbol: SIMBOLO,
   planType: 'pos_loss',
   triggerPrice: '62000',
-  holdSide: lado,
+  posSide: lado,
   status: 'live'
 });
 
@@ -246,6 +253,26 @@ describe('ejecutar: quitar de verdad', () => {
       const cuerpo = JSON.parse(p.cuerpo) as { orderIdList?: unknown[] };
       expect(cuerpo.orderIdList).toHaveLength(1);
     }
+  });
+
+  /*
+   * Comprobado contra Bitget el 25/08/2026, y es la prueba que faltaba.
+   *
+   * Los planes se **consultan** con `planType: 'profit_loss'` -la familia
+   * entera- y cancelar con ese mismo valor parece lo natural. Bitget responde
+   * entonces `00000 success` con las dos listas vacias y **no cancela nada**:
+   * no hay error que delate el fallo, solo un Take Profit que sigue puesto. El
+   * tipo que cancela es el del plan, `pos_profit`.
+   */
+  it('cancela con el tipo del plan, no con la familia con la que se consulta', async () => {
+    enrutar({});
+
+    const plan = await motor.planificarQuitarTakeProfit(peticion(1));
+    await motor.ejecutarQuitarTakeProfit(plan);
+
+    const enviada = exchange.peticiones.find((p) => p.url.includes('cancel-plan-order'));
+    const cuerpo = JSON.parse(enviada?.cuerpo ?? '{}') as { planType?: string };
+    expect(cuerpo.planType).toBe('pos_profit');
   });
 
   /*

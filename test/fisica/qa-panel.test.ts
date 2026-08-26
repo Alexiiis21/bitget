@@ -161,7 +161,8 @@ describe.skipIf(!hayCredenciales)('QA del panel contra Bitget', () => {
       objetivos: objetivos(),
       margenInicial: MARGEN,
       apalancamiento: APALANCAMIENTO,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated'
     });
 
     console.log(`
@@ -179,7 +180,8 @@ describe.skipIf(!hayCredenciales)('QA del panel contra Bitget', () => {
       objetivos: objetivos(),
       margenInicial: MARGEN,
       apalancamiento: APALANCAMIENTO,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated'
     });
     if (plan.entradas.length === 0) {
       console.log(`\n  sin casillas viables: ${plan.descartes[0]?.mensaje ?? ''}`);

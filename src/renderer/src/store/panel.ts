@@ -27,6 +27,7 @@ import type {
   BatchResult,
   BatchTarget,
   ClosedPosition,
+  MarginMode,
   PlanKind,
   Position,
   Side
@@ -118,6 +119,16 @@ export interface EstadoPanel {
   valores: ValoresHerramientas;
   valoresFijos: boolean;
   tipoOrden: 'market' | 'limit';
+  /**
+   * Aislado o cruzado, para la próxima apertura.
+   *
+   * Arranca en aislado y no en cruzado a propósito: es el modo en el que
+   * funcionan las seis funciones del panel —en cruzado Bitget no admite agregar
+   * margen— y el que el operador usa. Vive aquí, en la pantalla, porque es una
+   * decisión de trading que se toma en cada operación, igual que el lado o el
+   * tipo de orden.
+   */
+  modoMargen: MarginMode;
   limitPrice: string;
   /**
    * Línea de estado de la barra lateral.
@@ -226,6 +237,7 @@ export interface EstadoPanel {
   fijarValor: (clave: keyof ValoresHerramientas, v: string) => void;
   alternarValoresFijos: () => void;
   fijarTipoOrden: (t: 'market' | 'limit') => void;
+  fijarModoMargen: (m: MarginMode) => void;
   fijarLimitPrice: (v: string) => void;
 
   contarSeleccion: () => number;
@@ -301,11 +313,31 @@ const CAMPO_DE: Record<PlanKind, keyof ValoresHerramientas | null> = {
 /**
  * Las operaciones que piden además la contraseña de paso.
  *
- * Solo la apertura, que es la que compromete dinero nuevo y la única con este
- * freno en el pliego (docs/04 W-09). Las demás se aprueban con el plan a la
- * vista, que ya impide enviar algo distinto de lo aprobado.
+ * --------------------------------------------------------------------------
+ * Abrir y cerrar, no solo abrir
+ * --------------------------------------------------------------------------
+ * Hasta el 26/08/2026 solo la apertura, con el argumento de que es la única que
+ * compromete dinero nuevo. El argumento no se sostiene, y el propio panel ya
+ * decía lo contrario: al fijar la clave, la pantalla de seguridad prometía que
+ * se pediría «cada vez que se abra **o se cierre** una posición».
+ *
+ * Cerrar no compromete dinero nuevo, pero **realiza el resultado**: convierte
+ * en definitiva una pérdida que estaba abierta y deshace de golpe lo que hay
+ * puesto. Y es irreversible en el sentido que importa: una apertura equivocada
+ * se cierra, pero un cierre equivocado no se «reabre» —se vuelve a abrir a otro
+ * precio, y esa diferencia es el coste del error—. Sobre cien casillas, un
+ * clic de más en «Cerrar» cuesta tanto como uno en «Abrir».
+ *
+ * Las otras cuatro no entran: ajustar el Take Profit, el margen o el
+ * apalancamiento no realiza ningún resultado, y pedir la clave en cada ajuste
+ * la convertiría en un trámite que se teclea sin leer, que es exactamente como
+ * se pierde un freno de este tipo.
+ *
+ * Se exporta porque el diálogo necesita la misma regla para decidir si enseña
+ * el campo: dos listas que hay que acordarse de tocar a la vez acaban
+ * separándose, y aquí separarse significa enseñar el campo y no comprobarlo.
  */
-const PIDE_PASO = new Set<PlanKind>(['open']);
+export const PIDE_PASO = new Set<PlanKind>(['open', 'close']);
 
 /**
  * Qué campos se vacían tras enviar, salvo que estén fijados.
@@ -315,7 +347,13 @@ const PIDE_PASO = new Set<PlanKind>(['open']);
  * descuido la cantidad del anterior.
  */
 const LIMPIA_TRAS: Record<PlanKind, Partial<ValoresHerramientas>> = {
-  open: { mgi: '' },
+  /*
+   * La apertura limpia también el Take Profit y el margen adicional, porque los
+   * dos salieron con ella. Dejarlos escritos invitaría a pulsar además sus
+   * botones sobre las mismas posiciones, que es ponerles el Take Profit dos
+   * veces y comprometer el doble de margen del que se aprobó.
+   */
+  open: { mgi: '', tp: '', mga: '' },
   close: {},
   tp: { tp: '' },
   'tp-remove': {},
@@ -340,6 +378,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   valores: { tp: '1.5', mgi: '100', mga: '50', ap: '10' },
   valoresFijos: false,
   tipoOrden: 'market',
+  modoMargen: 'isolated',
   limitPrice: '',
   mensaje: '',
 
@@ -555,6 +594,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   fijarValor: (clave, v) => set((s) => ({ valores: { ...s.valores, [clave]: v } })),
   alternarValoresFijos: () => set((s) => ({ valoresFijos: !s.valoresFijos })),
   fijarTipoOrden: (tipoOrden) => set({ tipoOrden }),
+  fijarModoMargen: (modoMargen) => set({ modoMargen }),
   fijarLimitPrice: (limitPrice) => set({ limitPrice }),
 
   /* ---------------- selección ---------------- */
@@ -687,6 +727,27 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       return;
     }
 
+    /*
+     * Margen adicional en cruzado: no se planifica siquiera.
+     *
+     * El proceso principal lo rechaza igualmente —es él quien tiene la última
+     * palabra sobre lo que sale a Bitget—, pero decirlo aquí ahorra una consulta
+     * de precios y saldos por cada casilla marcada para llegar a la misma
+     * respuesta. En cruzado el margen sale del saldo total de la cuenta y lo
+     * reparte el propio exchange: no hay nada que agregar por posición.
+     */
+    const margenAdicional = kind === 'open' && valores.mga.trim() !== '' ? valores.mga.trim() : null;
+    if (kind === 'open' && margenAdicional !== null && get().modoMargen === 'crossed') {
+      avisar(
+        'aviso',
+        'No se abre: margen adicional en CRUZADO',
+        'En margen cruzado Bitget no admite agregar margen —lo toma del saldo total de la cuenta—. ' +
+          'Cambie el modo a AISLADO o deje vacío el campo «Margen adicional». No se envió nada.',
+        `PCB · ${titulo}`
+      );
+      return;
+    }
+
     set({ planCargando: true, mensaje: `Revisando ${casillas(targets.length)}…` });
     try {
       const plan = await (kind === 'open'
@@ -696,7 +757,22 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
             orderType: tipoOrden,
             limitPrice: tipoOrden === 'limit' && limitPrice.trim() !== '' ? limitPrice : null,
             initialMargin: valores.mgi,
-            leverage: apalancamiento
+            leverage: apalancamiento,
+            marginMode: get().modoMargen,
+            /*
+             * El margen adicional escrito sale con esta misma orden, como el
+             * Take Profit. Si no cabe en el saldo, la casilla se descarta antes
+             * de abrir: abrir sin el margen aprobado deja la posición con menos
+             * colchón del que el operador cree que tiene.
+             */
+            additionalMargin: margenAdicional,
+            /*
+             * El Take Profit escrito sale con esta misma orden. Antes había que
+             * pulsar además «Take Profit %» y aprobar un segundo plan, y el
+             * porcentaje se enseñaba aquí rotulado «se pone aparte»: el operador
+             * lo leía como que ya salía, y las posiciones quedaban sin él.
+             */
+            takeProfitPercent: valores.tp.trim() === '' ? null : valores.tp.trim()
           })
         : kind === 'close'
           ? panelService.planClose({ targets, assetId: activoId })
@@ -734,9 +810,8 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   /**
    * Envía el plan aprobado. Es la segunda fase y la única que toca Bitget.
    *
-   * La apertura pide además la contraseña de paso: es la acción que compromete
-   * dinero nuevo y la única con un freno propio en el pliego. Tres intentos
-   * fallidos cancelan la operación **sin haber enviado nada**.
+   * Abrir y cerrar piden además la contraseña de paso —ver `PIDE_PASO`—. Tres
+   * intentos fallidos cancelan la operación **sin haber enviado nada**.
    */
   confirmarPlan: async () => {
     const { plan, pinPaso, intentosPaso, avisar } = get();

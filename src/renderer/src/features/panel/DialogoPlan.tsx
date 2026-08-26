@@ -1,6 +1,6 @@
 import type { CSSProperties, KeyboardEvent } from 'react';
 import { CAJA_ERROR, FUENTE, SOMBRA, T, VELO } from '@/lib/tokens';
-import { usarPanel } from '@/store/panel';
+import { PIDE_PASO, usarPanel } from '@/store/panel';
 
 /**
  * Lo que se va a enviar, antes de enviarlo.
@@ -18,10 +18,11 @@ import { usarPanel } from '@/store/panel';
  * una subcuenta que no operó y que no aparece en ninguna lista es una subcuenta
  * cuyo estado el operador va a suponer, y suponer es lo que no debe hacer.
  *
- * La contraseña de paso solo aparece en la apertura, que es la única acción que
- * compromete dinero nuevo (docs/04 W-09). Las demás se aprueban con el plan a
- * la vista: confirmar devuelve únicamente el identificador del plan, así que no
- * hay forma de que salga algo distinto de lo aprobado.
+ * La contraseña de paso aparece al **abrir y al cerrar**: la primera compromete
+ * dinero nuevo y la segunda realiza el resultado, y ninguna de las dos se
+ * deshace pulsando otra vez. Las otras cuatro se aprueban solo con el plan a la
+ * vista: confirmar devuelve únicamente el identificador del plan, así que no
+ * hay forma de que salga algo distinto de lo aprobado. Ver `PIDE_PASO`.
  */
 
 const velo: CSSProperties = { position: 'fixed', inset: 0, zIndex: 85, background: VELO.paso, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 28 };
@@ -43,12 +44,19 @@ export function DialogoPlan() {
   const activos = usarPanel((s) => s.activos);
   const activoId = usarPanel((s) => s.activoId);
   const tp = usarPanel((s) => s.valores.tp);
+  const mga = usarPanel((s) => s.valores.mga);
+  const modoMargen = usarPanel((s) => s.modoMargen);
   const mercado = usarPanel((s) => s.mercado);
 
   if (!plan) return null;
 
   const activo = activos.find((a) => a.id === activoId);
-  const pidePaso = plan.kind === 'open';
+  /*
+   * La misma lista que comprueba `confirmarPlan`, no una copia. Duplicarla
+   * dejaría abierta la posibilidad de enseñar el campo sin comprobarlo, o de
+   * comprobarlo sin enseñarlo —que es no poder confirmar nunca—.
+   */
+  const pidePaso = PIDE_PASO.has(plan.kind);
 
   const alPulsarTecla = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') void confirmarPlan();
@@ -88,23 +96,56 @@ export function DialogoPlan() {
               Casillas <span style={valorMono}>{plan.entries.length}</span>
             </span>
             {/*
-              * El Take Profit del formulario, para repasarlo aquí.
+              * El Take Profit sale **con esta misma orden** desde el 25/08/2026.
               *
-              * No viaja en esta orden —se coloca después, con su propio plan y
-              * su propia confirmación— y por eso se rotula «se pone aparte» en
-              * vez de dejarlo junto a los demás datos como si saliera con ella.
-              * Lo que resuelve es lo que pidió el operador: comprobar de un
-              * vistazo, antes de abrir, que el porcentaje escrito es el que
-              * quiere, sin tener que mirar la barra lateral por detrás del
-              * diálogo.
+              * Antes no: era un segundo plan con su segunda confirmación, y aquí
+              * se rotulaba «se pone aparte». El rótulo decía la verdad y aun así
+              * el operador leía el porcentaje dentro de la confirmación de abrir
+              * y daba por hecho que salía con ella —lo dijo en la reunión del 25
+              * de agosto—, de modo que quedaban posiciones sin protección
+              * creyendo que la tenían. Ahora sale de verdad, y el rótulo lo dice.
               */}
             {plan.kind === 'open' && (
               <span
                 style={{ color: T.texto2 }}
-                title="El Take Profit no sale con esta orden: se coloca después con el botón «Take Profit %», y también se aprueba antes de enviarse. Aquí se enseña el valor que tiene el campo ahora mismo."
+                title="El Take Profit se coloca con esta misma orden, en cuanto la posición queda abierta. El precio definitivo se calcula con el precio de entrada real de cada posición; el que se enseña en cada casilla es aproximado, calculado con el precio de referencia."
               >
                 Take Profit <span style={valorMono}>{tp.trim() === '' ? '—' : `${tp.trim()} %`}</span>
-                <span style={{ marginLeft: 6, fontSize: 10.5, color: T.texto3 }}>se pone aparte</span>
+                <span style={{ marginLeft: 6, fontSize: 10.5, color: T.texto3 }}>
+                  {tp.trim() === '' ? 'sin Take Profit' : 'sale con esta orden'}
+                </span>
+              </span>
+            )}
+            {/*
+              * El margen adicional sale con la orden desde el 26/08/2026, por lo
+              * mismo que el Take Profit: se escribe en el mismo formulario y en
+              * la misma pulsación. En cruzado no se llega hasta aquí —el plan se
+              * rechaza antes—, así que si aparece es que se va a agregar.
+              */}
+            {plan.kind === 'open' && (
+              <span
+                style={{ color: T.texto2 }}
+                title="El margen adicional se agrega a cada posición en cuanto queda abierta. Bitget solo lo admite en margen aislado."
+              >
+                Margen adicional{' '}
+                <span style={valorMono}>{mga.trim() === '' ? '—' : mga.trim()}</span>
+                <span style={{ marginLeft: 6, fontSize: 10.5, color: T.texto3 }}>
+                  {mga.trim() === '' ? 'no se agrega' : 'sale con esta orden'}
+                </span>
+              </span>
+            )}
+            {/*
+              * El modo de margen se enseña porque **abrir lo cambia**: viaja
+              * dentro de la orden, así que una apertura en aislado deja el activo
+              * en aislado. Es un efecto de lo que se está aprobando, no un ajuste
+              * previo que el operador pudiera dar por sabido.
+              */}
+            {plan.kind === 'open' && (
+              <span
+                style={{ color: T.texto2 }}
+                title="El modo viaja dentro de la orden: si el activo está en el otro modo, esta apertura lo cambia en Bitget. En cruzado no se puede agregar margen a una posición."
+              >
+                Modo <span style={valorMono}>{modoMargen === 'isolated' ? 'AISLADO' : 'CRUZADO'}</span>
               </span>
             )}
           </div>

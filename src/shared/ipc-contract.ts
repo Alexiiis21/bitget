@@ -172,6 +172,16 @@ export interface CuentaPanel {
 
 export type ClaveMercadoIpc = 'real' | 'simulado';
 
+/**
+ * Modo de margen con el que se abre, tal como lo nombra la API de Bitget.
+ *
+ * En Bitget es un ajuste **por simbolo**, no por cuenta, y viaja dentro de la
+ * propia orden: abrir con un modo lo deja configurado en ese activo. Por eso lo
+ * elige el operador en el panel en vez de deducirse de la cuenta —deducirlo de
+ * un simbolo y aplicarlo a otro reconfiguraba activos en silencio—.
+ */
+export type ModoMargenIpc = 'isolated' | 'crossed';
+
 /** Lo que la pantalla pide abrir. El precio y la cantidad los pone el proceso principal. */
 export interface PeticionAperturaIpc {
   simbolo: string;
@@ -181,6 +191,25 @@ export interface PeticionAperturaIpc {
   apalancamiento: number;
   /** `null` para orden a mercado. */
   precioLimite: string | null;
+  /** Aislado o cruzado. Se comprueba y, si hace falta, se fija antes de abrir. */
+  modoMargen: ModoMargenIpc;
+  /**
+   * Margen adicional que se agrega con la **misma** confirmacion, o `null`.
+   *
+   * Bitget solo admite agregarlo en aislado, asi que pedirlo en cruzado no abre
+   * nada: el plan entero se rechaza con el motivo, antes de enviar una orden.
+   */
+  margenAdicional: string | null;
+  /**
+   * Take Profit que se coloca con la **misma** confirmacion, en porcentaje de
+   * ganancia sobre el margen inicial. `null` para abrir sin el.
+   *
+   * El precio de disparo no viaja: lo calcula el proceso principal, y dos
+   * veces. Una con el precio de referencia, para que la confirmacion pueda
+   * enseñarlo antes de abrir; y otra con el precio de entrada real, ya abierta
+   * la posicion, que es la que se envia.
+   */
+  takeProfitPorcentaje: string | null;
 }
 
 /**
@@ -214,6 +243,23 @@ export interface EntradaPlanIpc {
   nocional: string;
   /** Margen que de verdad se compromete tras ajustar la cantidad, truncado a 2 decimales. */
   margenReal: string;
+  /**
+   * Precio de disparo del Take Profit que se pondra al abrir, **estimado**.
+   *
+   * `null` cuando se abre sin Take Profit. Sale del precio de referencia porque
+   * al confirmar la posicion todavia no existe; el que se envia se calcula
+   * despues, con el precio de entrada real. Se enseña igualmente porque el
+   * operador aprueba precios concretos, no porcentajes.
+   */
+  precioDisparoTp: string | null;
+  /**
+   * Modo de margen que **tiene ahora** ese activo en esa cuenta.
+   *
+   * Se enseña cuando no coincide con el elegido, porque entonces la apertura lo
+   * va a cambiar en Bitget: «cruzado → aislado» es un efecto de la operacion, y
+   * un efecto que no se enseña es un efecto que el operador no aprobo.
+   */
+  modoMargenActual: ModoMargenIpc;
 }
 
 export interface DescartePlanIpc {
@@ -273,6 +319,14 @@ export interface PlanAperturaIpc {
    * quede como una suposición tácita.
    */
   unidad: string;
+  /** Modo de margen aprobado para esta apertura. */
+  modoMargen: ModoMargenIpc;
+  /** Margen adicional que sale con esta misma orden, o `null`. */
+  margenAdicional: string | null;
+  /** Suma del margen adicional de todas las entradas. Sale del saldo igual que el inicial. */
+  margenAdicionalTotal: string;
+  /** Porcentaje del Take Profit que sale con esta misma orden, o `null`. */
+  takeProfitPorcentaje: string | null;
   entradas: EntradaPlanIpc[];
   descartes: DescartePlanIpc[];
   avisos: AvisoPlanIpc[];

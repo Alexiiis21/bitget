@@ -533,12 +533,33 @@ const CONTRATO = {
   symbolStatus: 'normal'
 };
 
-/** Deja el exchange respondiendo catalogo, precio y ordenes. */
+/**
+ * Como esta el simbolo en Bitget, para la apertura.
+ *
+ * La planificacion lo lee para saber si tiene que cambiar el modo de margen
+ * antes de abrir. Aislado, que es el modo con el que abren estas pruebas: asi
+ * no hay nada que cambiar y lo que se mide es la sesion, no esa maniobra.
+ */
+const CUENTA_SIMBOLO = {
+  marginCoin: 'SUSDT',
+  available: '500',
+  accountEquity: '500',
+  marginMode: 'isolated',
+  posMode: 'hedge_mode',
+  isolatedLongLever: 10,
+  isolatedShortLever: 10,
+  crossedMarginLeverage: 10
+};
+
+/** Deja el exchange respondiendo catalogo, precio, configuracion y ordenes. */
 function enrutarMercado(alOrdenar?: (cuerpo: Record<string, unknown>) => unknown): void {
   exchange.responderCon((p) => {
     if (p.url.startsWith('/api/v2/mix/market/contracts')) return { cuerpo: sobreOk([CONTRATO]) };
     if (p.url.startsWith('/api/v2/mix/market/ticker')) {
       return { cuerpo: sobreOk([{ symbol: SIMBOLO, lastPr: '63378', markPrice: '63381.3' }]) };
+    }
+    if (p.url.startsWith('/api/v2/mix/account/account')) {
+      return { cuerpo: sobreOk(CUENTA_SIMBOLO) };
     }
     if (p.url.startsWith('/api/v2/mix/order/place-order')) {
       const cuerpo = JSON.parse(p.cuerpo) as Record<string, unknown>;
@@ -600,7 +621,8 @@ describe('planificar y ejecutar una apertura', () => {
       objetivos: [{ cuentaId, lado: 'long' }],
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
 
     expect(plan.entradas).toHaveLength(1);
@@ -618,7 +640,8 @@ describe('planificar y ejecutar una apertura', () => {
       objetivos: [{ cuentaId, lado: 'long' }],
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const lote = await sesion.ejecutarApertura(plan.id);
 
@@ -650,7 +673,8 @@ describe('planificar y ejecutar una apertura', () => {
       objetivos: [{ cuentaId, lado: 'long' }],
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
 
     reloj += 10 * 60 * 1000;
@@ -666,7 +690,8 @@ describe('planificar y ejecutar una apertura', () => {
       objetivos: [{ cuentaId, lado: 'long' }],
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
 
     sesion.cerrar();
@@ -692,7 +717,8 @@ describe('planificar y ejecutar una apertura', () => {
       objetivos: [{ cuentaId, lado: 'long' }],
       margenInicial: '100',
       apalancamiento: 10,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated',
     });
     const primero = await sesion.ejecutarApertura(plan.id);
     expect(primero.jobs[0]?.estado).toBe('fallo');
@@ -711,7 +737,8 @@ describe('planificar y ejecutar una apertura', () => {
         objetivos: [{ cuentaId: 'x', lado: 'long' }],
         margenInicial: '100',
         apalancamiento: 10,
-        precioLimite: null
+        precioLimite: null,
+        modoMargen: 'isolated',
       })
     ).rejects.toThrow('bloqueado');
   });

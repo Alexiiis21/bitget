@@ -26,6 +26,7 @@ import type { Lado } from '@shared/types';
 import type { Mercado } from '../../mercado';
 import type { ClienteBitget, RespuestaRest } from '../client';
 import type { Credencial } from '../signer';
+import { trazaApertura } from '../../../debug-apertura';
 
 export interface ColocacionTakeProfit {
   mercado: Mercado;
@@ -48,22 +49,27 @@ export function colocarTakeProfit(
   credencial: Credencial,
   tp: ColocacionTakeProfit
 ): Promise<RespuestaRest<PlanColocado>> {
+  const cuerpo = {
+    symbol: tp.simbolo,
+    productType: tp.mercado.productType,
+    marginCoin: tp.mercado.marginCoin,
+    planType: 'pos_profit',
+    triggerPrice: tp.precioDisparo,
+    /* Por ultimo precio, como en la pantalla del operador. */
+    triggerType: 'fill_price',
+    holdSide: tp.lado,
+    clientOid: tp.clientOid
+  };
+
+  /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+  trazaApertura('3·cuerpo-take-profit', cuerpo);
+
   return cliente.peticionFirmada(
     credencial,
     {
       metodo: 'POST',
       ruta: '/api/v2/mix/order/place-tpsl-order',
-      cuerpo: {
-        symbol: tp.simbolo,
-        productType: tp.mercado.productType,
-        marginCoin: tp.mercado.marginCoin,
-        planType: 'pos_profit',
-        triggerPrice: tp.precioDisparo,
-        /* Por ultimo precio, como en la pantalla del operador. */
-        triggerType: 'fill_price',
-        holdSide: tp.lado,
-        clientOid: tp.clientOid
-      },
+      cuerpo,
       idempotente: false
     },
     esquemaPlanColocado
@@ -76,9 +82,23 @@ export function colocarTakeProfit(
  * Take Profit y Stop Loss que hay puestos ahora mismo.
  *
  * Es la verdad de fondo cuando un envio se queda sin respuesta: si el plan
- * aparece aqui, entro. Los campos van casi todos opcionales porque no se ha
- * podido capturar una respuesta con contenido -la cuenta de pruebas no puede
- * abrir posiciones-, y ante la duda es mejor que la validacion no invente nada.
+ * aparece aqui, entro.
+ *
+ * --------------------------------------------------------------------------
+ * El lado viene en `posSide`, no en `holdSide` (capturado el 25/08/2026)
+ * --------------------------------------------------------------------------
+ * Hasta esa fecha nunca se habia podido capturar una respuesta **con
+ * contenido**: la cuenta de pruebas no podia abrir posiciones, asi que no habia
+ * planes que listar y el esquema se escribio a partir de la documentacion. Ahi
+ * el campo se llamaba `holdSide`, que es como se llama al **enviar**. Al
+ * listar, Bitget lo devuelve como `posSide` y no incluye `holdSide` en
+ * absoluto.
+ *
+ * La consecuencia era silenciosa y grave: `buscarTakeProfit` filtraba por un
+ * campo que siempre venia vacio, no encontraba nunca nada, y el panel concluia
+ * «esta posicion no tiene Take Profit puesto» **teniendolo**. Se mantiene
+ * `holdSide` en el esquema por si alguna respuesta lo trae; el que se lee es
+ * `posSide`.
  */
 export const esquemaPlanPendiente = zod.object({
   orderId: zod.string().nullish(),
@@ -86,6 +106,9 @@ export const esquemaPlanPendiente = zod.object({
   symbol: zod.string().nullish(),
   planType: zod.string().nullish(),
   triggerPrice: zod.string().nullish(),
+  /** El lado, tal como lo devuelve el listado. */
+  posSide: zod.string().nullish(),
+  /** Como se llama el mismo dato al enviar. No aparece al listar. */
   holdSide: zod.string().nullish(),
   status: zod.string().nullish()
 });
@@ -121,6 +144,14 @@ export interface CancelacionPlan {
   simbolo: string;
   /** Identificador que dio Bitget al plan. Sale de `planesPendientes`. */
   orderId: string;
+  /**
+   * El tipo del plan que se quita, tal como lo devolvio Bitget al listarlo
+   * -`pos_profit` para el Take Profit de posicion entera-.
+   *
+   * Va aqui y no fijo en el cuerpo porque enviar el tipo equivocado **no
+   * falla**: responde exito y no cancela nada. Ver `cancelarPlan`.
+   */
+  planType: string;
 }
 
 /**
@@ -166,6 +197,25 @@ export type ResultadoCancelacionPlan = z.infer<typeof esquemaCancelacionPlan>;
  * Se cancela por `orderId` -el que dio Bitget- y no por `clientOid`, porque el
  * plan a quitar puede haberlo puesto el operador desde la app de Bitget y
  * entonces no tiene ningun identificador nuestro.
+ *
+ * --------------------------------------------------------------------------
+ * `planType` es el del plan, no la familia (comprobado el 25/08/2026)
+ * --------------------------------------------------------------------------
+ * `orders-plan-pending` se **consulta** con `planType: 'profit_loss'`, que es
+ * la familia entera -Take Profit y Stop Loss-. Cancelar con ese mismo valor
+ * parece lo coherente y es la trampa: Bitget responde
+ *
+ *   code 00000 · success · successList: [] · failureList: []
+ *
+ * y no cancela nada. Ni error, ni aviso, ni el plan en la lista de fallos:
+ * exito con las dos listas vacias. Con `planType: 'pos_profit'` -el tipo que el
+ * propio listado devuelve para ese plan- el plan aparece en `successList` y
+ * desaparece de los pendientes.
+ *
+ * Probado contra la API con las cuatro variantes -`profit_loss` con y sin
+ * `clientOid`, sin `marginCoin`, y `pos_profit`-: solo la ultima quita el Take
+ * Profit. De ahi que el tipo viaje en `CancelacionPlan` en lugar de estar
+ * escrito aqui: lo que se cancela es lo que Bitget dijo que hay puesto.
  */
 export function cancelarPlan(
   cliente: ClienteBitget,
@@ -181,7 +231,7 @@ export function cancelarPlan(
         symbol: cancelacion.simbolo,
         productType: cancelacion.mercado.productType,
         marginCoin: cancelacion.mercado.marginCoin,
-        planType: 'profit_loss',
+        planType: cancelacion.planType,
         orderIdList: [{ orderId: cancelacion.orderId }]
       },
       idempotente: false
@@ -201,6 +251,10 @@ export function cancelarPlan(
  *
  * El filtro es por `planType` que contenga `profit` -`pos_profit` para la
  * posicion entera, `profit_plan` para el parcial- y nunca `loss`.
+ *
+ * El lado se lee de `posSide`, que es el nombre que trae el listado, con
+ * `holdSide` como alternativa por si alguna respuesta lo devuelve asi. Ver el
+ * comentario de `esquemaPlanPendiente`.
  */
 export function buscarTakeProfit(
   planes: readonly PlanPendiente[],
@@ -211,7 +265,7 @@ export function buscarTakeProfit(
     planes.find(
       (p) =>
         p.symbol === simbolo &&
-        p.holdSide === lado &&
+        (p.posSide ?? p.holdSide) === lado &&
         (p.planType ?? '').includes('profit') &&
         !(p.planType ?? '').includes('loss')
     ) ?? null

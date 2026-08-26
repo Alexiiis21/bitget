@@ -255,7 +255,10 @@ export class IpcPanelService implements PanelService {
       objetivos: req.targets.map(aObjetivo),
       margenInicial: req.initialMargin,
       apalancamiento: req.leverage,
-      precioLimite: req.orderType === 'limit' ? req.limitPrice : null
+      precioLimite: req.orderType === 'limit' ? req.limitPrice : null,
+      modoMargen: req.marginMode,
+      margenAdicional: req.additionalMargin,
+      takeProfitPorcentaje: req.takeProfitPercent
     });
 
     /*
@@ -273,7 +276,25 @@ export class IpcPanelService implements PanelService {
       title: 'Abrir posiciones',
       summary:
         `${req.initialMargin} ${moneda} de margen por casilla · ${req.leverage}x · ` +
-        (req.orderType === 'limit' ? `límite ${req.limitPrice ?? '—'}` : 'a mercado'),
+        /*
+         * El modo va en la primera línea y no en la letra pequeña: abrir lo deja
+         * configurado en el activo, así que es un efecto de esta operación y no
+         * un ajuste que ya estuviera puesto.
+         */
+        `${plan.modoMargen === 'isolated' ? 'AISLADO' : 'CRUZADO'} · ` +
+        (req.orderType === 'limit' ? `límite ${req.limitPrice ?? '—'}` : 'a mercado') +
+        /*
+         * El Take Profit y el margen adicional salen con esta misma orden, así
+         * que se anuncian en el resumen y no como una nota al margen: son parte
+         * de lo que se aprueba.
+         */
+        (plan.takeProfitPorcentaje === null
+          ? ''
+          : ` · Take Profit ${plan.takeProfitPorcentaje}%, con la misma orden`) +
+        (plan.margenAdicional === null
+          ? ''
+          : ` · margen adicional ${plan.margenAdicional} ${moneda} por casilla ` +
+            `(${plan.margenAdicionalTotal} ${moneda} en total), con la misma orden`),
       reference: plan.precioReferencia,
       entries: plan.entradas.map((e) => ({
         subAccountId: e.cuentaId,
@@ -281,7 +302,22 @@ export class IpcPanelService implements PanelService {
         label: e.etiqueta,
         detail:
           `${e.size} ${activo.id} · margen real ${e.margenReal} ${moneda} · ` +
-          `nocional ${e.nocional} ${moneda}`
+          `nocional ${e.nocional} ${moneda}` +
+          /*
+           * «aprox.» no es un adorno: el precio de disparo definitivo se calcula
+           * con el precio de entrada real de la posición, y este sale del de
+           * referencia porque al aprobar todavía no hay posición.
+           */
+          (e.precioDisparoTp === null ? '' : ` · TP aprox. ${e.precioDisparoTp}`) +
+          /*
+           * Solo se dice cuando la apertura va a cambiarlo. Repetir «aislado» en
+           * las cien casillas que ya lo están es ruido; anunciar «cruzado →
+           * aislado» en la que sí cambia es el efecto que hay que aprobar.
+           */
+          (e.modoMargenActual === plan.modoMargen
+            ? ''
+            : ` · ${e.modoMargenActual === 'isolated' ? 'aislado' : 'cruzado'} → ` +
+              `${plan.modoMargen === 'isolated' ? 'aislado' : 'cruzado'}`)
       })),
       discards: aDescartes(plan.descartes)
     };

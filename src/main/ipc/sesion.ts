@@ -21,9 +21,11 @@ import type {
   ResultadoVault
 } from '@shared/ipc-contract';
 import { PLAN_VIGENCIA_MS } from '@shared/constants';
-import type { EstadoConexion, Lado, Lote } from '@shared/types';
+import type { EstadoConexion, Job, Lado, Lote } from '@shared/types';
 import { ErrorBitget } from '../bitget/errors';
+import type { ModoMargenApi } from '../bitget/rest/endpoints/ordenes';
 import { depurandoSaldo, trazaSaldo } from '../debug-saldo';
+import { trazaApertura } from '../debug-apertura';
 import { MERCADOS, type ClaveMercado } from '../bitget/mercado';
 import type { ClienteBitget } from '../bitget/rest/client';
 import type { Credencial } from '../bitget/rest/signer';
@@ -57,7 +59,65 @@ export interface OpcionesSesion {
   /** Se inyecta en las pruebas; en produccion lo construye la propia sesion. */
   motor?: MotorLotes;
   ahora?: () => number;
+  /**
+   * Espera entre lecturas de la posicion recien abierta. Se inyecta en las
+   * pruebas para no depender de relojes reales. Ver `ponerTakeProfitTrasAbrir`.
+   */
+  dormir?: (ms: number) => Promise<void>;
 }
+
+/**
+ * Cuantas veces se relee la posicion antes de darla por ausente, y cuanto se
+ * espera entre lecturas.
+ *
+ * Una orden a mercado devuelve su `orderId` en cuanto entra, pero la posicion
+ * puede tardar un instante en aparecer en `/position/all-position`. Sin esta
+ * espera, el Take Profit de la misma confirmacion se descartaria por
+ * «no hay posicion» **justo despues de haberla abierto**, que es el fallo que
+ * este flujo existe para evitar.
+ */
+const INTENTOS_POSICION = 3;
+const ESPERA_POSICION_MS = 700;
+
+const textoError = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/**
+ * Lo que hay que hacer cuando una posicion se abrio y su Take Profit no entro.
+ *
+ * Se acompaña **siempre** al motivo tecnico, venga de un descarte o del propio
+ * envio. El motivo a secas -«Solo se puede agregar margen en margen aislado»-
+ * no le dice al operador lo unico que importa: que esa posicion esta abierta y
+ * sin proteccion, y que la accion es ponersela a mano.
+ */
+const SIN_PROTECCION =
+  'La posición quedó abierta SIN Take Profit: póngaselo con el botón «Take Profit %».';
+
+/**
+ * Lo mismo para el margen adicional que se pidio con la apertura.
+ *
+ * El plan ya impide el caso previsible -pedirlo en margen cruzado aborta el
+ * lote entero antes de abrir nada-, asi que llegar aqui significa que fallo el
+ * envio con la posicion ya abierta. Tiene que verse: la posicion existe y tiene
+ * menos colchon del que el operador aprobo.
+ */
+const SIN_MARGEN_EXTRA =
+  'La posición quedó abierta SIN el margen adicional: agréguelo con el botón «Margen adicional».';
+
+/** Texto por defecto de una fila de Take Profit que no trajo el suyo. */
+const mensajeTp = (estado: Job['estado']): string =>
+  estado === 'exito'
+    ? 'Take Profit puesto'
+    : estado === 'omitida'
+      ? 'No hizo falta poner el Take Profit.'
+      : SIN_PROTECCION;
+
+/** Lo mismo para una fila de margen adicional. */
+const mensajeMargen = (estado: Job['estado']): string =>
+  estado === 'exito'
+    ? 'Margen adicional agregado'
+    : estado === 'omitida'
+      ? 'No hizo falta agregar margen adicional.'
+      : SIN_MARGEN_EXTRA;
 
 export class Sesion implements FuenteCuentas {
   private readonly rutas: RutasSesion;
@@ -65,6 +125,7 @@ export class Sesion implements FuenteCuentas {
   private readonly mercado: ClaveMercado;
   private readonly motor: MotorLotes;
   private readonly ahoraMs: () => number;
+  private readonly dormir: (ms: number) => Promise<void>;
   /**
    * Planes calculados y aun sin ejecutar.
    *
@@ -121,6 +182,12 @@ export class Sesion implements FuenteCuentas {
     this.cliente = cliente;
     this.mercado = opciones.mercado ?? 'simulado';
     this.ahoraMs = opciones.ahora ?? Date.now;
+    this.dormir =
+      opciones.dormir ??
+      ((ms) =>
+        new Promise((r) => {
+          setTimeout(r, ms);
+        }));
     this.motor =
       opciones.motor ??
       new MotorLotes(cliente, this, {
@@ -417,12 +484,33 @@ export class Sesion implements FuenteCuentas {
     const credencial = this.vault.credencialDe(cuentaId);
     if (credencial === null) return null;
 
+    /*
+     * El modo de la ficha, que es el del **primer simbolo del mercado**.
+     *
+     * Ya no alimenta la apertura: desde el 26/08/2026 el modo lo elige el
+     * operador en el panel y el motor lo comprueba contra el simbolo que se va a
+     * operar. Aqui se conserva como ultimo recurso para las funciones que actuan
+     * sobre una posicion existente -agregar margen, Take Profit-, y solo cuando
+     * Bitget no informa el modo de la propia posicion.
+     *
+     * No vale para decidir con que modo se abre. En Bitget el modo es por
+     * simbolo, asi que el de BTC no dice nada de SOL; usarlo para abrir es lo
+     * que reconfiguraba activos en silencio.
+     */
+    const modoMargenApi = cuenta.modoMargen === 'aislado' ? 'isolated' : 'crossed';
+    /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+    trazaApertura('0·cuentaEjecutable', {
+      cuentaId,
+      modoMargenFicha: cuenta.modoMargen,
+      modoMargenApi
+    });
+
     return {
       cuentaId,
       etiqueta: cuenta.etiqueta,
       credencial,
       saldoDisponible: this.saldos.get(cuentaId) ?? '0',
-      modoMargen: cuenta.modoMargen === 'aislado' ? 'isolated' : 'crossed',
+      modoMargen: modoMargenApi,
       ...(this.apalancamientos.has(cuentaId)
         ? { apalancamiento: this.apalancamientos.get(cuentaId) as ApalancamientoCuenta }
         : {})
@@ -450,6 +538,9 @@ export class Sesion implements FuenteCuentas {
     margenInicial: string;
     apalancamiento: number;
     precioLimite: string | null;
+    modoMargen: ModoMargenApi;
+    margenAdicional?: string | null;
+    takeProfitPorcentaje?: string | null;
   }): Promise<PlanApertura> {
     this.exigirAbierta();
 
@@ -459,7 +550,10 @@ export class Sesion implements FuenteCuentas {
       objetivos: peticion.objetivos,
       margenInicial: peticion.margenInicial,
       apalancamiento: peticion.apalancamiento,
-      precioLimite: peticion.precioLimite
+      precioLimite: peticion.precioLimite,
+      modoMargen: peticion.modoMargen,
+      margenAdicional: peticion.margenAdicional ?? null,
+      takeProfitPorcentaje: peticion.takeProfitPorcentaje ?? null
     });
 
     this.purgarPlanes();
@@ -678,6 +772,20 @@ export class Sesion implements FuenteCuentas {
   }): Promise<PlanMargen> {
     this.exigirAbierta();
 
+    /*
+     * DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts
+     *
+     * `SUELTO` frente a `CON-APERTURA` es el dato que resuelve el margen
+     * duplicado: el mismo importe puede llegar por el boton «Margen adicional»
+     * y por la apertura que ya lo lleva dentro, y en el log de Bitget las dos
+     * peticiones son identicas. Aqui se ve de cual viene cada una.
+     */
+    trazaApertura('M·margen-SUELTO-planificar', {
+      simbolo: peticion.simbolo,
+      casillas: peticion.objetivos.length,
+      cantidad: peticion.cantidad
+    });
+
     const plan = await this.motor.planificarMargen({
       mercado: MERCADOS[this.mercado],
       simbolo: peticion.simbolo,
@@ -703,6 +811,14 @@ export class Sesion implements FuenteCuentas {
         'Ese plan ya no existe. Vuelva a revisar la operación antes de enviarla.'
       );
     }
+
+    /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+    trazaApertura('M·margen-SUELTO-ejecutar', {
+      planId,
+      cantidad: plan.cantidad,
+      casillas: plan.entradas.length,
+      reintento: soloEstos === undefined ? 'no' : `sí (${soloEstos.length})`
+    });
 
     const oids = this.oidsDe(plan.entradas, soloEstos);
     const lote = await this.motor.ejecutarMargen(plan, oids);
@@ -829,7 +945,56 @@ export class Sesion implements FuenteCuentas {
             .filter((e) => soloEstos.some((s) => s.cuentaId === e.cuentaId && s.lado === e.lado))
             .map((e) => e.clientOid);
 
+    /*
+     * DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts
+     *
+     * La cabecera de cada ejecucion: separa dos aperturas seguidas en el log y
+     * dice de entrada si esta lleva Take Profit y margen adicional dentro, que
+     * es lo que despues produce dos peticiones mas.
+     */
+    trazaApertura('A·ejecutar-apertura', {
+      planId,
+      casillas: plan.entradas.length,
+      takeProfit: plan.takeProfitPorcentaje,
+      margenAdicional: plan.margenAdicional,
+      reintento: soloEstos === undefined ? 'no' : `sí (${soloEstos.length})`
+    });
+
     const lote = await this.motor.ejecutar(plan, oids);
+
+    /*
+     * Las posiciones que la apertura acaba de abrir, **antes** de añadir al
+     * informe ninguna fila derivada.
+     *
+     * Se calcula una vez y se pasa a las dos maniobras siguientes a proposito:
+     * cada una añade sus propias filas a `lote.jobs`, asi que releer la lista
+     * despues haria que el margen adicional creyera que las filas de Take
+     * Profit son posiciones abiertas y les intentara agregar margen.
+     *
+     * `indeterminada` entra junto a `exito`: si esa orden si entro, su posicion
+     * necesita el Take Profit y el margen igual que las demas. Quien decide si
+     * la posicion existe es la lectura que hace cada planificador, no lo que
+     * respondiera el envio.
+     */
+    const abiertas = lote.jobs.filter((j) => j.estado === 'exito' || j.estado === 'indeterminada');
+
+    /*
+     * El Take Profit y el margen adicional de la **misma** confirmacion.
+     *
+     * Van aqui y no dentro del motor porque son maniobras distintas sobre
+     * endpoints distintos, y el motor esta construido para una accion por lote.
+     * Lo que las une es la aprobacion del operador, que es cosa de la sesion.
+     *
+     * El Take Profit primero: si algo se tuerce a mitad, la posicion queda al
+     * menos protegida. El margen adicional aleja la liquidacion, pero no la
+     * cierra en beneficio.
+     */
+    if (plan.takeProfitPorcentaje !== null) {
+      await this.ponerTakeProfitTrasAbrir(plan, lote, abiertas);
+    }
+    if (plan.margenAdicional !== null) {
+      await this.agregarMargenTrasAbrir(plan, lote, abiertas);
+    }
 
     /*
      * Un plan solo se ejecuta entero una vez. Se conserva mientras queden
@@ -840,6 +1005,282 @@ export class Sesion implements FuenteCuentas {
     }
 
     return lote;
+  }
+
+  /**
+   * Coloca el Take Profit de las posiciones que la apertura acaba de abrir.
+   *
+   * --------------------------------------------------------------------------
+   * Por que el precio se calcula aqui y no en la confirmacion
+   * --------------------------------------------------------------------------
+   * El plan enseño un precio de disparo **estimado**, calculado con el precio
+   * de referencia porque en ese momento la posicion no existia. El que se envia
+   * se calcula ahora, desde el precio de entrada real que devuelve Bitget: es
+   * el unico con el que «35%» significa el 35% que el operador espera. Con una
+   * orden a mercado los dos se parecen; con el mercado moviendose, no tienen
+   * por que.
+   *
+   * --------------------------------------------------------------------------
+   * Los Take Profit entran en el informe como trabajos propios
+   * --------------------------------------------------------------------------
+   * No se doblan en el mensaje del trabajo de apertura, y la razon es concreta:
+   * el informe **descarta los mensajes de los trabajos correctos** -solo lee
+   * los de fallo e indeterminada, ver `aResultado` en el renderer-. Un Take
+   * Profit fallido escrito en el mensaje de una apertura correcta seria
+   * invisible, y una posicion abierta que el operador cree protegida y no lo
+   * esta es exactamente el fallo que este cambio venia a quitar.
+   *
+   * Por eso cada Take Profit aparece como su propia fila -«Sub-01 · TP»- con su
+   * propio desenlace. La apertura conserva el suyo: que el Take Profit falle no
+   * convierte en fallida una posicion que si se abrio.
+   */
+  private async ponerTakeProfitTrasAbrir(
+    plan: PlanApertura,
+    lote: Lote,
+    abiertas: readonly Job[]
+  ): Promise<void> {
+    const porcentaje = plan.takeProfitPorcentaje;
+    if (porcentaje === null) return;
+    if (abiertas.length === 0) return;
+
+    const objetivos = abiertas.map((j) => ({ cuentaId: j.cuentaId, lado: j.lado }));
+    const estadoApertura = new Map(abiertas.map((j) => [`${j.cuentaId}|${j.lado}`, j.estado]));
+
+    let planTp: PlanTakeProfit;
+    try {
+      /*
+       * La posicion puede tardar un instante en aparecer despues de que la
+       * orden entre. Se relee antes de dar ninguna por ausente: descartar aqui
+       * por «no hay posicion» dejaria sin Take Profit una posicion que acaba de
+       * abrirse, que es justo lo que no puede pasar.
+       */
+      planTp = await this.motor.planificarTakeProfit({
+        mercado: MERCADOS[this.mercado],
+        simbolo: plan.simbolo,
+        objetivos,
+        porcentaje
+      });
+
+      for (
+        let intento = 1;
+        intento < INTENTOS_POSICION && planTp.descartes.some((d) => d.motivo === 'sin-posicion');
+        intento += 1
+      ) {
+        await this.dormir(ESPERA_POSICION_MS);
+        planTp = await this.motor.planificarTakeProfit({
+          mercado: MERCADOS[this.mercado],
+          simbolo: plan.simbolo,
+          objetivos,
+          porcentaje
+        });
+      }
+    } catch (e) {
+      /*
+       * Ni siquiera se pudo calcular. Las posiciones estan abiertas y sin Take
+       * Profit, y eso tiene que verse: una fila por casilla diciendolo.
+       */
+      for (const job of abiertas) {
+        lote.jobs.push(
+          this.trabajoDerivado(
+            job,
+            'TP',
+            'fallo',
+            null,
+            `No se pudo calcular el Take Profit: ${textoError(e)}`
+          )
+        );
+      }
+      return;
+    }
+
+    if (planTp.entradas.length > 0) {
+      const loteTp = await this.motor.ejecutarTakeProfit(planTp);
+      for (const j of loteTp.jobs) {
+        const original = abiertas.find((a) => a.cuentaId === j.cuentaId && a.lado === j.lado);
+        if (original === undefined) continue;
+
+        /*
+         * Al motivo que da Bitget se le añade que hacer. «Parameter
+         * verification exception» en una fila llamada «Sub-01 · TP» no le dice
+         * al operador que tiene una posicion abierta y desprotegida.
+         */
+        const motivo = j.mensaje ?? mensajeTp(j.estado);
+        lote.jobs.push(
+          this.trabajoDerivado(
+            original,
+            'TP',
+            j.estado,
+            j.ordenId,
+            j.estado === 'fallo' && !motivo.includes(SIN_PROTECCION) ? `${motivo} ${SIN_PROTECCION}` : motivo
+          )
+        );
+      }
+    }
+
+    /*
+     * Un descarte del Take Profit sobre una posicion que **si** se abrio es un
+     * fallo, no una omision: quedo abierta y desprotegida. Sobre una apertura
+     * indeterminada es una omision, porque lo mas probable es que no llegara a
+     * abrirse nada.
+     */
+    for (const d of planTp.descartes) {
+      const original = abiertas.find((a) => a.cuentaId === d.cuentaId && a.lado === d.lado);
+      if (original === undefined) continue;
+      const abrio = estadoApertura.get(`${d.cuentaId}|${d.lado}`) === 'exito';
+      lote.jobs.push(
+        this.trabajoDerivado(
+          original,
+          'TP',
+          abrio ? 'fallo' : 'omitida',
+          null,
+          abrio ? `${d.mensaje} ${SIN_PROTECCION}` : d.mensaje
+        )
+      );
+    }
+  }
+
+  /**
+   * Una fila derivada de la apertura en su informe: el Take Profit o el margen.
+   *
+   * Cada una va con su propio desenlace y su propio rotulo -«Sub-01 · TP»,
+   * «Sub-01 · MGA»- en vez de doblarse en el mensaje de la apertura, porque el
+   * informe **descarta los mensajes de los trabajos correctos**: un Take Profit
+   * fallido escrito dentro de una apertura correcta seria invisible.
+   */
+  private trabajoDerivado(
+    apertura: Job,
+    sufijo: 'TP' | 'MGA',
+    estado: Job['estado'],
+    ordenId: string | null,
+    mensaje: string
+  ): Job {
+    return {
+      cuentaId: apertura.cuentaId,
+      lado: apertura.lado,
+      etiqueta: `${apertura.etiqueta} · ${sufijo}`,
+      /*
+       * Sin `clientOid`: el de estas maniobras pertenece a su propio plan, que
+       * no es el que la pantalla reenviaria al reintentar. Dejarlo vacio es lo
+       * mismo que ya se hace con los descartes.
+       */
+      clientOid: '',
+      estado,
+      codigoBitget: null,
+      mensaje,
+      ordenId
+    };
+  }
+
+  /**
+   * Agrega a las posiciones recien abiertas el margen adicional aprobado.
+   *
+   * --------------------------------------------------------------------------
+   * Lo que puede fallar aqui ya no incluye el caso previsible
+   * --------------------------------------------------------------------------
+   * Pedir margen adicional en margen cruzado aborta el plan **antes de abrir
+   * nada** -ver `MotorLotes.planificar`-, que es lo que pidio el cliente: en
+   * cruzado no existe «agregar margen» porque el margen sale del saldo total de
+   * la cuenta, y abrir igualmente dejaria la posicion con menos colchon del que
+   * se aprobo. Asi que aqui solo quedan fallos del envio con la posicion ya
+   * abierta, y esos se cuentan como fallo y se dicen.
+   *
+   * La espera antes de darse por vencido es la misma que la del Take Profit y
+   * por la misma razon: la posicion tarda un instante en aparecer en
+   * `/position/all-position` despues de que la orden entre.
+   */
+  private async agregarMargenTrasAbrir(
+    plan: PlanApertura,
+    lote: Lote,
+    abiertas: readonly Job[]
+  ): Promise<void> {
+    const cantidad = plan.margenAdicional;
+    if (cantidad === null) return;
+
+    /* DEPURACIÓN TEMPORAL · ver `planificarMargen` para por que dice de donde viene. */
+    trazaApertura('M·margen-CON-APERTURA', {
+      planId: plan.id,
+      cantidad,
+      casillasAbiertas: abiertas.length,
+      casillas: abiertas.map((j) => `${j.cuentaId}|${j.lado}|${j.estado}`).join(',') || '—'
+    });
+
+    if (abiertas.length === 0) return;
+
+    const objetivos = abiertas.map((j) => ({ cuentaId: j.cuentaId, lado: j.lado }));
+    const estadoApertura = new Map(abiertas.map((j) => [`${j.cuentaId}|${j.lado}`, j.estado]));
+
+    let planMargen: PlanMargen;
+    try {
+      planMargen = await this.motor.planificarMargen({
+        mercado: MERCADOS[this.mercado],
+        simbolo: plan.simbolo,
+        objetivos,
+        cantidad
+      });
+
+      for (
+        let intento = 1;
+        intento < INTENTOS_POSICION && planMargen.descartes.some((d) => d.motivo === 'sin-posicion');
+        intento += 1
+      ) {
+        await this.dormir(ESPERA_POSICION_MS);
+        planMargen = await this.motor.planificarMargen({
+          mercado: MERCADOS[this.mercado],
+          simbolo: plan.simbolo,
+          objetivos,
+          cantidad
+        });
+      }
+    } catch (e) {
+      for (const job of abiertas) {
+        lote.jobs.push(
+          this.trabajoDerivado(
+            job,
+            'MGA',
+            'fallo',
+            null,
+            `No se pudo calcular el margen adicional: ${textoError(e)} ${SIN_MARGEN_EXTRA}`
+          )
+        );
+      }
+      return;
+    }
+
+    if (planMargen.entradas.length > 0) {
+      const loteMargen = await this.motor.ejecutarMargen(planMargen);
+      for (const j of loteMargen.jobs) {
+        const original = abiertas.find((a) => a.cuentaId === j.cuentaId && a.lado === j.lado);
+        if (original === undefined) continue;
+
+        const motivo = j.mensaje ?? mensajeMargen(j.estado);
+        lote.jobs.push(
+          this.trabajoDerivado(
+            original,
+            'MGA',
+            j.estado,
+            j.ordenId,
+            j.estado === 'fallo' && !motivo.includes(SIN_MARGEN_EXTRA)
+              ? `${motivo} ${SIN_MARGEN_EXTRA}`
+              : motivo
+          )
+        );
+      }
+    }
+
+    for (const d of planMargen.descartes) {
+      const original = abiertas.find((a) => a.cuentaId === d.cuentaId && a.lado === d.lado);
+      if (original === undefined) continue;
+      const abrio = estadoApertura.get(`${d.cuentaId}|${d.lado}`) === 'exito';
+      lote.jobs.push(
+        this.trabajoDerivado(
+          original,
+          'MGA',
+          abrio ? 'fallo' : 'omitida',
+          null,
+          abrio ? `${d.mensaje} ${SIN_MARGEN_EXTRA}` : d.mensaje
+        )
+      );
+    }
   }
 
   private vencido(plan: PlanApertura): boolean {

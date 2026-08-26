@@ -51,7 +51,14 @@ class UnaCuenta implements FuenteCuentas {
       etiqueta: 'Cuenta demo',
       credencial: credencialReal,
       saldoDisponible: this.saldo,
-      modoMargen: 'crossed'
+      /*
+       * `isolated`, y no es cosmetico: el modo viaja en el cuerpo de la orden,
+       * asi que abrir en cruzado **reconfigura el simbolo en Bitget**. Con
+       * `crossed` aqui, esta prueba dejaba la cuenta en cruzado y la siguiente
+       * ejecucion ya no podia demostrar «agregar margen», que Bitget solo
+       * permite en aislado. Comprobado el 25/08/2026.
+       */
+      modoMargen: 'isolated'
     };
   }
 }
@@ -96,7 +103,8 @@ describe.skipIf(!hayCredenciales)('apertura contra el mercado simulado de Bitget
       objetivos: [{ cuentaId: CUENTA_ID, lado: 'long' }],
       margenInicial: MARGEN,
       apalancamiento: APALANCAMIENTO,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated'
     });
 
     const entrada = plan.entradas[0];

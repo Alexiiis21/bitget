@@ -37,6 +37,7 @@
     "test/unit/**/*.ts",
     "test/integration/**/*.ts",
     "test/red/**/*.ts",
+    "test/fisica/**/*.ts",
     "test/mock-exchange/**/*.ts",
     "scripts/**/*.ts",
     "electron.vite.config.ts",

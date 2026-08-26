@@ -10,6 +10,7 @@ import type { z } from 'zod';
 import { z as zod } from 'zod';
 import type { ClienteBitget, RespuestaRest } from '../client';
 import type { Credencial } from '../signer';
+import { trazaApertura, trazaFallo } from '../../../debug-apertura';
 
 /* ---------- /api/v2/spot/account/info ---------- */
 
@@ -170,6 +171,73 @@ export function fijarApalancamiento(
   );
 }
 
+/* ---------- /api/v2/mix/account/set-margin-mode ---------- */
+
+/**
+ * Fija el modo de margen de una cuenta **para un simbolo**.
+ *
+ * --------------------------------------------------------------------------
+ * El modo de margen es por simbolo, no por cuenta
+ * --------------------------------------------------------------------------
+ * Es la confusion que costo la incidencia del 25/08/2026. `/mix/account/account`
+ * lleva `symbol` y este tambien: una misma cuenta puede tener BTC en cruzado y
+ * SOL en aislado. Leer el modo de un simbolo y aplicarlo a otro -que es lo que
+ * hacia el panel, leyendo siempre `mercado.simbolos[0]`- reconfiguraba en
+ * silencio el simbolo que se operaba, porque `marginMode` viaja **dentro** de
+ * `place-order`.
+ *
+ * De ahi que el modo lo elija el operador en el panel y se fije aqui, antes de
+ * abrir: asi lo que queda configurado en Bitget es lo que se aprobo, y no el
+ * resto de un simbolo que no se estaba operando.
+ *
+ * --------------------------------------------------------------------------
+ * No se puede cambiar con la posicion abierta
+ * --------------------------------------------------------------------------
+ * Bitget lo rechaza si el simbolo tiene posiciones o ordenes vivas. Es correcto
+ * -cambiar el modo bajo una posicion abierta cambiaria su liquidacion- y por eso
+ * el motor solo llama aqui cuando el modo **de verdad** difiere del pedido: si
+ * ya coincide, no hay nada que fijar y una posicion abierta no estorba.
+ */
+export async function fijarModoMargen(
+  cliente: ClienteBitget,
+  credencial: Credencial,
+  datos: {
+    simbolo: string;
+    productType: string;
+    marginCoin: string;
+    modoMargen: 'isolated' | 'crossed';
+  }
+): Promise<RespuestaRest<ApalancamientoFijado>> {
+  const cuerpo = {
+    symbol: datos.simbolo,
+    productType: datos.productType,
+    marginCoin: datos.marginCoin,
+    marginMode: datos.modoMargen
+  };
+
+  /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+  trazaApertura('3·cuerpo-modo-margen', cuerpo);
+
+  try {
+    const r = await cliente.peticionFirmada(
+      credencial,
+      { metodo: 'POST', ruta: '/api/v2/mix/account/set-margin-mode', cuerpo, idempotente: false },
+      esquemaApalancamientoFijado
+    );
+    trazaApertura('4·respuesta-modo-margen', {
+      simbolo: datos.simbolo,
+      modoResultante: r.datos.marginMode
+    });
+    return r;
+  } catch (e) {
+    trazaFallo('4·modo-margen-RECHAZADO', e, {
+      simbolo: datos.simbolo,
+      modoPedido: datos.modoMargen
+    });
+    throw e;
+  }
+}
+
 /* ---------- /api/v2/mix/account/set-margin ---------- */
 
 /**
@@ -191,7 +259,7 @@ export function fijarApalancamiento(
  * `amount` positivo anade; negativo retira. El panel solo anade: retirar margen
  * acerca la liquidacion y no esta en el alcance contratado.
  */
-export function ajustarMargen(
+export async function ajustarMargen(
   cliente: ClienteBitget,
   credencial: Credencial,
   datos: {
@@ -202,22 +270,40 @@ export function ajustarMargen(
     lado: 'long' | 'short';
   }
 ): Promise<RespuestaRest<unknown>> {
-  return cliente.peticionFirmada(
-    credencial,
-    {
-      metodo: 'POST',
-      ruta: '/api/v2/mix/account/set-margin',
-      cuerpo: {
-        symbol: datos.simbolo,
-        productType: datos.productType,
-        marginCoin: datos.marginCoin,
-        amount: datos.cantidad,
-        holdSide: datos.lado
-      },
-      idempotente: false
-    },
-    zod.unknown()
-  );
+  const cuerpo = {
+    symbol: datos.simbolo,
+    productType: datos.productType,
+    marginCoin: datos.marginCoin,
+    amount: datos.cantidad,
+    holdSide: datos.lado
+  };
+
+  /*
+   * DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts
+   *
+   * Esta es la unica peticion del panel **sin `clientOid`**, asi que dos envios
+   * accidentales anaden el margen dos veces y nada lo impide. Trazarla es la
+   * unica forma de contar cuantas veces sale y desde donde -de ahi salio el
+   * diagnostico del margen duplicado del 26/08/2026-.
+   */
+  trazaApertura('3·cuerpo-margen', cuerpo);
+
+  try {
+    const r = await cliente.peticionFirmada(
+      credencial,
+      { metodo: 'POST', ruta: '/api/v2/mix/account/set-margin', cuerpo, idempotente: false },
+      zod.unknown()
+    );
+    trazaApertura('4·respuesta-margen', {
+      simbolo: datos.simbolo,
+      lado: datos.lado,
+      cantidad: datos.cantidad
+    });
+    return r;
+  } catch (e) {
+    trazaFallo('4·margen-RECHAZADO', e, { lado: datos.lado, cantidad: datos.cantidad });
+    throw e;
+  }
 }
 
 export function obtenerCuentaSimbolo(

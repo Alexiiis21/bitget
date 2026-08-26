@@ -326,12 +326,22 @@ export async function verificarCredencial(
     });
   }
 
+  /*
+   * El modo es de **este simbolo**, no de la cuenta.
+   *
+   * Se lee del primero del mercado -es el que se consulta para saber el saldo-,
+   * y el mensaje lo dice con su nombre en vez de hablar de «la cuenta»: en
+   * Bitget cada simbolo tiene el suyo, y dar por cruzada una cuenta entera
+   * porque BTC lo esta fue lo que llevo a abrir en cruzado activos que el
+   * operador tenia en aislado.
+   */
   if (modoMargen !== 'aislado') {
     advertencias.push({
       codigo: 'margen-cruzado',
       mensaje:
-        'La cuenta esta en margen cruzado: la funcion de agregar margen no estara ' +
-        'disponible, porque Bitget solo la permite en margen aislado.'
+        `En esta cuenta, ${simbolo} esta en margen cruzado. El modo de margen es por ` +
+        'simbolo: el panel abre en el que se elija en pantalla y lo ajusta antes de enviar ' +
+        'la orden, pero sobre una posicion ya abierta en cruzado no se puede agregar margen.'
     });
   }
 

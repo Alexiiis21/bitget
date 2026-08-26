@@ -143,7 +143,22 @@ describe.skipIf(!hayCredenciales)('panel completo contra Bitget real', () => {
     expect(sesion.pendientesDeReintento()).toHaveLength(1);
 
     const supervisor = new SupervisorReconexion(sesion);
-    await supervisor.ciclo();
+
+    /*
+     * Varios ciclos, no uno.
+     *
+     * El requisito es «acaba conectada sin que nadie pulse nada», y eso es lo
+     * que se comprueba. Exigirlo en el primer ciclo comprobaba otra cosa: que
+     * Bitget respondiera a la primera. Un 429 -las tres suites de red salen por
+     * la misma IP- deja la cuenta en `conectando` con reintento programado, que
+     * es la conducta correcta del panel, y hacia fallar esta prueba por el
+     * cupo del exchange y no por el disparador de reconexion.
+     */
+    for (let intento = 0; intento < 5; intento += 1) {
+      await supervisor.ciclo();
+      if (sesion.listar()[0]?.estado === 'conectada') break;
+      await new Promise((r) => setTimeout(r, 1_000));
+    }
 
     expect(sesion.listar()[0]?.estado).toBe('conectada');
     /* Ya conectada, deja de figurar como pendiente: no hay bucle infinito. */

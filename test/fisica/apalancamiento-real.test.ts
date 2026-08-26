@@ -43,7 +43,13 @@ class UnaCuenta implements FuenteCuentas {
       etiqueta: 'Cuenta demo',
       credencial: credencialReal,
       saldoDisponible: '0',
-      modoMargen: 'crossed'
+      /*
+       * Tiene que coincidir con el modo real de la cuenta: el motor decide con
+       * el si el apalancamiento se fija por lado -aislado- o para toda la
+       * cuenta -cruzado-, y `leer()` comprueba el que Bitget diga. Con los dos
+       * desalineados se fijaria uno y se leeria el otro.
+       */
+      modoMargen: 'isolated'
     };
   }
 }

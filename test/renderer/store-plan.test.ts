@@ -13,7 +13,7 @@
  *
  *   1. Planificar no envia.
  *   2. Cancelar no envia.
- *   3. Sin la contrasena de paso, la apertura no envia.
+ *   3. Sin la contrasena de paso, ni la apertura ni el cierre envian.
  *   4. Reintentar reenvia el **mismo plan** -mismos identificadores de orden- y
  *      deja fuera lo indeterminado.
  *
@@ -22,12 +22,14 @@
  * haya.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BatchPlan, BatchResult, BatchTarget } from '@shared/domain/panel-view';
+import type { BatchPlan, BatchResult, BatchTarget, OpenRequest } from '@shared/domain/panel-view';
 
 /* ---------- servicio de mentira, con contador de envios ---------- */
 
 const enviados: { planId: string; only: BatchTarget[] | undefined }[] = [];
 let planificaciones = 0;
+/** La ultima peticion de apertura, para comprobar que viaja lo que se eligio. */
+let ultimaApertura: OpenRequest | null = null;
 let resultado: BatchResult;
 let pasoValido = true;
 let planDevuelto: BatchPlan;
@@ -55,8 +57,9 @@ vi.mock('@/services/panel-service', () => ({
       { id: 'PEPE', symbol: 'PEPEUSDT', label: 'PEPE/USDT', priceDecimals: 8, maxLeverage: 75, minLeverage: 1, tradable: true }
     ],
     subscribeAssetPrices: () => () => undefined,
-    planOpen: async () => {
+    planOpen: async (req: OpenRequest) => {
       planificaciones += 1;
+      ultimaApertura = req;
       return planDevuelto;
     },
     planClose: async () => {
@@ -146,6 +149,8 @@ function prepararSeleccion(): void {
 beforeEach(() => {
   enviados.length = 0;
   planificaciones = 0;
+  ultimaApertura = null;
+  usarPanel.setState({ modoMargen: 'isolated' });
   pasoValido = true;
   planDevuelto = plan('open', 3);
   resultado = { label: 'Prueba', ok: 3, skipped: 0, failures: [], undetermined: [] };
@@ -197,7 +202,7 @@ describe('planificar no envía', () => {
   });
 });
 
-describe('la contraseña de paso, en la apertura', () => {
+describe('la contraseña de paso, al abrir y al cerrar', () => {
   it('con la contraseña correcta se envía el plan aprobado', async () => {
     await usarPanel.getState().planear('open');
     usarPanel.getState().escribirPin('bg1');
@@ -233,17 +238,61 @@ describe('la contraseña de paso, en la apertura', () => {
   });
 
   /*
-   * Las otras cinco operaciones se aprueban con el plan a la vista y no piden
-   * contraseña: solo la apertura compromete dinero nuevo (docs/04 W-09).
+   * Cerrar tambien la pide, desde el 26/08/2026. No compromete dinero nuevo,
+   * pero realiza el resultado: convierte en definitiva una perdida abierta, y
+   * un cierre equivocado no se deshace pulsando otra vez -se vuelve a abrir a
+   * otro precio, y esa diferencia es el coste del error-.
    */
-  it('cerrar no pide contraseña de paso', async () => {
+  it('sin la contraseña correcta, cerrar no envía ninguna orden', async () => {
     pasoValido = false;
     planDevuelto = plan('close', 2);
 
     await usarPanel.getState().planear('close');
+    usarPanel.getState().escribirPin('mal');
+    await usarPanel.getState().confirmarPlan();
+
+    expect(enviados).toHaveLength(0);
+    expect(usarPanel.getState().plan).not.toBeNull();
+    expect(usarPanel.getState().errorPaso).toContain('Intento 1');
+  });
+
+  it('con la contraseña correcta, cerrar envía el plan aprobado', async () => {
+    planDevuelto = plan('close', 2);
+
+    await usarPanel.getState().planear('close');
+    usarPanel.getState().escribirPin('bg1');
     await usarPanel.getState().confirmarPlan();
 
     expect(enviados).toEqual([{ planId: 'plan_close', only: undefined }]);
+  });
+
+  it('al tercer intento fallido, el cierre se cancela sin enviar', async () => {
+    pasoValido = false;
+    planDevuelto = plan('close', 2);
+    await usarPanel.getState().planear('close');
+
+    for (let i = 0; i < 3; i += 1) {
+      usarPanel.getState().escribirPin('mal');
+      await usarPanel.getState().confirmarPlan();
+    }
+
+    expect(enviados).toHaveLength(0);
+    expect(usarPanel.getState().plan).toBeNull();
+  });
+
+  /*
+   * Las otras cuatro no la piden: ajustar el Take Profit, el margen o el
+   * apalancamiento no realiza ningun resultado, y pedirla en cada ajuste la
+   * convertiria en un tramite que se teclea sin leer.
+   */
+  it('el Take Profit no pide contraseña de paso', async () => {
+    pasoValido = false;
+    planDevuelto = plan('tp', 2);
+
+    await usarPanel.getState().planear('tp');
+    await usarPanel.getState().confirmarPlan();
+
+    expect(enviados).toEqual([{ planId: 'plan_tp', only: undefined }]);
   });
 });
 
@@ -333,6 +382,73 @@ describe('el apalancamiento por defecto', () => {
     usarPanel.getState().fijarActivo('PEPE');
 
     expect(usarPanel.getState().valores.ap).toBe('12');
+  });
+});
+
+/**
+ * El modo de margen y el margen adicional, elegidos en la pantalla.
+ *
+ * El modo dejo de deducirse de la ficha de la cuenta el 26/08/2026: viaja
+ * **dentro** de la orden, asi que abrir lo deja configurado en ese activo, y
+ * deducirlo de un simbolo distinto del que se opera reconfiguraba activos en
+ * silencio. Ahora lo dice el operador y sale con la peticion.
+ */
+describe('el modo de margen y el margen adicional', () => {
+  it('viajan con la apertura tal como estan en la pantalla', async () => {
+    usarPanel.setState({ modoMargen: 'isolated' });
+
+    await usarPanel.getState().planear('open');
+
+    expect(ultimaApertura?.marginMode).toBe('isolated');
+    expect(ultimaApertura?.additionalMargin).toBe('50');
+    expect(ultimaApertura?.takeProfitPercent).toBe('35');
+  });
+
+  it('sin margen adicional escrito, no viaja ninguno', async () => {
+    usarPanel.setState({ valores: { tp: '35', mgi: '100', mga: '', ap: '10' } });
+
+    await usarPanel.getState().planear('open');
+
+    expect(ultimaApertura?.additionalMargin).toBeNull();
+  });
+
+  /*
+   * Lo pidio el cliente el 25/08/2026: en cruzado Bitget no admite agregar
+   * margen -lo toma del saldo total de la cuenta-, y abrir sin el margen que se
+   * aprobo deja la posicion con menos colchon del que el operador cree. No se
+   * planifica siquiera: ni una consulta de precios para llegar a esa respuesta.
+   */
+  it('en cruzado con margen adicional escrito, no se planifica nada', async () => {
+    usarPanel.setState({ modoMargen: 'crossed' });
+
+    await usarPanel.getState().planear('open');
+
+    expect(planificaciones).toBe(0);
+    expect(enviados).toHaveLength(0);
+    expect(usarPanel.getState().plan).toBeNull();
+    expect(usarPanel.getState().avisos.at(-1)?.cuerpo).toContain('cruzado');
+  });
+
+  it('en cruzado sin margen adicional, la apertura sigue su curso', async () => {
+    usarPanel.setState({
+      modoMargen: 'crossed',
+      valores: { tp: '35', mgi: '100', mga: '', ap: '10' }
+    });
+
+    await usarPanel.getState().planear('open');
+
+    expect(planificaciones).toBe(1);
+    expect(ultimaApertura?.marginMode).toBe('crossed');
+  });
+
+  /* El margen adicional suelto -sobre una posicion ya abierta- sigue existiendo. */
+  it('el botón de margen adicional planifica su propia operación', async () => {
+    planDevuelto = plan('margin', 3);
+
+    await usarPanel.getState().planear('margin');
+
+    expect(planificaciones).toBe(1);
+    expect(usarPanel.getState().plan?.kind).toBe('margin');
   });
 });
 

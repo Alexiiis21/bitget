@@ -208,7 +208,13 @@ describe('agregar margen · las tres puertas antes de enviar', () => {
 
     expect(plan.entradas).toHaveLength(0);
     expect(plan.descartes[0]?.motivo).toBe('margen-cruzado');
-    expect(plan.descartes[0]?.mensaje).toContain('aislado');
+    expect(plan.descartes[0]?.mensaje).toContain('AISLADO');
+    /*
+     * Y dice por que, no solo que no. Es la diferencia entre un fallo del panel
+     * y una propiedad del exchange: en cruzado no hay margen por posicion que
+     * agregar. Lo pidio asi el cliente el 25/08/2026.
+     */
+    expect(plan.descartes[0]?.mensaje).toContain('saldo total de la cuenta');
   });
 
   /* Es dinero nuevo saliendo del saldo: enterarse a mitad del lote es tarde. */

@@ -37,6 +37,7 @@ import type { Lado } from '@shared/types';
 import type { Mercado } from '../../mercado';
 import type { ClienteBitget, RespuestaRest } from '../client';
 import type { Credencial } from '../signer';
+import { trazaApertura, trazaFallo } from '../../../debug-apertura';
 
 /** `crossed` reparte el margen de toda la cuenta; `isolated` lo acota a la posicion. */
 export type ModoMargenApi = 'crossed' | 'isolated';
@@ -68,7 +69,7 @@ export type OrdenColocada = z.infer<typeof esquemaOrdenColocada>;
  * conexion se corta con la peticion en vuelo, el resultado es **indeterminado**
  * y no se puede reintentar solo. Ver `bitget/errors.ts`.
  */
-export function abrirPosicion(
+export async function abrirPosicion(
   cliente: ClienteBitget,
   credencial: Credencial,
   orden: AperturaOrden
@@ -90,19 +91,25 @@ export function abrirPosicion(
     cuerpo['force'] = 'gtc';
   }
 
-  console.log('[DEBUG APERTURA] Enviando orden de apertura:', JSON.stringify(cuerpo, null, 2));
+  /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+  trazaApertura('3·cuerpo-apertura', cuerpo);
 
-  return cliente.peticionFirmada(
-    credencial,
-    { metodo: 'POST', ruta: '/api/v2/mix/order/place-order', cuerpo, idempotente: false },
-    esquemaOrdenColocada
-  ).then(res => {
-    console.log('[DEBUG APERTURA] Orden colocada con éxito:', res);
-    return res;
-  }).catch(err => {
-    console.error('[DEBUG APERTURA] Fallo al colocar orden:', err);
-    throw err;
-  });
+  try {
+    const r = await cliente.peticionFirmada(
+      credencial,
+      { metodo: 'POST', ruta: '/api/v2/mix/order/place-order', cuerpo, idempotente: false },
+      esquemaOrdenColocada
+    );
+    /* DEPURACIÓN TEMPORAL · lo que Bitget contesto, no solo lo que se le mando. */
+    trazaApertura('4·respuesta-apertura', {
+      clientOid: orden.clientOid,
+      orderId: r.datos.orderId
+    });
+    return r;
+  } catch (e) {
+    trazaFallo('4·apertura-RECHAZADA', e, { clientOid: orden.clientOid, size: orden.size });
+    throw e;
+  }
 }
 
 /* ---------- /api/v2/mix/order/close-positions ---------- */

@@ -55,7 +55,9 @@ class UnaCuenta implements FuenteCuentas {
       etiqueta: 'Cuenta demo',
       credencial: credencialReal,
       saldoDisponible: this.saldo,
-      modoMargen: 'crossed',
+      /* Aislado: el modo viaja en la orden y reconfigura el simbolo. Ver
+         `apertura-simulada.test.ts`. */
+      modoMargen: 'isolated',
       apalancamiento: { long: APALANCAMIENTO, short: APALANCAMIENTO, cruzado: APALANCAMIENTO }
     };
   }
@@ -90,6 +92,31 @@ describe.skipIf(!hayCredenciales)('abrir, poner Take Profit y cerrar', () => {
     expect(Number(r.datos.available)).toBeGreaterThan(0);
   });
 
+  /*
+   * El apalancamiento se fija aqui y no se da por supuesto.
+   *
+   * El precio del Take Profit sale de dividir el porcentaje entre el
+   * apalancamiento **real de la cuenta**, que es lo correcto y lo que pidio el
+   * cliente. Pero esta suite comparte la cuenta con las demas pruebas fisicas,
+   * y una de ellas mueve el apalancamiento: si esa deja 20x puestos, el paso 3
+   * mide 1,75% donde espera 3,5% y la prueba del Take Profit falla por algo que
+   * no tiene que ver con el Take Profit. Fijarlo antes de abrir hace que este
+   * archivo dependa solo de si mismo, en cualquier orden.
+   */
+  it('paso 2a · fija el apalancamiento del que parte el calculo', async () => {
+    const plan = await motor.planificarApalancamiento({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos,
+      apalancamiento: APALANCAMIENTO
+    });
+    const lote = await motor.ejecutarApalancamiento(plan);
+
+    console.log(`  apalancamiento ....... ${APALANCAMIENTO}x · ${lote.jobs[0]?.estado}`);
+
+    expect(resumirLote(lote).fallo).toBe(0);
+  });
+
   it('paso 2 · abre una posicion', async () => {
     const plan = await motor.planificar({
       mercado: MERCADO_SIMULADO,
@@ -97,7 +124,8 @@ describe.skipIf(!hayCredenciales)('abrir, poner Take Profit y cerrar', () => {
       objetivos,
       margenInicial: MARGEN,
       apalancamiento: APALANCAMIENTO,
-      precioLimite: null
+      precioLimite: null,
+      modoMargen: 'isolated'
     });
     const lote = await motor.ejecutar(plan);
 
@@ -159,7 +187,7 @@ describe.skipIf(!hayCredenciales)('abrir, poner Take Profit y cerrar', () => {
     console.log(`
   planes en Bitget ..... ${planes.length}
   precio de disparo .... ${nuestro?.triggerPrice ?? '—'}
-  lado ................. ${nuestro?.holdSide ?? '—'}`);
+  lado ................. ${nuestro?.posSide ?? nuestro?.holdSide ?? '—'}`);
 
     expect(nuestro).toBeDefined();
   });

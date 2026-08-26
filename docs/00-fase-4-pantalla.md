@@ -62,8 +62,10 @@ Es la pieza nueva y la que sostiene la promesa del contrato. Enseña, para la op
 Los descartes se enseñan a propósito: una subcuenta que no operó y que no aparece en ninguna lista
 es una subcuenta cuyo estado el operador va a suponer.
 
-La contraseña de paso solo aparece en la apertura, que es la única acción que compromete dinero
-nuevo. Tres intentos fallidos cancelan la operación **sin haber enviado nada**.
+La contraseña de paso aparece al **abrir y al cerrar**. La primera compromete dinero nuevo; la
+segunda realiza el resultado —convierte en definitiva una pérdida que estaba abierta— y tampoco se
+deshace pulsando otra vez: un cierre equivocado no se «reabre», se vuelve a abrir a otro precio.
+Tres intentos fallidos cancelan la operación **sin haber enviado nada**.
 
 ---
 
@@ -100,6 +102,13 @@ apalancamiento en el máximo de ese activo**, leído del catálogo de Bitget.
 | SOL | 100x | — |
 | PEPE | 75x | — |
 | PAXG | 50x | — |
+| SUI | 75x | — |
+| DOGE | 75x | — |
+| XRP | 125x | 50x |
+
+Los topes están leídos del catálogo de Bitget el 25 de agosto de 2026, no escritos de
+memoria. El mercado de pruebas solo ofrece tres contratos —BTC, ETH y XRP—: SUI y DOGE no
+existen en el trading demo de Bitget, así que ahí no aparecen en el selector.
 
 Acierta solo en cada activo y se ajusta al mercado sin que nadie recuerde nada. Es un valor de
 partida, no una imposición: el campo se sigue pudiendo escribir, y con «valores fijos» activado no
@@ -133,7 +142,7 @@ npm run test:fisica   # opera de verdad contra el mercado simulado de Bitget
 **Lo nuevo en la suite sin red** (31 pruebas más):
 
 - `test/renderer/store-plan.test.ts` — las cuatro invariantes de la pantalla: planificar no envía,
-  cancelar no envía, sin contraseña de paso no se abre, y reintentar reenvía el mismo plan dejando
+  cancelar no envía, sin contraseña de paso no se abre ni se cierra, y reintentar reenvía el mismo plan dejando
   fuera lo indeterminado. El servicio se sustituye por uno que **cuenta los envíos**, así que «no
   envió nada» se comprueba, no se supone.
 - `test/integration/catalogo-activos.test.ts` — que solo se ofrezcan los activos del panel, que los
@@ -145,40 +154,53 @@ npm run test:fisica   # opera de verdad contra el mercado simulado de Bitget
 camino que la pantalla —vault real, credenciales cifradas, registro de cuentas— y ejecuta los doce
 pasos de una sesión de trabajo. Es la que hay que enseñar.
 
-### Estado de la última ejecución, contra Bitget
+### Estado de la última ejecución, contra Bitget · 25 de agosto de 2026
 
 ```
 almacen .............. creado y desbloqueado
 contrasena de paso ... fijada
 alta ................. correcta
-UID detectado ........ 5476143713
-cuenta principal ..... 1513226215
+UID detectado ........ 7514542716
+cuenta principal ..... 7514542716
 BTC    SBTCSUSDT    hasta 125x · 1 decimales
 ETH    SETHSUSDT    hasta 100x · 2 decimales
 XRP    SXRPSUSDT    hasta 50x · 3 decimales
-precios .............. BTC 74.693 · ETH 2.343,24 · XRP 1,316
-precio de referencia . 74.690,9
-cantidad ............. 0,0066
-margen real .......... 49,295994
-apertura ............. 1 con error · 40126
-apalancamiento ....... 10x → 20x · 1 correcta
+precios .............. BTC 79.260,9 · ETH 2.478,17 · XRP 1,473
+precio de referencia . 79.260,9
+cantidad ............. 0,0063
+margen real .......... 49,934367
+apertura ............. 1 correctas · 0 con error · 0 omitidas
+take profit .......... 1 correctas · 0 con error · 0 omitidas
+quitar take profit ... 1 correctas · 0 con error · 0 omitidas
+agregar margen ....... 1 correctas · 0 con error · 0 omitidas
+cierre ............... 1 correctas · 0 con error · 0 omitidas
+apalancamiento ....... 10x → 20x · 1 correctas
 panel bloqueado ...... no admite planificar ni enviar
 ```
 
-Once de los doce pasos pasan. El único que falla es el envío de la orden, y por lo mismo de
-siempre: **`40126`, la credencial del `.env` sigue siendo la de una subcuenta**, y el mercado
-simulado solo admite claves creadas desde *Trading Demo* de la cuenta principal. Se ve en la propia
-salida: el UID detectado tiene cuenta principal, es decir, es una subcuenta.
+**Los doce pasos pasan, y las seis funciones envían de verdad.** Es la primera ejecución en
+la que el envío de órdenes no está bloqueado. Lo que lo desbloqueó no fue código: la
+credencial del `.env` pasó a ser la de la **cuenta principal**, que es la única que el
+trading demo de Bitget admite —una clave de subcuenta responde `40126`— y que además ya
+tiene esta IP en su lista blanca.
 
-Todo lo que rodea a ese envío —catálogo, precios, planificación con cantidades reales, informe por
-casilla, apalancamiento de ida y vuelta, panel bloqueado— **ya funciona contra Bitget**.
+Suite completa: **43 de 43** pruebas físicas, en dos ejecuciones seguidas.
 
 ---
 
 ## 8. Lo que sigue
 
-- Poner en `.env` la API Key de *Trading Demo* de la cuenta principal. Con eso los doce pasos pasan
-  y las seis funciones quedan demostradas de extremo a extremo.
-- Cambiar la cuenta de pruebas a **margen aislado**, para el paso del margen adicional.
+Los dos puntos que quedaban abiertos se resolvieron el 25 de agosto y ya no bloquean nada:
+
+- ~~Poner en `.env` la API Key de la cuenta principal~~ → hecho: los doce pasos pasan y las
+  seis funciones quedan demostradas de extremo a extremo.
+- ~~Cambiar la cuenta de pruebas a **margen aislado**~~ → hecho, en los dos mercados y para
+  los once símbolos del panel. *Agregar margen* ya se ejecuta en vez de descartarse.
+
+Queda:
+
 - Las posiciones en vivo son de la Fase 6: hasta entonces el área del monitor avisa de que no hay
   datos en lugar de inventarlos.
+- Nada pendiente en las suites de red: `test:red` iba en paralelo y se quitaba a sí mismo el cupo
+  de la IP —Bitget respondía *«está limitando las peticiones»* y la suite fallaba por el cupo, no
+  por el panel—. Ahora corre en serie, igual que `test:staging`, y las tres se pueden encadenar.

@@ -40,16 +40,30 @@ const contrato = (symbol: string, baseCoin: string, extra: Record<string, unknow
 let exchange: ExchangeSimulado;
 let cliente: ClienteBitget;
 
-/** Los cinco del mercado real, con sus topes verdaderos. */
+/**
+ * Los ocho del mercado real, con sus topes verdaderos.
+ *
+ * Los valores estan capturados de
+ * `/api/v2/mix/market/contracts?productType=USDT-FUTURES` el 25/08/2026, no
+ * escritos de memoria: si esta tabla se inventara los topes, la prueba diria
+ * que el formulario acierta cuando en realidad enseñaria un maximo que Bitget
+ * rechaza.
+ */
 const CONTRATOS_REALES = [
   contrato('BTCUSDT', 'BTC', { maxLever: '150', pricePlace: '1' }),
   contrato('ETHUSDT', 'ETH', { maxLever: '150', pricePlace: '2' }),
   contrato('SOLUSDT', 'SOL', { maxLever: '100', pricePlace: '3' }),
-  contrato('PEPEUSDT', 'PEPE', { maxLever: '75', pricePlace: '8' }),
+  contrato('PEPEUSDT', 'PEPE', { maxLever: '75', pricePlace: '10' }),
   contrato('PAXGUSDT', 'PAXG', { maxLever: '50', pricePlace: '2' }),
+  contrato('SUIUSDT', 'SUI', { maxLever: '75', pricePlace: '4' }),
+  contrato('DOGEUSDT', 'DOGE', { maxLever: '75', pricePlace: '5' }),
+  contrato('XRPUSDT', 'XRP', { maxLever: '125', pricePlace: '4' }),
   /* Uno que el panel no opera: tiene que quedarse fuera. */
-  contrato('DOGEUSDT', 'DOGE', { maxLever: '75' })
+  contrato('ADAUSDT', 'ADA', { maxLever: '75' })
 ];
+
+/** Los ocho, en el orden en que el selector los enseña. */
+const ORDEN_PANEL = ['BTC', 'ETH', 'SOL', 'PEPE', 'PAXG', 'SUI', 'DOGE', 'XRP'];
 
 beforeEach(async () => {
   exchange = await iniciarExchangeSimulado();
@@ -65,16 +79,16 @@ afterEach(async () => {
 });
 
 describe('que activos se ofrecen', () => {
-  it('solo los cinco del panel, y en su orden', async () => {
+  it('solo los ocho del panel, y en su orden', async () => {
     exchange.responderCon(() => ({ cuerpo: sobreOk(CONTRATOS_REALES) }));
 
     const activos = await catalogoActivos(cliente, MERCADO_REAL);
 
-    expect(activos.map((a) => a.id)).toEqual(['BTC', 'ETH', 'SOL', 'PEPE', 'PAXG']);
+    expect(activos.map((a) => a.id)).toEqual(ORDEN_PANEL);
   });
 
   /*
-   * El cliente lo dijo expresamente: opera cinco activos y solo cinco. Un
+   * El cliente lo dijo expresamente: opera una lista corta y cerrada. Un
    * selector con los 754 contratos de Bitget convertiria una eleccion de un
    * vistazo en una busqueda, y abriria la puerta a operar por error otro activo.
    */
@@ -83,11 +97,11 @@ describe('que activos se ofrecen', () => {
 
     const activos = await catalogoActivos(cliente, MERCADO_REAL);
 
-    expect(activos.some((a) => a.id === 'DOGE')).toBe(false);
+    expect(activos.some((a) => a.id === 'ADA')).toBe(false);
   });
 
   /*
-   * Preferible un selector con cuatro a uno con cinco donde el quinto falla al
+   * Preferible un selector con siete a uno con ocho donde el octavo falla al
    * planificar: lo segundo lo descubre el operador con la operacion empezada.
    */
   it('un simbolo que el exchange no devuelve se omite en vez de inventarse', async () => {
@@ -97,7 +111,7 @@ describe('que activos se ofrecen', () => {
 
     const activos = await catalogoActivos(cliente, MERCADO_REAL);
 
-    expect(activos.map((a) => a.id)).toEqual(['BTC', 'ETH', 'SOL', 'PAXG']);
+    expect(activos.map((a) => a.id)).toEqual(ORDEN_PANEL.filter((id) => id !== 'PEPE'));
   });
 });
 
@@ -109,7 +123,16 @@ describe('los limites que condicionan el formulario', () => {
     const activos = await catalogoActivos(cliente, MERCADO_REAL);
     const topes = Object.fromEntries(activos.map((a) => [a.id, a.apalancamientoMax]));
 
-    expect(topes).toEqual({ BTC: 150, ETH: 150, SOL: 100, PEPE: 75, PAXG: 50 });
+    expect(topes).toEqual({
+      BTC: 150,
+      ETH: 150,
+      SOL: 100,
+      PEPE: 75,
+      PAXG: 50,
+      SUI: 75,
+      DOGE: 75,
+      XRP: 125
+    });
   });
 
   it('los decimales del precio salen del contrato, no de una tabla', async () => {
@@ -117,7 +140,7 @@ describe('los limites que condicionan el formulario', () => {
 
     const activos = await catalogoActivos(cliente, MERCADO_REAL);
 
-    expect(activos.find((a) => a.id === 'PEPE')?.decimalesPrecio).toBe(8);
+    expect(activos.find((a) => a.id === 'PEPE')?.decimalesPrecio).toBe(10);
     expect(activos.find((a) => a.id === 'BTC')?.decimalesPrecio).toBe(1);
   });
 

@@ -74,13 +74,28 @@ const aVista = (plan: PlanApertura): PlanAperturaIpc => ({
   precioReferencia: plan.precioReferencia,
   margenInicial: plan.margenInicial,
   unidad: UNIDAD_OPERACION,
+  modoMargen: plan.modoMargen,
+  margenAdicional: plan.margenAdicional,
+  margenAdicionalTotal: importe(
+    plan.margenAdicional === null
+      ? '0'
+      : new Decimal(plan.margenAdicional).times(plan.entradas.length).toFixed()
+  ),
+  takeProfitPorcentaje: plan.takeProfitPorcentaje,
   entradas: plan.entradas.map((e) => ({
     cuentaId: e.cuentaId,
     etiqueta: e.etiqueta,
     lado: e.lado,
     size: e.size,
     nocional: importe(e.nocional),
-    margenReal: importe(e.margenReal)
+    margenReal: importe(e.margenReal),
+    /*
+     * El precio de disparo NO pasa por `importe`: es un precio, no una cifra de
+     * dinero de la cuenta, y truncarlo a dos decimales lo destruiria en los
+     * activos de precio pequeño -PEPE cotiza en 0,0000026-.
+     */
+    precioDisparoTp: e.precioDisparoTp,
+    modoMargenActual: e.modoMargenActual
   })),
   descartes: plan.descartes.map((d) => ({
     cuentaId: d.cuentaId,
@@ -256,7 +271,20 @@ const esquemaApertura = z.object({
   objetivos: z.array(esquemaObjetivo).min(1).max(500),
   margenInicial: z.string().min(1).max(32),
   apalancamiento: z.number().positive().max(200),
-  precioLimite: z.string().max(32).nullable()
+  precioLimite: z.string().max(32).nullable(),
+  /*
+   * El modo de margen si viene del renderer, a diferencia del mercado.
+   *
+   * No es una contradiccion con lo anterior: el mercado decide si las ordenes
+   * mueven dinero de verdad y por eso lo fija la maquina, mientras que aislado
+   * o cruzado es una decision de trading que el operador toma en cada
+   * operacion. El enum lo acota a los dos valores que Bitget acepta.
+   */
+  modoMargen: z.enum(['isolated', 'crossed']),
+  /* El margen adicional de la misma confirmacion. */
+  margenAdicional: z.string().max(32).nullable(),
+  /* El Take Profit de la misma confirmacion. El precio lo calcula el proceso principal. */
+  takeProfitPorcentaje: z.string().max(16).nullable()
 });
 
 /* Cerrar no lleva cantidad ni precio: se cierra lo que haya. */
