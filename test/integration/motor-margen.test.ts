@@ -340,7 +340,117 @@ describe('agregar margen · lo indeterminado se resuelve releyendo el margen', (
     const lote = await motor.ejecutarMargen(plan);
 
     expect(lote.jobs[0]?.estado).toBe('fallo');
-    expect(lote.jobs[0]?.mensaje).toContain('no se agregó');
+    expect(lote.jobs[0]?.mensaje).toContain('no consta agregado');
+  });
+});
+
+/**
+ * El reintento automatico, que es el otro camino por el que se puede duplicar.
+ *
+ * --------------------------------------------------------------------------
+ * El agujero que estas pruebas cierran
+ * --------------------------------------------------------------------------
+ * Lo indeterminado ya estaba resuelto: se relee el margen en vez de reenviar.
+ * Pero `enviarUna` **tambien** reintenta los fallos de clase `retryable`, y esos
+ * los reenviaba a ciegas. En teoria da igual -«transitorio» significa que Bitget
+ * no lo proceso-, salvo que esa clase recoge tambien un 429, un `45001` y un
+ * 500, y ninguno garantiza que la peticion no llegara a procesarse antes de que
+ * la respuesta se perdiera.
+ *
+ * Para las otras cuatro operaciones no importa: llevan `clientOid` y Bitget
+ * rechaza el repetido. **`set-margin` no lo acepta**, y cada llamada suma. El
+ * 26/08/2026 una posicion acabo con el doble del margen aprobado; esto es la
+ * mitad del arreglo que impide que vuelva por esta puerta.
+ */
+/*
+ * Transitorio **de cuerpo**: HTTP 200 con `45001` dentro.
+ *
+ * No se usa un 429 a proposito. Un 429 penaliza el bucket del limitador durante
+ * minutos de reloj real, asi que la prueba mediria la penalizacion y no el
+ * reintento. Y `45001` es ademas el caso peor de los dos: Bitget contesto, dijo
+ * «fallo temporal», y eso no dice nada sobre si llego a aplicar el margen.
+ */
+const TRANSITORIO: Respuesta = {
+  cuerpo: { code: '45001', msg: 'system busy', requestTime: 1, data: null }
+};
+
+describe('agregar margen · un fallo transitorio no reenvia lo que ya se aplico', () => {
+  it('si Bitget lo proceso y aun asi respondio transitorio, no se reenvia', async () => {
+    let aplicado = false;
+    exchange.responderCon((p) => {
+      if (p.url.startsWith('/api/v2/mix/position/all-position')) {
+        return { cuerpo: sobreOk([posicion('long', aplicado ? '150' : '100')]) };
+      }
+      if (p.url.startsWith('/api/v2/mix/account/set-margin')) {
+        /* Lo procesa **y** responde transitorio: el caso que costaba el doble. */
+        aplicado = true;
+        return TRANSITORIO;
+      }
+      return null;
+    });
+
+    const plan = await motor.planificarMargen(margen(1));
+    const lote = await motor.ejecutarMargen(plan);
+
+    expect(lote.jobs[0]?.estado).toBe('exito');
+    expect(lote.jobs[0]?.mensaje).toContain('no se reenvió');
+    /* Una sola llamada, no cuatro: el margen quedo en 150 y no en 300. */
+    expect(exchange.peticiones.filter((p) => p.url.includes('set-margin'))).toHaveLength(1);
+  });
+
+  /* Y cuando de verdad no se aplico, el reintento sigue haciendo su trabajo. */
+  it('si no llego a aplicarse, reintenta y lo agrega', async () => {
+    let intentos = 0;
+    exchange.responderCon((p) => {
+      if (p.url.startsWith('/api/v2/mix/position/all-position')) {
+        /* El margen no se movio: sigue en 100 pase lo que pase. */
+        return { cuerpo: sobreOk([posicion('long', intentos >= 2 ? '150' : '100')]) };
+      }
+      if (p.url.startsWith('/api/v2/mix/account/set-margin')) {
+        intentos += 1;
+        return intentos === 1 ? TRANSITORIO : { cuerpo: sobreOk({}) };
+      }
+      return null;
+    });
+
+    const plan = await motor.planificarMargen(margen(1));
+    const lote = await motor.ejecutarMargen(plan);
+
+    expect(lote.jobs[0]?.estado).toBe('exito');
+    expect(intentos).toBe(2);
+  });
+
+  /*
+   * Si ni siquiera se puede comprobar, no se reenvia. `indeterminada` es la
+   * unica etiqueta honesta y ademas deja la casilla fuera de «reintentar las
+   * fallidas», que es donde tiene que estar: reintentarla a ciegas es justo lo
+   * que puede comprometer el doble.
+   */
+  it('si no se puede comprobar, queda indeterminada y no se reenvia', async () => {
+    let intentos = 0;
+    /* Las posiciones se leen bien al planificar, y dejan de leerse al enviar. */
+    let posicionesLegibles = true;
+    exchange.responderCon((p) => {
+      if (p.url.startsWith('/api/v2/mix/position/all-position')) {
+        return posicionesLegibles
+          ? { cuerpo: sobreOk([posicion('long', '100')]) }
+          : { estado: 502, cuerpo: 'corte' };
+      }
+      if (p.url.startsWith('/api/v2/mix/account/set-margin')) {
+        intentos += 1;
+        posicionesLegibles = false;
+        return TRANSITORIO;
+      }
+      return null;
+    });
+
+    const plan = await motor.planificarMargen(margen(1));
+    const lote = await motor.ejecutarMargen(plan);
+
+    expect(lote.jobs[0]?.estado).toBe('indeterminada');
+    expect(lote.jobs[0]?.mensaje).toContain('no se reenvía');
+    /* Lo que importa: no salió una segunda petición de margen. */
+    expect(intentos).toBe(1);
   });
 });
 

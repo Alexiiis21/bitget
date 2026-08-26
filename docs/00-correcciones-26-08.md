@@ -170,7 +170,36 @@ Las otras cuatro operaciones siguen sin pedirla, a propósito: ajustar el Take P
 el apalancamiento no realiza ningún resultado, y pedir la clave en cada ajuste la convertiría en un
 trámite que se teclea sin leer —que es exactamente como se pierde un freno de este tipo—.
 
-### 3.7 · El aviso de apalancamiento, del símbolo correcto
+### 3.7 · El reintento automático ya no puede duplicar el margen
+
+El otro camino por el que se podía comprometer el doble, y este no lo veía nadie.
+
+`enviarUna` reintenta hasta tres veces los fallos de clase `retryable`. La teoría es que
+«transitorio» significa que Bitget **no** lo procesó, así que reenviar es seguro. La práctica es
+que esa clase recoge también un **429**, un **`45001`** y un **500**, y ninguno de los tres
+garantiza que la petición no llegara a procesarse antes de que la respuesta se perdiera.
+
+Para cuatro de las cinco operaciones da igual: `place-order`, `place-tpsl-order`,
+`close-positions` y `cancel-plan` llevan `clientOid` y Bitget rechaza el repetido.
+`set-leverage` y `set-margin-mode` son idempotentes por naturaleza —fijar 150x dos veces deja
+150x—.
+
+**`set-margin` no es ninguna de las dos cosas.** No acepta `clientOid` y cada llamada suma.
+
+Ahora, antes de **reenviar** —nunca antes del primer envío—, se relee el margen de la posición y
+se compara con el que debería haber quedado:
+
+| Lo que se lee | Qué hace |
+|---|---|
+| El margen ya está aplicado | Da el envío por bueno y **no reenvía** |
+| Sigue sin aplicarse | Reenvía, que es lo que el reintento existe para hacer |
+| No se puede comprobar | **No reenvía.** Queda `indeterminada`, fuera de «reintentar las fallidas» |
+
+Cuesta una consulta, y solo en el camino del reintento. El comentario del motor decía que nunca
+reintentaba a ciegas; era cierto para `indeterminada` y falso para `retryable`. Ahora lo es para
+las dos.
+
+### 3.8 · El aviso de apalancamiento, del símbolo correcto
 
 Efecto lateral de la misma raíz: el aviso *«la cuenta está a 20x y la operación se calculó a 10x»*
 salía del apalancamiento guardado en la ficha —el del primer símbolo del mercado, otra vez—. Avisaba
@@ -211,6 +240,15 @@ npm run test:e2e    # 10 pruebas sobre la aplicación compilada
 - si no puede leer el modo, descarta sin abrir
 - margen adicional en cruzado: el plan entero se rechaza y no sale ninguna orden
 - el saldo se comprueba contra los dos importes juntos
+
+`test/integration/motor-margen.test.ts`
+- si Bitget lo procesó y aun así respondió transitorio, **no se reenvía**: una sola
+  petición, no cuatro
+- si de verdad no llegó a aplicarse, el reintento sigue haciendo su trabajo
+- si no se puede comprobar, queda `indeterminada` y no sale una segunda petición
+
+Las tres se comprobaron **fallando primero**: con la comprobación desactivada, dos de ellas
+caen —«expected 'fallo' to be 'indeterminada'»— y con ella pasan.
 
 `test/integration/apertura-con-take-profit.test.ts`
 - el margen adicional se agrega tras abrir, con su propia fila en el informe

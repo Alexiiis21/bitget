@@ -192,6 +192,32 @@ export interface Maniobra<E extends EntradaLote> {
     cuenta: CuentaEjecutable,
     entrada: E
   ): Promise<{ estado: 'exito' | 'fallo'; ordenId: string | null; mensaje: string }>;
+  /**
+   * ¿Esto ya esta hecho? Se pregunta **antes de cada reintento**, nunca antes
+   * del primer envio.
+   *
+   * --------------------------------------------------------------------------
+   * Solo la implementa quien no puede permitirse repetirse
+   * --------------------------------------------------------------------------
+   * Un `retryable` significa «Bitget dijo ahora no», y en teoria implica que la
+   * operacion no se ejecuto. En la practica esa clase tambien recoge un 429, un
+   * `45001` o un 500, y ninguno de los tres garantiza que la peticion no llegara
+   * a procesarse antes de que la respuesta se perdiera.
+   *
+   * Para cuatro de las cinco operaciones da igual: `place-order`,
+   * `place-tpsl-order`, `close-positions` y `cancel-plan` llevan `clientOid`, y
+   * Bitget rechaza el repetido. `set-leverage` y `set-margin-mode` son
+   * idempotentes por naturaleza -fijar 150x dos veces deja 150x-.
+   *
+   * **`set-margin` no es ninguna de las dos cosas.** No acepta `clientOid` y
+   * cada llamada suma, asi que un reintento sobre un envio que si se proceso
+   * compromete el doble del margen aprobado. De ahi este gancho: releer la
+   * posicion antes de reenviar cuesta una consulta y solo en el camino del
+   * reintento, que es raro.
+   *
+   * Devuelve el desenlace si ya estaba hecha, o `null` para reenviar.
+   */
+  yaHecha?(cuenta: CuentaEjecutable, entrada: E): Promise<Desenlace | null>;
 }
 
 /* ---------------- peticion y plan ---------------- */
@@ -1810,17 +1836,26 @@ export class MotorLotes {
         return { ordenId: null, mensaje: `Margen ${entrada.margenActual} → ${entrada.margenResultante}` };
       },
 
-      resolver: async (cuenta, entrada) => {
-        const r = await obtenerPosiciones(this.cliente, cuenta.credencial, plan.mercado);
-        const posicion = buscarPosicion(r.datos, plan.simbolo, entrada.lado);
-        const ahora = new Decimal(posicion?.marginSize ?? '0');
+      /*
+       * Antes de **reenviar** tras un fallo transitorio: ¿ya se aplico?
+       *
+       * Es la red que `set-margin` no trae de fabrica. Un 429 o un `45001` se
+       * clasifican como transitorios y casi siempre significan «no se hizo»,
+       * pero «casi siempre» no basta cuando repetirse compromete el doble del
+       * margen que el operador aprobo y nada lo rechaza. Ver `Maniobra.yaHecha`.
+       */
+      yaHecha: async (cuenta, entrada) => {
+        if (!(await this.margenYaAplicado(cuenta, plan, entrada))) return null;
+        return {
+          ordenId: null,
+          mensaje:
+            `Margen ${entrada.margenActual} → ${entrada.margenResultante}. ` +
+            'Bitget rechazó el envío como transitorio, pero el margen ya constaba aplicado: no se reenvió.'
+        };
+      },
 
-        /*
-         * Se compara contra el margen esperado y no contra el anterior: entre
-         * medias el precio puede haber movido el margen unos centimos, asi que
-         * se acepta un margen del tamano esperado o mayor.
-         */
-        if (ahora.greaterThanOrEqualTo(entrada.margenResultante)) {
+      resolver: async (cuenta, entrada) => {
+        if (await this.margenYaAplicado(cuenta, plan, entrada)) {
           return {
             estado: 'exito',
             ordenId: null,
@@ -1831,11 +1866,42 @@ export class MotorLotes {
         return {
           estado: 'fallo',
           ordenId: null,
-          mensaje:
-            `Se cortó la conexión al enviar y el margen sigue en ${ahora.toFixed()}: no se agregó. Se puede reintentar.`
+          mensaje: 'Se cortó la conexión al enviar y el margen no consta agregado. Se puede reintentar.'
         };
       }
     });
+  }
+
+  /**
+   * ¿La posicion tiene ya el margen que deberia tener tras el envio?
+   *
+   * Se compara contra el margen **esperado** y no contra el anterior: entre
+   * medias el precio puede haber movido el margen unos centimos, asi que se
+   * acepta el tamano esperado o mayor.
+   *
+   * Lo usan las dos comprobaciones de `ejecutarMargen` -la de antes de reenviar
+   * y la de lo indeterminado- porque la pregunta es exactamente la misma, y
+   * tenerla escrita dos veces era tener dos criterios que pueden separarse.
+   */
+  private async margenYaAplicado(
+    cuenta: CuentaEjecutable,
+    plan: PlanMargen,
+    entrada: EntradaMargen
+  ): Promise<boolean> {
+    const r = await obtenerPosiciones(this.cliente, cuenta.credencial, plan.mercado);
+    const posicion = buscarPosicion(r.datos, plan.simbolo, entrada.lado);
+    const ahora = new Decimal(posicion?.marginSize ?? '0');
+
+    /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
+    trazaApertura('2·comprobar-margen', {
+      cuentaId: cuenta.cuentaId,
+      lado: entrada.lado,
+      margenEnBitget: ahora.toFixed(),
+      margenEsperado: entrada.margenResultante,
+      yaAplicado: ahora.greaterThanOrEqualTo(entrada.margenResultante)
+    });
+
+    return ahora.greaterThanOrEqualTo(entrada.margenResultante);
   }
 
   /**
@@ -2118,9 +2184,40 @@ export class MotorLotes {
          * Reintentar es seguro porque se reenvia el mismo `clientOid`: si por lo
          * que fuera si hubiera entrado, el exchange rechaza el repetido en vez
          * de ejecutar la operacion dos veces.
+         *
+         * La maniobra que **no** tiene esa red -`set-margin`, que no acepta
+         * `clientOid`- comprueba antes de reenviar si ya esta hecha. Ver
+         * `Maniobra.yaHecha`.
          */
         if (e.clase === 'retryable' && intento <= this.reintentosMaximos) {
           await this.dormir(e.reintentarEnMs ?? esperaReintento(intento));
+
+          if (maniobra.yaHecha !== undefined) {
+            let hecha: Desenlace | null;
+            try {
+              hecha = await maniobra.yaHecha(cuenta, entrada);
+            } catch {
+              /*
+               * No se pudo comprobar. **No se reenvia**: si el envio anterior si
+               * se proceso, repetirlo comprometeria el doble. `indeterminada` es
+               * la unica etiqueta honesta, y ademas mantiene esta casilla fuera
+               * de «reintentar las fallidas», que es donde tiene que estar.
+               */
+              job.estado = 'indeterminada';
+              job.mensaje =
+                `${e.message} No se pudo comprobar si llegó a aplicarse, y no se reenvía: ` +
+                'esta operación no lleva identificador que impida repetirla. Compruébela en Bitget.';
+              return;
+            }
+
+            if (hecha !== null) {
+              job.estado = 'exito';
+              job.ordenId = hecha.ordenId;
+              job.mensaje = hecha.mensaje;
+              return;
+            }
+          }
+
           continue;
         }
 
