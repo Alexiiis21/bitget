@@ -30,6 +30,11 @@ que dice el documento.
 | Agregar margen | campo *Margen adicional* | `margen:planificar` · `margen:ejecutar` |
 | Ajustar apalancamiento | campo *Apalancamiento* | `apalancamiento:planificar` · `apalancamiento:ejecutar` |
 
+> **Actualización del 26/08/2026.** Las dos filas centrales ya no existen como operación propia: el
+> Take Profit y el margen adicional viajan **dentro de la apertura**, y sus cuatro canales se
+> retiraron. Convivir con la apertura que ya los llevaba dentro permitía enviarlos dos veces sobre
+> la misma posición. Ver `docs/00-correcciones-26-08.md` § 3.5.
+
 Y tres piezas que faltaban para que nada quedara en modo demostración:
 
 **El catálogo de activos** (`mercado:activos`). El selector ya no sale de una lista escrita a mano:

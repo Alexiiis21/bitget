@@ -87,12 +87,12 @@ test('los canales de apertura existen y exigen el panel abierto', async () => {
 });
 
 /*
- * Las seis operaciones de la Fase 4 tienen su canal, y los seis se comportan
- * igual con el panel bloqueado: responden que no, en vez de no existir. Que
- * respondan es lo que se comprueba aqui; que hagan lo correcto, las pruebas de
- * integracion y las fisicas.
+ * Las operaciones de la Fase 4 tienen su canal, y todas se comportan igual con
+ * el panel bloqueado: responden que no, en vez de no existir. Que respondan es
+ * lo que se comprueba aqui; que hagan lo correcto, las pruebas de integracion y
+ * las fisicas.
  */
-test('los seis canales de operacion existen y ninguno opera con el panel bloqueado', async () => {
+test('los canales de operacion existen y ninguno opera con el panel bloqueado', async () => {
   const respuestas = await ventana.evaluate(async () => {
     const objetivos = [{ cuentaId: 'x', lado: 'long' as const }];
     const intentar = async (f: () => Promise<unknown>): Promise<string> => {
@@ -106,14 +106,8 @@ test('los seis canales de operacion existen y ninguno opera con el panel bloquea
 
     return {
       cierre: await intentar(() => window.pcb.cierrePlanificar({ simbolo: 'SBTCSUSDT', objetivos })),
-      tp: await intentar(() =>
-        window.pcb.tpPlanificar({ simbolo: 'SBTCSUSDT', objetivos, porcentaje: '35' })
-      ),
       quitarTp: await intentar(() =>
         window.pcb.tpPlanificarQuitar({ simbolo: 'SBTCSUSDT', objetivos })
-      ),
-      margen: await intentar(() =>
-        window.pcb.margenPlanificar({ simbolo: 'SBTCSUSDT', objetivos, cantidad: '50' })
       ),
       apalancamiento: await intentar(() =>
         window.pcb.apalancamientoPlanificar({ simbolo: 'SBTCSUSDT', objetivos, apalancamiento: 20 })
@@ -124,6 +118,26 @@ test('los seis canales de operacion existen y ninguno opera con el panel bloquea
   for (const [canal, mensaje] of Object.entries(respuestas)) {
     expect(mensaje, canal).toContain('bloqueado');
   }
+});
+
+/*
+ * Y los dos que se retiraron el 26/08/2026 **no existen**.
+ *
+ * Es la mitad de la garantia que el compilador no puede dar: el Take Profit y el
+ * margen adicional viajan dentro de la apertura, y mientras su canal siguiera en
+ * pie se podrian volver a enviar sobre una posicion que ya los recibio. Aqui se
+ * comprueba contra el binario ya compilado, que es donde importa.
+ */
+test('no hay canal para aplicar Take Profit ni margen por separado', async () => {
+  const superficie = await ventana.evaluate(() => Object.keys(window.pcb));
+
+  expect(superficie).not.toContain('tpPlanificar');
+  expect(superficie).not.toContain('tpEjecutar');
+  expect(superficie).not.toContain('margenPlanificar');
+  expect(superficie).not.toContain('margenEjecutar');
+  /* Los que sí quedan, para que la prueba falle si se cae la superficie entera. */
+  expect(superficie).toContain('aperturaPlanificar');
+  expect(superficie).toContain('tpPlanificarQuitar');
 });
 
 /*

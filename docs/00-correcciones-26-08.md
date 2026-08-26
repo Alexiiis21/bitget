@@ -119,7 +119,43 @@ Ahora los tres campos que son una operación llevan su distintivo **APLICAR**, *
 un rótulo con la nota *«sale al abrir»*, y bajo el título de la sección hay una línea que dice qué
 hacen: *«actúa sobre las posiciones ya abiertas de las casillas marcadas, sin abrir ninguna»*.
 
-### 3.5 · La contraseña de paso, también al cerrar
+### 3.5 · Se acabó «editar» una posición abierta
+
+Es la consecuencia de todo lo anterior, y la regla que ordena el panel:
+
+> **Todo lo que define una posición se decide antes de abrirla y sale con ella.**
+> Después solo se puede quitar el Take Profit o cerrar.
+
+El Take Profit y el margen adicional viajaban con la apertura **y además** tenían su propio botón
+para aplicarlos sobre una posición ya abierta. Hacer las dos cosas enviaba lo mismo dos veces —y el
+26 de agosto ocurrió: una posición acabó con 2 USDT de margen donde se había escrito 1—.
+
+`set-margin` es la única petición del panel **sin identificador propio**, así que ahí no hay nada
+que rechace el repetido: se suma y ya está.
+
+Retirado, y entero. No solo el botón:
+
+| Se va | Qué era |
+|---|---|
+| Botones *Take Profit %* y *Margen adicional* | Aplicaban sobre posiciones abiertas |
+| Botón *Aplicar todo* | Encadenaba los dos anteriores más el apalancamiento |
+| Botón *Reintentar margen* del aviso CRÍTICO | Agregaba margen a las posiciones en riesgo |
+| Canales `tp:planificar` · `tp:ejecutar` · `margen:planificar` · `margen:ejecutar` | La vía por la que salían |
+| `Sesion.planificarTakeProfit` · `planificarMargen` y sus gemelos de ejecución | Lo que había detrás |
+
+Quitar solo el botón no bastaba: mientras el canal exista, un fallo de la pantalla puede llamarlo.
+
+**Lo que no se toca:** *Cerrar*, *Quitar Take Profit* y *Apalancamiento*. Las dos primeras no son
+ediciones —una liquida la posición y la otra retira una protección, que es lo que el cliente pidió
+el 18 de agosto—. El apalancamiento tampoco: no viaja en ninguna orden, es configuración de la
+cuenta que se deja puesta **antes** de operar.
+
+**Lo que esto cuesta**, dicho claro: si una posición queda abierta sin su Take Profit o sin su
+margen —porque el envío falló después de abrir—, el panel ya no puede arreglarlo. Hay que
+ponérselo en Bitget, o cerrar y volver a abrir. Los mensajes del informe lo dicen así. Es el precio
+de que no se pueda enviar dos veces, y es el que se eligió a propósito.
+
+### 3.6 · La contraseña de paso, también al cerrar
 
 Pedida aparte, y el propio panel ya la prometía: al fijar la clave, la pantalla de seguridad decía
 que se pediría *«cada vez que se abra **o se cierre** una posición»*. No se cumplía — solo se pedía
@@ -134,7 +170,7 @@ Las otras cuatro operaciones siguen sin pedirla, a propósito: ajustar el Take P
 el apalancamiento no realiza ningún resultado, y pedir la clave en cada ajuste la convertiría en un
 trámite que se teclea sin leer —que es exactamente como se pierde un freno de este tipo—.
 
-### 3.6 · El aviso de apalancamiento, del símbolo correcto
+### 3.7 · El aviso de apalancamiento, del símbolo correcto
 
 Efecto lateral de la misma raíz: el aviso *«la cuenta está a 20x y la operación se calculó a 10x»*
 salía del apalancamiento guardado en la ficha —el del primer símbolo del mercado, otra vez—. Avisaba
@@ -185,7 +221,12 @@ npm run test:e2e    # 10 pruebas sobre la aplicación compilada
 - el modo y el margen adicional viajan tal como están en la pantalla
 - en cruzado con margen adicional escrito **no se planifica siquiera**
 - sin la contraseña de paso, cerrar no envía nada; al tercer intento se cancela
-- el Take Profit sigue sin pedirla
+- el apalancamiento sigue sin pedirla
+- tras abrir, los tres valores que salieron con la orden se vacían
+
+`test/e2e/arranque.spec.ts`
+- **no existe** canal para aplicar Take Profit ni margen por separado, comprobado
+  contra el binario ya compilado
 
 Además, `test/fisica/**` entra por fin en `npm run typecheck`. Estaba fuera, y por eso sus
 llamadas se quedaron atrás en silencio cuando el contrato del motor cambió.

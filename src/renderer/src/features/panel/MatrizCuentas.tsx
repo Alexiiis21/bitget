@@ -23,7 +23,6 @@ function posicionDe(posiciones: Position[], subAccountId: string, side: Side): P
 
 function AlertasCuenta({ cuenta }: { cuenta: Account }) {
   const posiciones = usarPanel((s) => s.posiciones);
-  const reintentarMargenCuenta = usarPanel((s) => s.reintentarMargenCuenta);
 
   const subIds = new Set(cuenta.subAccounts.map((s) => s.id));
   const propias = posiciones.filter((p) => subIds.has(p.subAccountId));
@@ -35,9 +34,21 @@ function AlertasCuenta({ cuenta }: { cuenta: Account }) {
 
   return (
     <>
+      {/*
+        * El aviso no trae botón, y es deliberado.
+        *
+        * Tuvo uno —«Reintentar margen»— que agregaba margen a las posiciones
+        * críticas de la cuenta. Se retiró el 26/08/2026 con el resto de las
+        * acciones posteriores a la apertura: el margen adicional viaja dentro de
+        * la orden y no se aplica después. Ver `PlanKind`.
+        *
+        * El aviso se queda porque sigue siendo cierto y hay que verlo. Lo que
+        * cambia es cómo se resuelve: cerrando la posición y volviéndola a abrir
+        * con el margen que le falta, o agregándoselo en Bitget.
+        */}
       {criticas.length > 0 && (
         <div
-          title="Posición abierta sin margen adicional aplicado: riesgo de liquidación. El aviso no desaparece hasta que el margen se aplique."
+          title="Posición abierta sin margen adicional: riesgo de liquidación. El margen adicional sale con la apertura, así que para dárselo hay que cerrarla y volver a abrirla —o agregárselo en Bitget—."
           style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '7px 12px', background: T.alertaCriticaFondo, borderBottom: `1px solid ${T.alertaCriticaBorde}`, borderLeft: '5px solid #e03131' }}
         >
           <span style={{ flex: 'none', width: 18, height: 18, borderRadius: 5, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 800, color: '#ffffff', background: '#e03131' }}>!</span>
@@ -46,13 +57,6 @@ function AlertasCuenta({ cuenta }: { cuenta: Account }) {
             {criticas.length} {criticas.length === 1 ? 'posición abierta' : 'posiciones abiertas'} sin margen adicional · riesgo de liquidación:{' '}
             {criticas.map((p) => `${nombreSub(p.subAccountId)} (${p.side})`).join(' · ')}
           </span>
-          <button
-            type="button"
-            onClick={() => void reintentarMargenCuenta(cuenta.id)}
-            style={{ marginLeft: 'auto', flex: 'none', padding: '5px 10px', borderRadius: 6, fontSize: 10.5, fontWeight: 700, cursor: 'pointer', border: '1px solid #e03131', background: '#e03131', color: '#ffffff' }}
-          >
-            Reintentar margen
-          </button>
         </div>
       )}
 

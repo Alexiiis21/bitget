@@ -36,11 +36,9 @@ import type {
   ClosedPosition,
   CloseRequest,
   LeverageRequest,
-  MarginRequest,
   OpenRequest,
   PositionSnapshot,
   SystemInfo,
-  TpRequest,
   UnlockResult,
   ValidationResult
 } from '../domain/panel-view';
@@ -75,18 +73,21 @@ export interface PanelService {
   /* ---- escritura, en dos fases ---- */
 
   /**
-   * Las seis operaciones se planifican antes de enviarse, y ninguna de estas
-   * seis llamadas envia nada a Bitget.
+   * Las cuatro operaciones se planifican antes de enviarse, y ninguna de estas
+   * llamadas envia nada a Bitget.
    *
    * Planificar cuesta consultas -precio, saldo, posiciones- y devuelve lo que
    * de verdad va a pasar en cada casilla. Es lo que el operador aprueba. Si
    * cancela, no ha salido ni una orden.
+   *
+   * **No hay `planTakeProfit` ni `planMargin`.** Los dos existieron y se
+   * retiraron el 26/08/2026: el Take Profit y el margen adicional viajan dentro
+   * de `planOpen`, y tener ademas su propia entrada permitia enviarlos otra vez
+   * sobre una posicion que ya los llevaba. Ver `PlanKind`.
    */
   planOpen(req: OpenRequest): Promise<BatchPlan>;
   planClose(req: CloseRequest): Promise<BatchPlan>;
-  planTakeProfit(req: TpRequest): Promise<BatchPlan>;
   planRemoveTakeProfit(req: CloseRequest): Promise<BatchPlan>;
-  planMargin(req: MarginRequest): Promise<BatchPlan>;
   planLeverage(req: LeverageRequest): Promise<BatchPlan>;
 
   /**

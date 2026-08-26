@@ -9,7 +9,7 @@ import type { AlcanceLado, ValoresHerramientas } from './tipos';
  *
  * Cada sub-bloque es su propio componente exportado (`SelectorActivo`,
  * `ControlesEjecucion`, `CamposParametro`, `SelectorTipoOrden`,
- * `InterruptorValoresFijos`, `BotonAplicarTodo`) y `BarraLateral` solo los
+ * `InterruptorValoresFijos`) y `BarraLateral` solo los
  * apila en columna — así el layout se puede reordenar sin tocar la lógica de
  * cada pieza. Van en un solo archivo porque comparten el mismo ancho fijo y
  * el mismo ritmo vertical; separarlos en cinco archivos de 40 líneas cada
@@ -170,35 +170,39 @@ interface DefinicionCampo {
 }
 
 /**
- * `plan: null` significa que el campo no es una operación por sí mismo.
+ * `plan: null` significa que el campo **viaja dentro de la apertura**.
  *
- * Es el caso del margen inicial: no se aplica suelto, viaja dentro de la
- * apertura. Por eso su rótulo es un rótulo y no un botón — antes lo era, con el
- * mismo aspecto que los demás y sin hacer nada al pulsarlo.
+ * Son tres de los cuatro: Take Profit, margen inicial y margen adicional. Los
+ * dos primeros ya eran así; el margen adicional se sumó el 26/08/2026, con la
+ * regla que lo explica todo: *nada se aplica después de abrir*. Ver `PlanKind`.
+ *
+ * El apalancamiento es el único que sigue siendo su propia operación, y no es
+ * una excepción a la regla: no viaja en ninguna orden, es configuración de la
+ * cuenta que se deja puesta **antes** de operar.
  */
 const CAMPOS: DefinicionCampo[] = [
-  { campo: 'tp', clave: 'tp', plan: 'tp', etiqueta: 'Take Profit %', unidad: '%', marcador: '0.00' },
+  { campo: 'tp', clave: 'tp', plan: null, etiqueta: 'Take Profit %', unidad: '%', marcador: '0.00' },
   { campo: 'mgi', clave: 'mg', plan: null, etiqueta: 'Margen inicial', unidad: 'USDT', marcador: '0.000' },
-  { campo: 'mga', clave: 'mg', plan: 'margin', etiqueta: 'Margen adicional', unidad: 'USDT', marcador: '0.000' },
+  { campo: 'mga', clave: 'mg', plan: null, etiqueta: 'Margen adicional', unidad: 'USDT', marcador: '0.000' },
   { campo: 'ap', clave: 'ap', plan: 'leverage', etiqueta: 'Apalancamiento', unidad: 'x', marcador: '10' }
 ];
 
 /**
- * Los cuatro campos, y el botón que aplica cada uno **por separado**.
+ * Los cuatro campos. Tres salen con la apertura; uno se aplica aparte.
  *
  * --------------------------------------------------------------------------
- * Por qué el botón dice «Aplicar» y lleva su distintivo
+ * Por qué ya no hay un botón por campo
  * --------------------------------------------------------------------------
- * Hasta el 26/08/2026 el rótulo de cada campo **era** el botón que aplicaba esa
- * operación, con aspecto de encabezado de sección. Y uno de los cuatro —el
- * margen inicial— no aplicaba nada, así que ni siquiera era una regla que se
- * pudiera aprender pulsando.
+ * Lo hubo, y era el problema. El Take Profit y el margen adicional viajan
+ * dentro de la apertura **y además** tenían su botón para aplicarlos sobre una
+ * posición ya abierta. Hacer las dos cosas enviaba lo mismo dos veces: el
+ * 26/08/2026 una posición acabó con 2 USDT de margen adicional donde el
+ * operador había escrito 1, y `set-margin` no lleva identificador que impida la
+ * repetición.
  *
- * El resultado lo reportó el cliente el 25/08/2026: creía que la única forma de
- * poner un Take Profit era abriendo una posición, porque abrir era la única
- * acción que la pantalla presentaba como acción. Estas tres operaciones actúan
- * sobre posiciones **ya abiertas**, y es lo que más falta le hace: ajustar el
- * Take Profit o el margen de lo que ya tiene, sin tocar la posición.
+ * La regla que queda no tiene casos raros: **lo que define una posición se
+ * decide antes de abrirla**. Cada rótulo dice dónde acaba su valor, para que no
+ * haya que deducirlo.
  */
 function CamposParametro() {
   const valores = usarPanel((s) => s.valores);
@@ -210,21 +214,21 @@ function CamposParametro() {
     <div style={seccion}>
       <span style={tituloSeccion}>PARÁMETROS</span>
       <span style={{ fontSize: 9.5, lineHeight: 1.35, color: T.texto3 }}>
-        «Aplicar» actúa sobre las posiciones ya abiertas de las casillas marcadas, sin abrir ninguna.
+        El Take Profit y los dos márgenes salen con la orden al pulsar «Abrir». No se aplican por separado.
       </span>
       {CAMPOS.map((c) => {
         const valor = valores[c.campo];
         const activo = valor.trim() !== '';
-        /* El margen inicial no es una operación: no lleva botón, lleva rótulo. */
-        const suelta = c.plan !== null;
+        /* Solo el apalancamiento es una operación por sí mismo; el resto sale al abrir. */
+        const plan = c.plan;
         return (
           <div key={c.campo} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-            {suelta ? (
+            {plan !== null ? (
               <button
                 type="button"
                 disabled={planCargando}
-                onClick={() => void planear(c.plan as PlanKind)}
-                title={`Aplicar ${c.etiqueta} a las posiciones abiertas de las casillas marcadas. Enseña el plan antes de enviar nada.`}
+                onClick={() => void planear(plan)}
+                title={`Aplicar ${c.etiqueta} a las casillas marcadas. Enseña el plan antes de enviar nada.`}
                 style={{
                   width: '100%',
                   display: 'flex',
@@ -261,7 +265,7 @@ function CamposParametro() {
               </button>
             ) : (
               <span
-                title="El margen inicial no se aplica suelto: sale con la apertura."
+                title="No se aplica por separado: viaja dentro de la orden al pulsar «Abrir». Sobre una posición ya abierta no se puede cambiar desde el panel."
                 style={{ padding: '6px 8px', fontSize: 11, fontWeight: 600, color: T.texto3, whiteSpace: 'nowrap' }}
               >
                 {c.etiqueta}
@@ -415,24 +419,6 @@ function InterruptorValoresFijos() {
   );
 }
 
-function BotonAplicarTodo() {
-  const planearVarios = usarPanel((s) => s.planearVarios);
-  const valores = usarPanel((s) => s.valores);
-  const activo = ['tp', 'mgi', 'mga', 'ap'].some((k) => valores[k as keyof ValoresHerramientas].trim() !== '');
-
-  return (
-    <button
-      type="button"
-      onClick={() => void planearVarios(['tp', 'margin', 'leverage'])}
-      title="Take Profit, margen adicional y apalancamiento, uno detrás de otro y aprobando cada uno"
-      style={{ marginTop: 2, padding: '10px 8px', borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${activo ? T.marcaRelleno : T.bordeFuerte}`, background: activo ? T.marcaRelleno : T.superficie, color: activo ? '#ffffff' : T.texto3, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7 }}
-    >
-      <span style={{ width: 6, height: 6, borderRadius: 2, background: activo ? '#8ccdf5' : T.bordeFuerte, display: 'block' }} />
-      Aplicar todo
-    </button>
-  );
-}
-
 /**
  * Selección de todas las casillas y su contrario.
  *
@@ -513,7 +499,6 @@ export function BarraLateral() {
       <SelectorModoMargen />
       <SelectorTipoOrden />
       <InterruptorValoresFijos />
-      <BotonAplicarTodo />
       <div style={{ height: 1, background: T.borde }} />
       <ControlesSeleccion />
       <EtiquetaSeleccion />

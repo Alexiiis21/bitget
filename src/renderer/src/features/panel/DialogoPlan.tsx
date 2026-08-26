@@ -35,7 +35,6 @@ const LADO: Record<'long' | 'short', string> = { long: 'LONG', short: 'SHORT' };
 export function DialogoPlan() {
   const plan = usarPanel((s) => s.plan);
   const enviando = usarPanel((s) => s.enviando);
-  const cola = usarPanel((s) => s.cola);
   const pin = usarPanel((s) => s.pinPaso);
   const error = usarPanel((s) => s.errorPaso);
   const escribirPin = usarPanel((s) => s.escribirPin);
@@ -76,7 +75,6 @@ export function DialogoPlan() {
             <span style={{ color: mercado === 'real' ? '#ffb3b3' : '#8ccdf5' }}>
               {mercado === 'real' ? 'MERCADO REAL' : 'MERCADO SIMULADO'}
             </span>
-            {cola.length > 0 ? ` · QUEDAN ${cola.length}` : ''}
           </span>
           <span style={{ fontSize: 18, fontWeight: 600 }}>{plan.title}</span>
           <span style={{ fontSize: 12, color: '#c8e4f5' }}>{plan.summary}</span>

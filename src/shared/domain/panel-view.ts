@@ -176,7 +176,28 @@ export interface BatchResult {
 
 /* ---------- planes (lo que se aprueba antes de enviar) ---------- */
 
-export type PlanKind = 'open' | 'close' | 'tp' | 'tp-remove' | 'margin' | 'leverage';
+/**
+ * Las operaciones que el panel sabe planificar y enviar.
+ *
+ * --------------------------------------------------------------------------
+ * No hay «editar una posición abierta»
+ * --------------------------------------------------------------------------
+ * El Take Profit y el margen adicional **no** están aquí, y es deliberado:
+ * viajan dentro de `open` y solo dentro de `open`. Tuvieron su propia entrada
+ * -`tp` y `margin`- hasta el 26/08/2026, y convivir con la apertura que ya los
+ * lleva dentro significaba que la misma cantidad se podía enviar dos veces
+ * sobre la misma posición. Con `set-margin`, que es la única petición del panel
+ * sin identificador propio, eso dejaba la posición con el doble del margen que
+ * el operador había aprobado, sin que nada lo impidiera.
+ *
+ * La regla que queda es una y se puede sostener: **todo lo que define una
+ * posición se decide antes de abrirla y sale con ella**. Después solo se puede
+ * quitar el Take Profit o cerrar.
+ *
+ * `leverage` sigue siendo suya porque no es una edición: es configuración de la
+ * cuenta que se deja puesta **antes** de operar, y no viaja en ninguna orden.
+ */
+export type PlanKind = 'open' | 'close' | 'tp-remove' | 'leverage';
 
 /** Una casilla que sí va a recibir la operación, con lo que le va a pasar. */
 export interface PlanEntry extends BatchTarget {
@@ -257,18 +278,6 @@ export interface OpenRequest {
 export interface CloseRequest {
   targets: BatchTarget[];
   assetId: string;
-}
-
-export interface TpRequest {
-  targets: BatchTarget[];
-  assetId: string;
-  percent: Decimal;
-}
-
-export interface MarginRequest {
-  targets: BatchTarget[];
-  assetId: string;
-  amount: Decimal;
 }
 
 export interface LeverageRequest {

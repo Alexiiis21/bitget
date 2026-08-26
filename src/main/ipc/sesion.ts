@@ -90,7 +90,8 @@ const textoError = (e: unknown): string => (e instanceof Error ? e.message : Str
  * sin proteccion, y que la accion es ponersela a mano.
  */
 const SIN_PROTECCION =
-  'La posición quedó abierta SIN Take Profit: póngaselo con el botón «Take Profit %».';
+  'La posición quedó abierta SIN Take Profit. El panel ya no lo pone suelto: ' +
+  'póngaselo en Bitget, o ciérrela con «Cerrar» y vuelva a abrirla.';
 
 /**
  * Lo mismo para el margen adicional que se pidio con la apertura.
@@ -101,7 +102,8 @@ const SIN_PROTECCION =
  * menos colchon del que el operador aprobo.
  */
 const SIN_MARGEN_EXTRA =
-  'La posición quedó abierta SIN el margen adicional: agréguelo con el botón «Margen adicional».';
+  'La posición quedó abierta SIN el margen adicional. El panel ya no lo agrega suelto: ' +
+  'agrégueselo en Bitget, o ciérrela con «Cerrar» y vuelva a abrirla.';
 
 /** Texto por defecto de una fila de Take Profit que no trajo el suyo. */
 const mensajeTp = (estado: Job['estado']): string =>
@@ -139,9 +141,15 @@ export class Sesion implements FuenteCuentas {
   private readonly planes = new Map<string, PlanApertura>();
   /** Lo mismo para los cierres. Se guardan aparte porque no caducan igual. */
   private readonly planesCierre = new Map<string, PlanCierre>();
-  private readonly planesTp = new Map<string, PlanTakeProfit>();
+  /*
+   * No hay mapa de planes de Take Profit ni de margen.
+   *
+   * Existieron mientras las dos operaciones tenian su canal de IPC: la pantalla
+   * planificaba, se guardaba el plan y despues se ejecutaba por su `id`. Ahora
+   * las dos salen dentro de la apertura, se planifican y se ejecutan seguidas
+   * en `ejecutarApertura`, y no hay nada que conservar entre medias.
+   */
   private readonly planesQuitarTp = new Map<string, PlanQuitarTakeProfit>();
-  private readonly planesMargen = new Map<string, PlanMargen>();
   private readonly planesApalancamiento = new Map<string, PlanApalancamiento>();
   /**
    * Estado de conexion de la sesion en curso.
@@ -301,9 +309,7 @@ export class Sesion implements FuenteCuentas {
     /* Un plan sin sesion no se puede ejecutar: se tira con las credenciales. */
     this.planes.clear();
     this.planesCierre.clear();
-    this.planesTp.clear();
     this.planesQuitarTp.clear();
-    this.planesMargen.clear();
     this.planesApalancamiento.clear();
     this.conexiones = new RegistroConexiones();
     this.escucharConexiones();
@@ -622,69 +628,14 @@ export class Sesion implements FuenteCuentas {
     return lote;
   }
 
-  /**
-   * Calcula donde queda el Take Profit de cada posicion. **No coloca nada.**
+  /*
+   * No hay `planificarTakeProfit` ni `planificarMargen` publicos.
    *
-   * El porcentaje es ganancia sobre el margen inicial, no movimiento del
-   * precio: el precio de cada posicion sale de su entrada y su apalancamiento.
-   * Ver `domain/precio-take-profit.ts`.
+   * Se retiraron el 26/08/2026 junto con sus canales de IPC. Las dos maniobras
+   * siguen existiendo **dentro del motor** -las usa la apertura, que las lleva
+   * incorporadas- pero ya no se pueden disparar sueltas sobre una posicion que
+   * ya las recibio. Ver `ponerTakeProfitTrasAbrir` y `agregarMargenTrasAbrir`.
    */
-  async planificarTakeProfit(peticion: {
-    simbolo: string;
-    objetivos: { cuentaId: string; lado: Lado }[];
-    porcentaje: string;
-  }): Promise<PlanTakeProfit> {
-    this.exigirAbierta();
-
-    const plan = await this.motor.planificarTakeProfit({
-      mercado: MERCADOS[this.mercado],
-      simbolo: peticion.simbolo,
-      objetivos: peticion.objetivos,
-      porcentaje: peticion.porcentaje
-    });
-
-    this.purgarPlanes();
-    this.planesTp.set(plan.id, plan);
-    return plan;
-  }
-
-  /**
-   * Coloca los Take Profit de un plan aprobado.
-   *
-   * No caduca por tiempo, pero **si por precio**: el objetivo se calculo con la
-   * entrada de cada posicion, que no cambia. Lo que si cambiaria es que el
-   * operador reposicione entre planificar y confirmar; en ese caso el precio de
-   * entrada seria otro y conviene volver a planificar.
-   */
-  async ejecutarTakeProfit(
-    planId: string,
-    soloEstos?: { cuentaId: string; lado: Lado }[]
-  ): Promise<Lote> {
-    this.exigirAbierta();
-
-    const plan = this.planesTp.get(planId);
-    if (plan === undefined) {
-      throw new ErrorPlan(
-        'plan-desconocido',
-        'Ese plan ya no existe. Vuelva a revisar la operación antes de enviarla.'
-      );
-    }
-
-    const oids =
-      soloEstos === undefined
-        ? undefined
-        : plan.entradas
-            .filter((e) => soloEstos.some((s) => s.cuentaId === e.cuentaId && s.lado === e.lado))
-            .map((e) => e.clientOid);
-
-    const lote = await this.motor.ejecutarTakeProfit(plan, oids);
-
-    if (soloEstos === undefined && lote.jobs.every((j) => j.estado !== 'fallo')) {
-      this.planesTp.delete(planId);
-    }
-
-    return lote;
-  }
 
   /** Un plan calculado, si sigue vigente. */
   plan(planId: string): PlanApertura | undefined {
@@ -693,10 +644,6 @@ export class Sesion implements FuenteCuentas {
 
   planCierre(planId: string): PlanCierre | undefined {
     return this.planesCierre.get(planId);
-  }
-
-  planTakeProfit(planId: string): PlanTakeProfit | undefined {
-    return this.planesTp.get(planId);
   }
 
   /**
@@ -756,81 +703,6 @@ export class Sesion implements FuenteCuentas {
 
   planQuitarTakeProfit(planId: string): PlanQuitarTakeProfit | undefined {
     return this.planesQuitarTp.get(planId);
-  }
-
-  /**
-   * Calcula cuanto margen se agrega a cada posicion. **No envia nada.**
-   *
-   * Comprueba lo critico antes de salir a la red: que exista la posicion, que
-   * este en margen aislado -Bitget no admite otra cosa- y que la cuenta tenga
-   * saldo, porque es dinero nuevo saliendo del disponible.
-   */
-  async planificarMargen(peticion: {
-    simbolo: string;
-    objetivos: { cuentaId: string; lado: Lado }[];
-    cantidad: string;
-  }): Promise<PlanMargen> {
-    this.exigirAbierta();
-
-    /*
-     * DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts
-     *
-     * `SUELTO` frente a `CON-APERTURA` es el dato que resuelve el margen
-     * duplicado: el mismo importe puede llegar por el boton «Margen adicional»
-     * y por la apertura que ya lo lleva dentro, y en el log de Bitget las dos
-     * peticiones son identicas. Aqui se ve de cual viene cada una.
-     */
-    trazaApertura('M·margen-SUELTO-planificar', {
-      simbolo: peticion.simbolo,
-      casillas: peticion.objetivos.length,
-      cantidad: peticion.cantidad
-    });
-
-    const plan = await this.motor.planificarMargen({
-      mercado: MERCADOS[this.mercado],
-      simbolo: peticion.simbolo,
-      objetivos: peticion.objetivos,
-      cantidad: peticion.cantidad
-    });
-
-    this.purgarPlanes();
-    this.planesMargen.set(plan.id, plan);
-    return plan;
-  }
-
-  async ejecutarMargen(
-    planId: string,
-    soloEstos?: { cuentaId: string; lado: Lado }[]
-  ): Promise<Lote> {
-    this.exigirAbierta();
-
-    const plan = this.planesMargen.get(planId);
-    if (plan === undefined) {
-      throw new ErrorPlan(
-        'plan-desconocido',
-        'Ese plan ya no existe. Vuelva a revisar la operación antes de enviarla.'
-      );
-    }
-
-    /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
-    trazaApertura('M·margen-SUELTO-ejecutar', {
-      planId,
-      cantidad: plan.cantidad,
-      casillas: plan.entradas.length,
-      reintento: soloEstos === undefined ? 'no' : `sí (${soloEstos.length})`
-    });
-
-    const oids = this.oidsDe(plan.entradas, soloEstos);
-    const lote = await this.motor.ejecutarMargen(plan, oids);
-
-    if (soloEstos === undefined && lote.jobs.every((j) => j.estado !== 'fallo')) {
-      this.planesMargen.delete(planId);
-    }
-    return lote;
-  }
-
-  planMargen(planId: string): PlanMargen | undefined {
-    return this.planesMargen.get(planId);
   }
 
   /**

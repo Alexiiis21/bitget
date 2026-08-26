@@ -396,43 +396,6 @@ export interface ActivoIpc {
   operable: boolean;
 }
 
-/* ---------- take profit ---------- */
-
-export interface PeticionTakeProfitIpc {
-  simbolo: string;
-  objetivos: { cuentaId: string; lado: Lado }[];
-  /** Ganancia sobre el margen inicial, en porcentaje. P. ej. `35`. */
-  porcentaje: string;
-}
-
-export interface EntradaTakeProfitIpc {
-  cuentaId: string;
-  etiqueta: string;
-  lado: Lado;
-  /** Precio al que Bitget cerrara la posicion. Es lo que se envia. */
-  precioDisparo: string;
-  precioEntrada: string;
-  apalancamiento: number;
-  /** Cuanto tiene que moverse el precio, en %. El resto lo pone el apalancamiento. */
-  movimientoPorcentaje: string;
-}
-
-/**
- * El plan de Take Profit que se ensena antes de confirmar.
- *
- * Es el segundo freno del pliego: el operador no aprueba «35%», aprueba los
- * precios concretos a los que va a quedar cada posicion.
- */
-export interface PlanTakeProfitIpc {
-  id: string;
-  mercado: ClaveMercadoIpc;
-  simbolo: string;
-  porcentaje: string;
-  entradas: EntradaTakeProfitIpc[];
-  descartes: DescartePlanIpc[];
-  creadoEn: string;
-}
-
 /* ---------- quitar el take profit ---------- */
 
 export interface PeticionQuitarTpIpc {
@@ -463,37 +426,7 @@ export interface PlanQuitarTpIpc {
   creadoEn: string;
 }
 
-/* ---------- agregar margen y apalancamiento ---------- */
-
-export interface PeticionMargenIpc {
-  simbolo: string;
-  objetivos: { cuentaId: string; lado: Lado }[];
-  /** Margen a anadir a cada casilla, en moneda de margen. */
-  cantidad: string;
-}
-
-export interface EntradaMargenIpc {
-  cuentaId: string;
-  etiqueta: string;
-  lado: Lado;
-  cantidad: string;
-  margenActual: string;
-  margenResultante: string;
-}
-
-export interface PlanMargenIpc {
-  id: string;
-  mercado: ClaveMercadoIpc;
-  /** Moneda de `cantidad`, `margenActual`, `margenResultante` y el total. Ver `PlanAperturaIpc`. */
-  monedaMargen: string;
-  simbolo: string;
-  cantidad: string;
-  /** Suma de lo que sale del saldo. Es dinero nuevo comprometido. */
-  totalComprometido: string;
-  entradas: EntradaMargenIpc[];
-  descartes: DescartePlanIpc[];
-  creadoEn: string;
-}
+/* ---------- apalancamiento ---------- */
 
 export interface PeticionApalancamientoIpc {
   simbolo: string;
@@ -564,20 +497,19 @@ export interface PeticionesIpc {
     planId: string,
     soloEstos?: { cuentaId: string; lado: Lado }[]
   ) => Promise<Lote>;
-  /** Calcula a que precio queda el Take Profit de cada posicion. No coloca nada. */
-  'tp:planificar': (peticion: PeticionTakeProfitIpc) => Promise<PlanTakeProfitIpc>;
-  'tp:ejecutar': (
-    planId: string,
-    soloEstos?: { cuentaId: string; lado: Lado }[]
-  ) => Promise<Lote>;
+  /*
+   * No hay `tp:planificar` ni `margen:planificar`, y es deliberado.
+   *
+   * El Take Profit y el margen adicional viajan dentro de `apertura:planificar`
+   * y solo ahi. Tuvieron canal propio hasta el 26/08/2026; mientras lo tuvieron,
+   * la misma cantidad se podia enviar dos veces sobre la misma posicion -una con
+   * la apertura y otra por el canal suelto-, y `set-margin` no lleva
+   * identificador que lo impida. Quitar el boton no bastaba: mientras el canal
+   * exista, un fallo de la pantalla puede llamarlo. Ver `PlanKind`.
+   */
   /** Averigua que Take Profit hay puesto en cada casilla. No quita nada. */
   'tp:planificar-quitar': (peticion: PeticionQuitarTpIpc) => Promise<PlanQuitarTpIpc>;
   'tp:ejecutar-quitar': (
-    planId: string,
-    soloEstos?: { cuentaId: string; lado: Lado }[]
-  ) => Promise<Lote>;
-  'margen:planificar': (peticion: PeticionMargenIpc) => Promise<PlanMargenIpc>;
-  'margen:ejecutar': (
     planId: string,
     soloEstos?: { cuentaId: string; lado: Lado }[]
   ) => Promise<Lote>;
@@ -637,12 +569,8 @@ export interface ApiPcb {
   aperturaEjecutar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
   cierrePlanificar(peticion: PeticionCierreIpc): Promise<PlanCierreIpc>;
   cierreEjecutar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
-  tpPlanificar(peticion: PeticionTakeProfitIpc): Promise<PlanTakeProfitIpc>;
   tpPlanificarQuitar(peticion: PeticionQuitarTpIpc): Promise<PlanQuitarTpIpc>;
-  tpEjecutar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
   tpEjecutarQuitar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
-  margenPlanificar(peticion: PeticionMargenIpc): Promise<PlanMargenIpc>;
-  margenEjecutar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
   apalancamientoPlanificar(peticion: PeticionApalancamientoIpc): Promise<PlanApalancamientoIpc>;
   apalancamientoEjecutar(
     planId: string,

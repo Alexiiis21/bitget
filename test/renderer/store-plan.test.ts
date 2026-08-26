@@ -66,15 +66,12 @@ vi.mock('@/services/panel-service', () => ({
       planificaciones += 1;
       return planDevuelto;
     },
-    planTakeProfit: async () => {
-      planificaciones += 1;
-      return planDevuelto;
-    },
+    /*
+     * No hay `planTakeProfit` ni `planMargin`, y que falten es parte de lo que
+     * se prueba: si el store volviera a llamarlos, esto reventaria en vez de
+     * pasar en silencio.
+     */
     planRemoveTakeProfit: async () => {
-      planificaciones += 1;
-      return planDevuelto;
-    },
-    planMargin: async () => {
       planificaciones += 1;
       return planDevuelto;
     },
@@ -154,7 +151,7 @@ beforeEach(() => {
   pasoValido = true;
   planDevuelto = plan('open', 3);
   resultado = { label: 'Prueba', ok: 3, skipped: 0, failures: [], undetermined: [] };
-  usarPanel.setState({ plan: null, batch: null, cola: [], pinPaso: '', errorPaso: '', intentosPaso: 0, avisos: [] });
+  usarPanel.setState({ plan: null, batch: null, pinPaso: '', errorPaso: '', intentosPaso: 0, avisos: [] });
   prepararSeleccion();
 });
 
@@ -281,18 +278,18 @@ describe('la contraseña de paso, al abrir y al cerrar', () => {
   });
 
   /*
-   * Las otras cuatro no la piden: ajustar el Take Profit, el margen o el
-   * apalancamiento no realiza ningun resultado, y pedirla en cada ajuste la
-   * convertiria en un tramite que se teclea sin leer.
+   * Las otras dos no la piden: quitar el Take Profit y fijar el apalancamiento
+   * no realizan ningun resultado, y pedirla en cada ajuste la convertiria en un
+   * tramite que se teclea sin leer.
    */
-  it('el Take Profit no pide contraseña de paso', async () => {
+  it('el apalancamiento no pide contraseña de paso', async () => {
     pasoValido = false;
-    planDevuelto = plan('tp', 2);
+    planDevuelto = plan('leverage', 2);
 
-    await usarPanel.getState().planear('tp');
+    await usarPanel.getState().planear('leverage');
     await usarPanel.getState().confirmarPlan();
 
-    expect(enviados).toEqual([{ planId: 'plan_tp', only: undefined }]);
+    expect(enviados).toEqual([{ planId: 'plan_leverage', only: undefined }]);
   });
 });
 
@@ -441,14 +438,28 @@ describe('el modo de margen y el margen adicional', () => {
     expect(ultimaApertura?.marginMode).toBe('crossed');
   });
 
-  /* El margen adicional suelto -sobre una posicion ya abierta- sigue existiendo. */
-  it('el botón de margen adicional planifica su propia operación', async () => {
-    planDevuelto = plan('margin', 3);
+  /*
+   * Y no queda forma de reenviarlos por descuido.
+   *
+   * `planear('tp')` y `planear('margin')` ya no compilan -`PlanKind` no los
+   * tiene-, asi que esa mitad la vigila el compilador. La otra mitad es esta:
+   * tras abrir, los tres campos que salieron con la orden se vacian. Si se
+   * quedaran escritos, la siguiente apertura sobre las mismas casillas
+   * repetiria el Take Profit y volveria a comprometer el mismo margen.
+   */
+  it('tras abrir, los tres valores que salieron con la orden se vacían', async () => {
+    usarPanel.setState({ valoresFijos: false });
 
-    await usarPanel.getState().planear('margin');
+    await usarPanel.getState().planear('open');
+    usarPanel.getState().escribirPin('bg1');
+    await usarPanel.getState().confirmarPlan();
 
-    expect(planificaciones).toBe(1);
-    expect(usarPanel.getState().plan?.kind).toBe('margin');
+    const { valores } = usarPanel.getState();
+    expect(valores.tp).toBe('');
+    expect(valores.mgi).toBe('');
+    expect(valores.mga).toBe('');
+    /* El apalancamiento no: el operador repite el mismo y no salió con la orden. */
+    expect(valores.ap).toBe('10');
   });
 });
 

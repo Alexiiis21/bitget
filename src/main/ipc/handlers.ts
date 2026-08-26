@@ -20,9 +20,7 @@ import type {
   PlanAperturaIpc,
   PlanApalancamientoIpc,
   PlanCierreIpc,
-  PlanMargenIpc,
-  PlanQuitarTpIpc,
-  PlanTakeProfitIpc
+  PlanQuitarTpIpc
 } from '@shared/ipc-contract';
 import type { FilaMonitor } from '@shared/types';
 import { UNIDAD_OPERACION } from '../domain/dimension-orden';
@@ -30,9 +28,7 @@ import type {
   PlanApalancamiento,
   PlanApertura,
   PlanCierre,
-  PlanMargen,
-  PlanQuitarTakeProfit,
-  PlanTakeProfit
+  PlanQuitarTakeProfit
 } from '../execution/motor-lotes';
 import { carpetaDatos, esPortable } from '../storage/paths';
 import type { Instancia } from '../storage/instancia';
@@ -151,31 +147,6 @@ const aVistaCierre = (plan: PlanCierre): PlanCierreIpc => ({
   creadoEn: plan.creadoEn
 });
 
-/** El plan de Take Profit, con los precios concretos que el operador aprueba. */
-const aVistaTp = (plan: PlanTakeProfit): PlanTakeProfitIpc => ({
-  id: plan.id,
-  mercado: plan.mercado.clave,
-  simbolo: plan.simbolo,
-  porcentaje: plan.porcentaje,
-  entradas: plan.entradas.map((e) => ({
-    cuentaId: e.cuentaId,
-    etiqueta: e.etiqueta,
-    lado: e.lado,
-    precioDisparo: e.precioDisparo,
-    precioEntrada: e.precioEntrada,
-    apalancamiento: e.apalancamiento,
-    movimientoPorcentaje: e.movimientoPorcentaje
-  })),
-  descartes: plan.descartes.map((d) => ({
-    cuentaId: d.cuentaId,
-    etiqueta: d.etiqueta,
-    lado: d.lado,
-    motivo: d.motivo,
-    mensaje: d.mensaje
-  })),
-  creadoEn: plan.creadoEn
-});
-
 /** Lo que hay puesto ahora, para que el operador apruebe quitar algo concreto. */
 const aVistaQuitarTp = (plan: PlanQuitarTakeProfit): PlanQuitarTpIpc => ({
   id: plan.id,
@@ -206,26 +177,7 @@ const descartesDe = (plan: { descartes: PlanApertura['descartes'] }) =>
     mensaje: d.mensaje
   }));
 
-const aVistaMargen = (plan: PlanMargen): PlanMargenIpc => ({
-  id: plan.id,
-  mercado: plan.mercado.clave,
-  monedaMargen: plan.mercado.marginCoin,
-  simbolo: plan.simbolo,
-  cantidad: plan.cantidad,
-  totalComprometido: importe(plan.totalComprometido),
-  entradas: plan.entradas.map((e) => ({
-    cuentaId: e.cuentaId,
-    etiqueta: e.etiqueta,
-    lado: e.lado,
-    cantidad: e.cantidad,
-    margenActual: importe(e.margenActual),
-    margenResultante: importe(e.margenResultante)
-  })),
-  descartes: descartesDe(plan),
-  creadoEn: plan.creadoEn
-});
-
-const aVistaApalancamiento = (plan: PlanApalancamiento): PlanApalancamientoIpc => ({
+const aVistaApalancamiento =(plan: PlanApalancamiento): PlanApalancamientoIpc => ({
   id: plan.id,
   mercado: plan.mercado.clave,
   simbolo: plan.simbolo,
@@ -291,19 +243,6 @@ const esquemaApertura = z.object({
 const esquemaCierre = z.object({
   simbolo: z.string().min(1).max(32),
   objetivos: z.array(esquemaObjetivo).min(1).max(500)
-});
-
-/* El Take Profit lleva porcentaje; el precio lo calcula el proceso principal. */
-const esquemaTp = z.object({
-  simbolo: z.string().min(1).max(32),
-  objetivos: z.array(esquemaObjetivo).min(1).max(500),
-  porcentaje: z.string().min(1).max(16)
-});
-
-const esquemaMargen = z.object({
-  simbolo: z.string().min(1).max(32),
-  objetivos: z.array(esquemaObjetivo).min(1).max(500),
-  cantidad: z.string().min(1).max(32)
 });
 
 const esquemaApalancamiento = z.object({
@@ -394,20 +333,14 @@ export function registrarIpc(sesion: Sesion, instancia: Instancia, mercado: 'rea
     )
   );
 
-  ipcMain.handle('tp:planificar', async (_e, peticion: unknown) => {
-    const plan = await sesion.planificarTakeProfit(esquemaTp.parse(peticion));
-    return aVistaTp(plan);
-  });
-
-  ipcMain.handle('tp:ejecutar', (_e, planId: unknown, soloEstos: unknown) =>
-    sesion.ejecutarTakeProfit(
-      esquemaId.parse(planId),
-      soloEstos === undefined || soloEstos === null
-        ? undefined
-        : z.array(esquemaObjetivo).parse(soloEstos)
-    )
-  );
-
+  /*
+   * No hay `tp:planificar` ni `margen:planificar`.
+   *
+   * Los dos existieron hasta el 26/08/2026 y se retiraron enteros -canal,
+   * esquema y metodo de la sesion-, no solo su boton: el Take Profit y el
+   * margen adicional viajan dentro de `apertura:planificar`, y un canal que
+   * sigue existiendo se puede seguir llamando. Ver `PeticionesIpc`.
+   */
   ipcMain.handle('tp:planificar-quitar', async (_e, peticion: unknown) => {
     const plan = await sesion.planificarQuitarTakeProfit(esquemaCierre.parse(peticion));
     return aVistaQuitarTp(plan);
@@ -415,20 +348,6 @@ export function registrarIpc(sesion: Sesion, instancia: Instancia, mercado: 'rea
 
   ipcMain.handle('tp:ejecutar-quitar', (_e, planId: unknown, soloEstos: unknown) =>
     sesion.ejecutarQuitarTakeProfit(
-      esquemaId.parse(planId),
-      soloEstos === undefined || soloEstos === null
-        ? undefined
-        : z.array(esquemaObjetivo).parse(soloEstos)
-    )
-  );
-
-  ipcMain.handle('margen:planificar', async (_e, peticion: unknown) => {
-    const plan = await sesion.planificarMargen(esquemaMargen.parse(peticion));
-    return aVistaMargen(plan);
-  });
-
-  ipcMain.handle('margen:ejecutar', (_e, planId: unknown, soloEstos: unknown) =>
-    sesion.ejecutarMargen(
       esquemaId.parse(planId),
       soloEstos === undefined || soloEstos === null
         ? undefined

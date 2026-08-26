@@ -198,15 +198,13 @@ export interface EstadoPanel {
   planCargando: boolean;
   /** Enviando el lote aprobado. Bloquea un segundo clic sobre el mismo plan. */
   enviando: boolean;
-  /**
-   * Operaciones encadenadas que faltan por aprobar.
+  /*
+   * No hay cola de operaciones encadenadas.
    *
-   * «Aplicar todo» son tres operaciones distintas, no una: Take Profit, margen
-   * y apalancamiento van a Bitget por caminos separados. Se aprueban de una en
-   * una, con su plan a la vista, porque juntarlas en una sola confirmación
-   * significaría aprobar a ciegas dos de las tres.
+   * La hubo para «Aplicar todo», que planificaba Take Profit, margen y
+   * apalancamiento uno detrás de otro. Los dos primeros ya no existen sueltos
+   * —salen dentro de la apertura— y el tercero solo no es una cadena.
    */
-  cola: PlanKind[];
 
   /* ---- seguridad ---- */
   seguridadAbierta: boolean;
@@ -249,14 +247,11 @@ export interface EstadoPanel {
 
   /** Calcula qué pasaría. No envía nada. */
   planear: (kind: PlanKind) => Promise<void>;
-  /** Encadena varias operaciones, aprobándolas de una en una. */
-  planearVarios: (kinds: PlanKind[]) => Promise<void>;
   /** Aprueba el plan en pantalla y lo envía. */
   confirmarPlan: () => Promise<void>;
   /** Envía un plan, opcionalmente acotado a unas casillas: el reintento. */
   enviarPlan: (plan: BatchPlan, soloEstos?: BatchTarget[]) => Promise<void>;
   cancelarPlan: () => void;
-  reintentarMargenCuenta: (accountId: string) => Promise<void>;
   cerrarLote: () => void;
   escribirPin: (v: string) => void;
 
@@ -290,9 +285,7 @@ export interface EstadoPanel {
 const TITULOS: Record<PlanKind, string> = {
   open: 'Abrir posiciones',
   close: 'Cerrar posiciones',
-  tp: 'Take Profit',
   'tp-remove': 'Quitar Take Profit',
-  margin: 'Margen adicional',
   leverage: 'Apalancamiento'
 };
 
@@ -300,13 +293,13 @@ const TITULOS: Record<PlanKind, string> = {
  * Qué campo del formulario necesita cada operación, o `null` si ninguno.
  *
  * Cerrar y quitar el Take Profit no llevan valor: actúan sobre lo que ya hay.
+ * El Take Profit y el margen adicional tampoco tienen entrada propia: van
+ * dentro de la apertura, y su campo lo lee `planear('open')`.
  */
 const CAMPO_DE: Record<PlanKind, keyof ValoresHerramientas | null> = {
   open: 'mgi',
   close: null,
-  tp: 'tp',
   'tp-remove': null,
-  margin: 'mga',
   leverage: 'ap'
 };
 
@@ -347,17 +340,10 @@ export const PIDE_PASO = new Set<PlanKind>(['open', 'close']);
  * descuido la cantidad del anterior.
  */
 const LIMPIA_TRAS: Record<PlanKind, Partial<ValoresHerramientas>> = {
-  /*
-   * La apertura limpia también el Take Profit y el margen adicional, porque los
-   * dos salieron con ella. Dejarlos escritos invitaría a pulsar además sus
-   * botones sobre las mismas posiciones, que es ponerles el Take Profit dos
-   * veces y comprometer el doble de margen del que se aprobó.
-   */
+  /* Los tres campos de la apertura salieron con ella; no se heredan al siguiente lote. */
   open: { mgi: '', tp: '', mga: '' },
   close: {},
-  tp: { tp: '' },
   'tp-remove': {},
-  margin: { mga: '' },
   leverage: {}
 };
 
@@ -409,7 +395,6 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   plan: null,
   planCargando: false,
   enviando: false,
-  cola: [],
 
   seguridadAbierta: false,
   etapaSeguridad: 'maestra',
@@ -776,13 +761,9 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
           })
         : kind === 'close'
           ? panelService.planClose({ targets, assetId: activoId })
-          : kind === 'tp'
-            ? panelService.planTakeProfit({ targets, assetId: activoId, percent: valores.tp })
-            : kind === 'tp-remove'
-              ? panelService.planRemoveTakeProfit({ targets, assetId: activoId })
-              : kind === 'margin'
-                ? panelService.planMargin({ targets, assetId: activoId, amount: valores.mga })
-                : panelService.planLeverage({ targets, assetId: activoId, leverage: apalancamiento }));
+          : kind === 'tp-remove'
+            ? panelService.planRemoveTakeProfit({ targets, assetId: activoId })
+            : panelService.planLeverage({ targets, assetId: activoId, leverage: apalancamiento }));
 
       /*
        * Un plan sin ninguna casilla viable no se enseña como plan: sería un
@@ -877,74 +858,13 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       if (!get().valoresFijos) {
         set((s) => ({ valores: { ...s.valores, ...LIMPIA_TRAS[plan.kind] }, limitPrice: plan.kind === 'open' ? '' : s.limitPrice }));
       }
-
-      /* Si venía de «aplicar todo», se planifica la siguiente y se aprueba igual. */
-      const [siguiente, ...resto] = get().cola;
-      if (siguiente !== undefined && soloEstos === undefined) {
-        set({ cola: resto });
-        await get().planear(siguiente);
-      }
     } catch (e) {
       set({ enviando: false, mensaje: '' });
       avisar('error', `No se pudo enviar ${plan.title.toLowerCase()}`, textoDeError(e), `PCB · ${plan.title}`);
     }
   },
 
-  /**
-   * Encadena varias operaciones sobre la misma selección.
-   *
-   * Solo entran las que tienen valor escrito: «aplicar todo» con el margen en
-   * blanco no debe preguntar por un margen vacío.
-   */
-  planearVarios: async (kinds) => {
-    const { valores, avisar } = get();
-    const conValor = kinds.filter((k) => {
-      const campo = CAMPO_DE[k];
-      return campo === null || valores[campo].trim() !== '';
-    });
-
-    if (conValor.length === 0) {
-      avisar('aviso', 'No hay nada que aplicar', 'Escriba al menos un valor —Take Profit, margen adicional o apalancamiento— antes de pulsar «Aplicar todo».', 'PCB · Aplicar todo');
-      return;
-    }
-
-    set({ cola: conValor.slice(1) });
-    await get().planear(conValor[0] as PlanKind);
-  },
-
-  /* Cancelar una operación de la cadena cancela la cadena entera: seguir con
-   * las siguientes después de un «no» sería justo lo contrario de lo pedido. */
-  cancelarPlan: () => set({ plan: null, cola: [], pinPaso: '', errorPaso: '', intentosPaso: 0 }),
-
-  /**
-   * Reenvía margen a las posiciones críticas de una cuenta principal.
-   *
-   * Pasa por el mismo plan que todo lo demás: es dinero nuevo saliendo del
-   * saldo y no puede salir sin que alguien vea cuánto y a dónde.
-   */
-  reintentarMargenCuenta: async (accountId) => {
-    const { cuentas, posiciones, avisar, activoId, valores } = get();
-    const cuenta = cuentas.find((c) => c.id === accountId);
-    if (!cuenta) return;
-
-    const subIds = new Set(cuenta.subAccounts.map((s) => s.id));
-    const targets = posiciones
-      .filter((p) => p.marginCritical && subIds.has(p.subAccountId))
-      .map((p) => ({ subAccountId: p.subAccountId, side: p.side }));
-
-    if (targets.length === 0) return;
-
-    try {
-      const plan = await panelService.planMargin({ targets, assetId: activoId, amount: valores.mga.trim() || '50' });
-      if (plan.entries.length === 0) {
-        avisar('aviso', 'No se pudo agregar margen', plan.discards[0]?.reason ?? 'Ninguna posición admite margen adicional.', cuenta.name);
-        return;
-      }
-      set({ plan });
-    } catch (e) {
-      avisar('error', 'No se pudo preparar el margen', textoDeError(e), cuenta.name);
-    }
-  },
+  cancelarPlan: () => set({ plan: null, pinPaso: '', errorPaso: '', intentosPaso: 0 }),
 
   cerrarLote: () => set({ batch: null, reintentarFallidas: null }),
 

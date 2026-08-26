@@ -112,12 +112,14 @@ hoy: estaban en cruzado, y en cruzado Bitget no admite «agregar margen».
 - [ ] **E4.** **Cancelar**. No se envía nada.
 - [ ] **E5.** Repetir y confirmar con la **contraseña de paso**. Tres intentos fallidos cancelan
       la operación sin enviar. *Debe verse:* el informe por casilla.
-- [ ] **E6.** Escribir un **Take Profit %** y aplicarlo. El diálogo enseña el **precio de
-      disparo** calculado, no el porcentaje.
+- [ ] **E6.** El **Take Profit %** y el **margen adicional** salen con la orden de E5, no aparte:
+      la confirmación los enseña —precio de disparo calculado, no porcentaje— y el informe trae
+      una fila por cada uno (`Sub-01`, `Sub-01 · TP`, `Sub-01 · MGA`). *No hay botón para
+      aplicarlos sobre una posición ya abierta: enviarlos dos veces era posible y pasó.*
 - [ ] **E7.** Pulsar **Quitar Take Profit**. El diálogo enseña **cuál va a quitar**, con su
       precio. *Esta es la función que pediste el 18 de agosto.*
-- [ ] **E8.** Escribir un **margen adicional** y aplicarlo. El diálogo enseña el margen actual y
-      en cuánto quedaría.
+- [ ] **E8.** Escribir un **margen adicional** con el modo en **Cruzado** y pulsar *Abrir*: **no
+      se abre nada** y se dice por qué. En cruzado el margen sale del saldo total de la cuenta.
 - [ ] **E9.** Cambiar el **apalancamiento** y aplicarlo.
 - [ ] **E10.** Pulsar **Cerrar**. El diálogo enseña qué cantidad se cierra en cada casilla, y
       pide la **contraseña de paso** igual que la apertura: cerrar realiza el resultado y no se

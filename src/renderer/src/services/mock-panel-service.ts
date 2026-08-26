@@ -31,7 +31,6 @@ import type {
   ClosedPosition,
   CloseRequest,
   LeverageRequest,
-  MarginRequest,
   OpenRequest,
   PlanDiscard,
   PlanEntry,
@@ -40,7 +39,6 @@ import type {
   PositionSnapshot,
   Side,
   SystemInfo,
-  TpRequest,
   UnlockResult,
   ValidationResult
 } from '@shared/domain/panel-view';
@@ -547,27 +545,6 @@ export class MockPanelService implements PanelService {
     return { label: etiqueta, ok, skipped: omitidas, failures: fails, undetermined: [] };
   }
 
-  private async ponerTp(req: TpRequest): Promise<BatchResult> {
-    return this.aplicarSobrePosicion('Take Profit', req.targets, (p) => {
-      const dir = p.side === 'long' ? 1 : -1;
-      const porcentaje = Number.parseFloat(req.percent) / 100;
-      const entrada = Number.parseFloat(p.entryPrice);
-      return {
-        ...p,
-        takeProfitPrice: dec(entrada * (1 + dir * porcentaje), 6),
-        actions: { ...p.actions, tp: true, tpDisplay: `${req.percent}%` }
-      };
-    });
-  }
-
-  private async agregarMargen(req: MarginRequest): Promise<BatchResult> {
-    return this.aplicarSobrePosicion('Margen adicional', req.targets, (p) => ({
-      ...p,
-      marginCritical: false,
-      actions: { ...p.actions, mg: true, mgDisplay: req.amount }
-    }));
-  }
-
   private async fijarApalancamiento(req: LeverageRequest): Promise<BatchResult> {
     return this.aplicarSobrePosicion('Apalancamiento', req.targets, (p) => ({
       ...p,
@@ -665,25 +642,6 @@ export class MockPanelService implements PanelService {
     );
   }
 
-  async planTakeProfit(req: TpRequest): Promise<BatchPlan> {
-    await latencia(180, 220);
-    return this.planificar(
-      'tp',
-      'Poner Take Profit',
-      `${req.percent}% de ganancia sobre el margen inicial de cada posición`,
-      req.targets,
-      (t) => {
-        const posicion = this.posicionDe(t);
-        if (!posicion) return null;
-        const dir = t.side === 'long' ? 1 : -1;
-        const entrada = Number.parseFloat(posicion.entryPrice);
-        const objetivo = entrada * (1 + (dir * Number.parseFloat(req.percent)) / 100 / posicion.leverage);
-        return `TP a ${dec(objetivo, 6)} · entrada ${posicion.entryPrice} · ${posicion.leverage}x`;
-      },
-      (solo) => this.ponerTp({ ...req, targets: solo ?? req.targets })
-    );
-  }
-
   async planRemoveTakeProfit(req: CloseRequest): Promise<BatchPlan> {
     await latencia(180, 220);
     return this.planificar(
@@ -701,23 +659,6 @@ export class MockPanelService implements PanelService {
           takeProfitPrice: null,
           actions: { ...posicion.actions, tp: false, tpDisplay: '' }
         }))
-    );
-  }
-
-  async planMargin(req: MarginRequest): Promise<BatchPlan> {
-    await latencia(180, 220);
-    return this.planificar(
-      'margin',
-      'Agregar margen',
-      `${req.amount} por casilla`,
-      req.targets,
-      (t) => {
-        const posicion = this.posicionDe(t);
-        if (!posicion) return null;
-        const resultante = Number.parseFloat(posicion.initialMarginAccum) + Number.parseFloat(req.amount);
-        return `margen ${posicion.initialMarginAccum} → ${dec(resultante, 2)}`;
-      },
-      (solo) => this.agregarMargen({ ...req, targets: solo ?? req.targets })
     );
   }
 

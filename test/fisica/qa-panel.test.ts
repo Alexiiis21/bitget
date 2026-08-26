@@ -174,15 +174,32 @@ describe.skipIf(!hayCredenciales)('QA del panel contra Bitget', () => {
     expect(plan.entradas.length + plan.descartes.length).toBe(1);
   });
 
-  it('paso 6 · abre de verdad', async () => {
+  /*
+   * Abrir es ahora **una sola operacion con tres efectos**: la orden, su Take
+   * Profit y su margen adicional. Desde el 26/08/2026 no hay otra forma de
+   * ponerlos: los canales sueltos se retiraron porque convivir con la apertura
+   * que ya los lleva dentro permitia enviarlos dos veces sobre la misma
+   * posicion. Ver `PlanKind`.
+   *
+   * Por eso este paso comprueba las tres filas del informe -`Sub-01`,
+   * `Sub-01 · TP` y `Sub-01 · MGA`- y no solo que la orden entrara.
+   */
+  it('paso 6 · abre de verdad, con su Take Profit y su margen adicional', async () => {
     const plan = await sesion.planificarApertura({
       simbolo: activoId,
       objetivos: objetivos(),
       margenInicial: MARGEN,
       apalancamiento: APALANCAMIENTO,
       precioLimite: null,
-      modoMargen: 'isolated'
+      modoMargen: 'isolated',
+      takeProfitPorcentaje: TP_PORCENTAJE,
+      margenAdicional: MARGEN_EXTRA
     });
+
+    console.log(`
+  TP al ${TP_PORCENTAJE}% (aprox.) .. ${plan.entradas[0]?.precioDisparoTp ?? '—'}
+  margen adicional ..... ${plan.margenAdicional ?? '—'}`);
+
     if (plan.entradas.length === 0) {
       console.log(`\n  sin casillas viables: ${plan.descartes[0]?.mensaje ?? ''}`);
       expect(plan.descartes.length).toBe(1);
@@ -201,25 +218,17 @@ describe.skipIf(!hayCredenciales)('QA del panel contra Bitget', () => {
           'Ver docs/00-fase-4-cierre.md sección 4.'
       );
     }
-    expect(resumirLote(lote).exito).toBe(1);
-  });
 
-  it('paso 7 · pone el Take Profit', async () => {
-    const plan = await sesion.planificarTakeProfit({
-      simbolo: activoId,
-      objetivos: objetivos(),
-      porcentaje: TP_PORCENTAJE
-    });
-
+    const filaTp = lote.jobs.find((j) => j.etiqueta.endsWith('· TP'));
+    const filaMga = lote.jobs.find((j) => j.etiqueta.endsWith('· MGA'));
     console.log(`
-  TP al ${TP_PORCENTAJE}% ........... ${plan.entradas[0]?.precioDisparo ?? '—'}
-  entrada .............. ${plan.entradas[0]?.precioEntrada ?? '—'}`);
+  take profit .......... ${filaTp?.estado ?? 'sin fila'} · ${filaTp?.mensaje ?? ''}
+  margen adicional ..... ${filaMga?.estado ?? 'sin fila'} · ${filaMga?.mensaje ?? ''}`);
 
-    if (plan.entradas.length === 0) {
-      expect(plan.descartes.length).toBe(1);
-      return;
-    }
-    contar('take profit', await sesion.ejecutarTakeProfit(plan.id));
+    /* Una fila por efecto: la apertura, su Take Profit y su margen. */
+    expect(filaTp?.estado).toBe('exito');
+    expect(filaMga?.estado).toBe('exito');
+    expect(lote.jobs.filter((j) => j.estado === 'exito')).toHaveLength(3);
   });
 
   /* La funcion que pidio el cliente el 18/08: operar sin Take Profit. */
@@ -236,28 +245,30 @@ describe.skipIf(!hayCredenciales)('QA del panel contra Bitget', () => {
   });
 
   /*
-   * El cliente marco el margen como lo mas critico. Su planificacion comprueba
-   * tres cosas antes de enviar -posicion, modo aislado y saldo- y aqui se ve
-   * cual de las tres impide la operacion cuando la impide.
+   * El cliente marco el margen como lo mas critico, y su comprobacion se movio
+   * al paso 6: ahora sale con la apertura. Aqui queda lo que **no** debe poder
+   * hacerse -pedir margen adicional en cruzado-, porque es la garantia que pidio
+   * con estas palabras: «si no se puede agregar el margen adicional, no abrir la
+   * operacion». El plan entero se rechaza antes de enviar nada.
    */
-  it('paso 9 · agrega margen, o dice exactamente por que no puede', async () => {
-    const plan = await sesion.planificarMargen({
-      simbolo: activoId,
-      objetivos: objetivos(),
-      cantidad: MARGEN_EXTRA
+  it('paso 9 · en cruzado con margen adicional no abre nada, y lo dice', async () => {
+    let motivo = '';
+    await expect(
+      sesion.planificarApertura({
+        simbolo: activoId,
+        objetivos: objetivos(),
+        margenInicial: MARGEN,
+        apalancamiento: APALANCAMIENTO,
+        precioLimite: null,
+        modoMargen: 'crossed',
+        margenAdicional: MARGEN_EXTRA
+      })
+    ).rejects.toSatisfy((e: unknown) => {
+      motivo = e instanceof Error ? e.message : String(e);
+      return /CRUZADO/.test(motivo);
     });
 
-    console.log(`
-  margen actual ........ ${plan.entradas[0]?.margenActual ?? '—'}
-  quedaria en .......... ${plan.entradas[0]?.margenResultante ?? '—'}
-  descartes ............ ${plan.descartes.map((d) => `${d.motivo}: ${d.mensaje}`).join(' | ') || 'ninguno'}`);
-
-    if (plan.entradas.length === 0) {
-      /* En cruzado Bitget no admite margen adicional: es un descarte legitimo. */
-      expect(plan.descartes.length).toBe(1);
-      return;
-    }
-    contar('agregar margen', await sesion.ejecutarMargen(plan.id));
+    console.log(`\n  rechazado ............ ${motivo}`);
   });
 
   it('paso 10 · cierra la posicion de prueba', async () => {

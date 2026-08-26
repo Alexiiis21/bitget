@@ -30,12 +30,10 @@ import type {
   ClosedPosition,
   CloseRequest,
   LeverageRequest,
-  MarginRequest,
   OpenRequest,
   PlanDiscard,
   PlanKind,
   SystemInfo,
-  TpRequest,
   UnlockResult,
   ValidationResult
 } from '@shared/domain/panel-view';
@@ -98,9 +96,7 @@ const EJECUTORES: Record<
 > = {
   open: (id, solo) => window.pcb.aperturaEjecutar(id, solo),
   close: (id, solo) => window.pcb.cierreEjecutar(id, solo),
-  tp: (id, solo) => window.pcb.tpEjecutar(id, solo),
   'tp-remove': (id, solo) => window.pcb.tpEjecutarQuitar(id, solo),
-  margin: (id, solo) => window.pcb.margenEjecutar(id, solo),
   leverage: (id, solo) => window.pcb.apalancamientoEjecutar(id, solo)
 };
 
@@ -348,31 +344,6 @@ export class IpcPanelService implements PanelService {
     };
   }
 
-  async planTakeProfit(req: TpRequest): Promise<BatchPlan> {
-    const plan = await window.pcb.tpPlanificar({
-      simbolo: (await this.activoDe(req.assetId)).simbolo,
-      objetivos: req.targets.map(aObjetivo),
-      porcentaje: req.percent
-    });
-
-    return {
-      kind: 'tp',
-      id: plan.id,
-      title: 'Poner Take Profit',
-      summary: `${req.percent}% de ganancia sobre el margen inicial de cada posición`,
-      reference: null,
-      entries: plan.entradas.map((e) => ({
-        subAccountId: e.cuentaId,
-        side: e.lado,
-        label: e.etiqueta,
-        detail:
-          `TP a ${e.precioDisparo} · entrada ${e.precioEntrada} · ${e.apalancamiento}x · ` +
-          `el precio se mueve ${e.movimientoPorcentaje}%`
-      })),
-      discards: aDescartes(plan.descartes)
-    };
-  }
-
   async planRemoveTakeProfit(req: CloseRequest): Promise<BatchPlan> {
     const plan = await window.pcb.tpPlanificarQuitar({
       simbolo: (await this.activoDe(req.assetId)).simbolo,
@@ -390,31 +361,6 @@ export class IpcPanelService implements PanelService {
         side: e.lado,
         label: e.etiqueta,
         detail: `se quita el Take Profit puesto en ${e.precioDisparo}`
-      })),
-      discards: aDescartes(plan.descartes)
-    };
-  }
-
-  async planMargin(req: MarginRequest): Promise<BatchPlan> {
-    const plan = await window.pcb.margenPlanificar({
-      simbolo: (await this.activoDe(req.assetId)).simbolo,
-      objetivos: req.targets.map(aObjetivo),
-      cantidad: req.amount
-    });
-
-    return {
-      kind: 'margin',
-      id: plan.id,
-      title: 'Agregar margen',
-      summary:
-        `${req.amount} ${plan.monedaMargen} por casilla · ` +
-        `compromete ${plan.totalComprometido} ${plan.monedaMargen} en total`,
-      reference: null,
-      entries: plan.entradas.map((e) => ({
-        subAccountId: e.cuentaId,
-        side: e.lado,
-        label: e.etiqueta,
-        detail: `margen ${e.margenActual} → ${e.margenResultante} ${plan.monedaMargen}`
       })),
       discards: aDescartes(plan.descartes)
     };

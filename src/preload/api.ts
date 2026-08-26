@@ -12,10 +12,8 @@ import type {
   PlanAperturaIpc,
   PlanApalancamientoIpc,
   PlanCierreIpc,
-  PlanMargenIpc,
   ActivoIpc,
   PlanQuitarTpIpc,
-  PlanTakeProfitIpc,
   ResultadoAlta,
   ResultadoPrueba,
   ResultadoVault
@@ -66,18 +64,10 @@ export const api: ApiPcb = {
     ipcRenderer.invoke('cierre:planificar', peticion) as Promise<PlanCierreIpc>,
   cierreEjecutar: (planId, soloEstos) =>
     ipcRenderer.invoke('cierre:ejecutar', planId, soloEstos) as Promise<Lote>,
-  tpPlanificar: (peticion) =>
-    ipcRenderer.invoke('tp:planificar', peticion) as Promise<PlanTakeProfitIpc>,
   tpPlanificarQuitar: (peticion) =>
     ipcRenderer.invoke('tp:planificar-quitar', peticion) as Promise<PlanQuitarTpIpc>,
-  tpEjecutar: (planId, soloEstos) =>
-    ipcRenderer.invoke('tp:ejecutar', planId, soloEstos) as Promise<Lote>,
   tpEjecutarQuitar: (planId, soloEstos) =>
     ipcRenderer.invoke('tp:ejecutar-quitar', planId, soloEstos) as Promise<Lote>,
-  margenPlanificar: (peticion) =>
-    ipcRenderer.invoke('margen:planificar', peticion) as Promise<PlanMargenIpc>,
-  margenEjecutar: (planId, soloEstos) =>
-    ipcRenderer.invoke('margen:ejecutar', planId, soloEstos) as Promise<Lote>,
   apalancamientoPlanificar: (peticion) =>
     ipcRenderer.invoke('apalancamiento:planificar', peticion) as Promise<PlanApalancamientoIpc>,
   apalancamientoEjecutar: (planId, soloEstos) =>
