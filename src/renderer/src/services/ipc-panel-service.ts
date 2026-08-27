@@ -288,17 +288,22 @@ export class IpcPanelService implements PanelService {
         `${plan.modoMargen === 'isolated' ? 'AISLADO' : 'CRUZADO'} · ` +
         (req.orderType === 'limit' ? `límite ${req.limitPrice ?? '—'}` : 'a mercado') +
         /*
-         * El Take Profit y el margen adicional salen con esta misma orden, así
-         * que se anuncian en el resumen y no como una nota al margen: son parte
-         * de lo que se aprueba.
+         * El Take Profit y el margen adicional se enumeran como un dato más de
+         * la orden, sin repetir en cada uno que sale con ella.
+         *
+         * Lo repetían —«con la misma orden», dos veces en la misma línea—
+         * mientras existía la otra vía, la de aplicarlos sueltos, y entonces
+         * decir cuál era la que iba a usarse valía la pena. Ya no existe esa
+         * otra vía: todo lo de esta línea sale con esta orden, y decirlo dos
+         * veces solo alargaba el resumen hasta hacerlo saltar de línea.
          */
         (plan.takeProfitPorcentaje === null
           ? ''
-          : ` · Take Profit ${plan.takeProfitPorcentaje}%, con la misma orden`) +
+          : ` · Take Profit ${plan.takeProfitPorcentaje}%`) +
         (plan.margenAdicional === null
           ? ''
           : ` · margen adicional ${plan.margenAdicional} ${moneda} por casilla ` +
-            `(${plan.margenAdicionalTotal} ${moneda} en total), con la misma orden`),
+            `(${plan.margenAdicionalTotal} en total)`),
       reference: plan.precioReferencia,
       entries: plan.entradas.map((e) => ({
         subAccountId: e.cuentaId,

@@ -618,10 +618,10 @@ export class MockPanelService implements PanelService {
         `${req.orderType === 'limit' ? `límite ${req.limitPrice ?? '—'}` : 'a mercado'}` +
         (req.takeProfitPercent === null
           ? ''
-          : ` · Take Profit ${req.takeProfitPercent}%, con la misma orden`) +
+          : ` · Take Profit ${req.takeProfitPercent}%`) +
         (req.additionalMargin === null
           ? ''
-          : ` · margen adicional ${req.additionalMargin} USDT por casilla, con la misma orden`),
+          : ` · margen adicional ${req.additionalMargin} USDT por casilla`),
       req.targets,
       () =>
         `${dec(nocional / precio, 6)} ${req.assetId} · margen real ${dec(margen, 2)} USDT · ` +

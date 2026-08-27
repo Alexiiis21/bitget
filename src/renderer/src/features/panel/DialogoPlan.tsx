@@ -94,14 +94,17 @@ export function DialogoPlan() {
               Casillas <span style={valorMono}>{plan.entries.length}</span>
             </span>
             {/*
-              * El Take Profit sale **con esta misma orden** desde el 25/08/2026.
+              * El Take Profit y el margen adicional se enseñan sin coletilla.
               *
-              * Antes no: era un segundo plan con su segunda confirmación, y aquí
-              * se rotulaba «se pone aparte». El rótulo decía la verdad y aun así
-              * el operador leía el porcentaje dentro de la confirmación de abrir
-              * y daba por hecho que salía con ella —lo dijo en la reunión del 25
-              * de agosto—, de modo que quedaban posiciones sin protección
-              * creyendo que la tenían. Ahora sale de verdad, y el rótulo lo dice.
+              * La llevaron —«sale con esta orden»— mientras convivían con sus
+              * propios botones: entonces hacía falta decir cuál de las dos vías
+              * estaba a punto de usarse. Desde que son parte de la apertura y no
+              * hay otra forma de aplicarlos, la coletilla repetía en cada línea
+              * lo que el resumen de arriba ya dice, y llenaba de letra pequeña la
+              * pantalla donde menos sobra leer de más.
+              *
+              * El detalle sigue estando en el `title` de cada uno, para quien lo
+              * busque.
               */}
             {plan.kind === 'open' && (
               <span
@@ -109,17 +112,8 @@ export function DialogoPlan() {
                 title="El Take Profit se coloca con esta misma orden, en cuanto la posición queda abierta. El precio definitivo se calcula con el precio de entrada real de cada posición; el que se enseña en cada casilla es aproximado, calculado con el precio de referencia."
               >
                 Take Profit <span style={valorMono}>{tp.trim() === '' ? '—' : `${tp.trim()} %`}</span>
-                <span style={{ marginLeft: 6, fontSize: 10.5, color: T.texto3 }}>
-                  {tp.trim() === '' ? 'sin Take Profit' : 'sale con esta orden'}
-                </span>
               </span>
             )}
-            {/*
-              * El margen adicional sale con la orden desde el 26/08/2026, por lo
-              * mismo que el Take Profit: se escribe en el mismo formulario y en
-              * la misma pulsación. En cruzado no se llega hasta aquí —el plan se
-              * rechaza antes—, así que si aparece es que se va a agregar.
-              */}
             {plan.kind === 'open' && (
               <span
                 style={{ color: T.texto2 }}
@@ -127,9 +121,6 @@ export function DialogoPlan() {
               >
                 Margen adicional{' '}
                 <span style={valorMono}>{mga.trim() === '' ? '—' : mga.trim()}</span>
-                <span style={{ marginLeft: 6, fontSize: 10.5, color: T.texto3 }}>
-                  {mga.trim() === '' ? 'no se agrega' : 'sale con esta orden'}
-                </span>
               </span>
             )}
             {/*
