@@ -835,14 +835,26 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     const { avisar } = get();
     try {
       const r = await panelService.executePlan(plan, soloEstos);
+
+      /*
+       * Lo que de verdad se puede reenviar.
+       *
+       * Queda fuera lo indeterminado —reintentarlo a ciegas es lo único que
+       * puede duplicar una posición— y también las filas derivadas de la
+       * apertura: un «Sub-01 · TP» fallido comparte cuenta y lado con la
+       * apertura, así que reintentarlo reenviaba la orden entera y le colocaba
+       * un segundo Take Profit con identificadores nuevos. Ver
+       * `BatchFailure.retryable`.
+       */
+      const reintentables = r.failures.filter((f) => f.retryable);
+
       set({
         batch: r,
         enviando: false,
         mensaje: '',
-        /* Lo indeterminado queda fuera a propósito: reintentarlo a ciegas es lo único que puede duplicar. */
         reintentarFallidas:
-          r.failures.length > 0
-            ? async () => get().enviarPlan(plan, r.failures.map((f) => ({ subAccountId: f.subAccountId, side: f.side })))
+          reintentables.length > 0
+            ? async () => get().enviarPlan(plan, reintentables.map((f) => ({ subAccountId: f.subAccountId, side: f.side })))
             : null
       });
 

@@ -300,7 +300,7 @@ describe('reintentar solo las fallidas', () => {
       label: 'Prueba',
       ok: 2,
       skipped: 0,
-      failures: [{ subAccountId: 'sub_3', side: 'long', reason: 'Bitget rechazó la orden.' }],
+      failures: [{ subAccountId: 'sub_3', side: 'long', reason: 'Bitget rechazó la orden.', retryable: true }],
       undetermined: []
     };
 
@@ -325,7 +325,7 @@ describe('reintentar solo las fallidas', () => {
       ok: 1,
       skipped: 0,
       failures: [],
-      undetermined: [{ subAccountId: 'sub_2', side: 'long', reason: 'Se cortó la conexión.' }]
+      undetermined: [{ subAccountId: 'sub_2', side: 'long', reason: 'Se cortó la conexión.', retryable: false }]
     };
 
     await usarPanel.getState().planear('close');
@@ -333,6 +333,75 @@ describe('reintentar solo las fallidas', () => {
 
     expect(usarPanel.getState().reintentarFallidas).toBeNull();
     expect(usarPanel.getState().avisos.at(-1)?.cuerpo).toContain('duplicarlas');
+  });
+
+  /*
+   * El fallo del 26/08/2026, por el otro lado.
+   *
+   * El informe de una apertura trae hasta tres filas por casilla -la orden, su
+   * Take Profit y su margen- y las tres llevan el mismo `subAccountId` y el
+   * mismo `side`. Como el reintento se pide por cuenta y lado, un Take Profit
+   * fallido metia **la apertura entera** en la lista: al reenviarla se volvia a
+   * colocar el Take Profit con un plan nuevo y `clientOid` nuevos, de modo que
+   * el identificador ya no protegia de nada y la posicion acababa con dos.
+   *
+   * Las filas derivadas se siguen enseñando -el operador tiene que saber que su
+   * posicion quedo desprotegida- pero no se reenvian desde aqui.
+   */
+  it('una fila derivada de la apertura se enseña pero no se reintenta', async () => {
+    planDevuelto = plan('open', 1);
+    resultado = {
+      label: 'Prueba',
+      ok: 1,
+      skipped: 0,
+      failures: [
+        {
+          subAccountId: 'sub_1',
+          side: 'long',
+          reason: 'La posición quedó abierta SIN Take Profit.',
+          retryable: false
+        }
+      ],
+      undetermined: []
+    };
+
+    await usarPanel.getState().planear('open');
+    usarPanel.getState().escribirPin('bg1');
+    await usarPanel.getState().confirmarPlan();
+
+    /* Se ve en el informe... */
+    expect(usarPanel.getState().batch?.failures).toHaveLength(1);
+    /* ...y no hay botón que la reenvíe. */
+    expect(usarPanel.getState().reintentarFallidas).toBeNull();
+  });
+
+  /* Y la fila de la apertura en sí, que sí lleva su identificador, se reintenta. */
+  it('la apertura fallida sí se reintenta, y sola', async () => {
+    planDevuelto = plan('open', 2);
+    resultado = {
+      label: 'Prueba',
+      ok: 1,
+      skipped: 0,
+      failures: [
+        { subAccountId: 'sub_2', side: 'long', reason: 'Bitget rechazó la orden.', retryable: true },
+        {
+          subAccountId: 'sub_1',
+          side: 'long',
+          reason: 'La posición quedó abierta SIN el margen adicional.',
+          retryable: false
+        }
+      ],
+      undetermined: []
+    };
+
+    await usarPanel.getState().planear('open');
+    usarPanel.getState().escribirPin('bg1');
+    await usarPanel.getState().confirmarPlan();
+    await usarPanel.getState().reintentarFallidas?.();
+
+    expect(enviados).toHaveLength(2);
+    /* Solo la casilla que falló de verdad: la derivada no arrastra a su apertura. */
+    expect(enviados[1]?.only).toEqual([{ subAccountId: 'sub_2', side: 'long' }]);
   });
 
   it('sin fallos no hay nada que reintentar', async () => {

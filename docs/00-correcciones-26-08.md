@@ -199,7 +199,33 @@ Cuesta una consulta, y solo en el camino del reintento. El comentario del motor 
 reintentaba a ciegas; era cierto para `indeterminada` y falso para `retryable`. Ahora lo es para
 las dos.
 
-### 3.8 · El aviso de apalancamiento, del símbolo correcto
+### 3.8 · «Reintentar las fallidas» ya no puede duplicar el Take Profit
+
+El tercer camino, y el mismo patrón que los dos anteriores.
+
+El informe de una apertura trae hasta **tres filas por casilla**: la orden, su Take Profit y su
+margen adicional. Las tres llevan el mismo `subAccountId` y el mismo `side`, porque son la misma
+casilla.
+
+Y el reintento se pide por cuenta y lado. Así que un *Take Profit* fallido metía **la apertura
+entera** en la lista de reintento, y al reenviarla se volvía a ejecutar la colocación del Take
+Profit —con un plan nuevo y `clientOid` **nuevos**—. El identificador que impide duplicar deja de
+proteger en cuanto deja de ser el mismo.
+
+Ahora cada fila del informe dice si se puede reenviar, y solo lo dice la que tiene su propio
+identificador de orden. Las derivadas se siguen enseñando —el operador tiene que saber que su
+posición quedó desprotegida— pero no hay botón que las reenvíe.
+
+Vale la pena verlo junto, porque es un solo error repetido tres veces: **una operación que puede
+salir dos veces sin que nada la rechace**.
+
+| Dónde | Qué lo disparaba | Qué lo impide ahora |
+|---|---|---|
+| El botón *Margen adicional* | Aplicar lo que ya salió con la orden | El botón y su canal ya no existen |
+| El reintento automático del motor | Un `retryable` sobre `set-margin`, que no lleva `clientOid` | Se relee el margen antes de reenviar |
+| *Reintentar las fallidas* | Una fila derivada arrastraba a su apertura | Solo se reintenta la fila con identificador propio |
+
+### 3.9 · El aviso de apalancamiento, del símbolo correcto
 
 Efecto lateral de la misma raíz: el aviso *«la cuenta está a 20x y la operación se calculó a 10x»*
 salía del apalancamiento guardado en la ficha —el del primer símbolo del mercado, otra vez—. Avisaba
@@ -261,6 +287,9 @@ caen —«expected 'fallo' to be 'indeterminada'»— y con ella pasan.
 - sin la contraseña de paso, cerrar no envía nada; al tercer intento se cancela
 - el apalancamiento sigue sin pedirla
 - tras abrir, los tres valores que salieron con la orden se vacían
+
+- una fila derivada de la apertura se enseña en el informe pero **no** ofrece reintento
+- la fila de la apertura en sí sí se reintenta, y sola
 
 `test/e2e/arranque.spec.ts`
 - **no existe** canal para aplicar Take Profit ni margen por separado, comprobado

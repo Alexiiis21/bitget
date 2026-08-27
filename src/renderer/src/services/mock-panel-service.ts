@@ -408,7 +408,7 @@ export class MockPanelService implements PanelService {
       }
       const motivo = this.resolverFallo(objetivo.subAccountId, objetivo.side);
       if (motivo) {
-        fails.push({ ...objetivo, reason: motivo });
+        fails.push({ ...objetivo, reason: motivo, retryable: true });
         continue;
       }
 
@@ -484,7 +484,7 @@ export class MockPanelService implements PanelService {
       }
       const motivo = this.resolverFallo(objetivo.subAccountId, objetivo.side);
       if (motivo) {
-        fails.push({ ...objetivo, reason: motivo });
+        fails.push({ ...objetivo, reason: motivo, retryable: true });
         continue;
       }
 
@@ -534,7 +534,7 @@ export class MockPanelService implements PanelService {
       }
       const motivo = this.resolverFallo(objetivo.subAccountId, objetivo.side);
       if (motivo) {
-        fails.push({ ...objetivo, reason: motivo });
+        fails.push({ ...objetivo, reason: motivo, retryable: true });
         continue;
       }
       this.posiciones.set(clave, mutar(posicion));

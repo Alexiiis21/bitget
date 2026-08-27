@@ -156,6 +156,28 @@ export interface BatchTarget {
 
 export interface BatchFailure extends BatchTarget {
   reason: string;
+  /**
+   * ¿Entra en «reintentar solo las fallidas»?
+   *
+   * --------------------------------------------------------------------------
+   * Por qué una casilla fallida puede no ser reintentable
+   * --------------------------------------------------------------------------
+   * El informe de una apertura trae hasta tres filas por casilla: la orden, su
+   * Take Profit y su margen adicional. Las tres llevan el mismo `subAccountId` y
+   * el mismo `side`, porque son la misma casilla.
+   *
+   * Y ahí estaba el problema: reintentar se pide por «cuenta y lado», así que un
+   * Take Profit fallido metía **la apertura entera** en la lista de reintento.
+   * Al reenviarla se volvía a ejecutar la colocación del Take Profit, con un
+   * plan nuevo y `clientOid` nuevos —de modo que el identificador ya no protegía
+   * de nada— y la posición acababa con dos.
+   *
+   * Solo es reintentable la fila que tiene su propio identificador de orden: la
+   * de la operación en sí. Las derivadas se enseñan igual, porque el operador
+   * tiene que saber que su posición quedó sin Take Profit o sin margen, pero no
+   * se pueden reenviar desde aquí.
+   */
+  retryable: boolean;
 }
 
 export interface BatchResult {

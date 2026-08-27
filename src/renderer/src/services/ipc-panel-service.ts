@@ -116,7 +116,15 @@ const aResultado = (label: string, lote: Lote): BatchResult => {
       .map((j) => ({
         subAccountId: j.cuentaId,
         side: j.lado,
-        reason: j.mensaje ?? (j.codigoBitget === null ? 'Sin detalle.' : `Bitget ${j.codigoBitget}`)
+        reason: j.mensaje ?? (j.codigoBitget === null ? 'Sin detalle.' : `Bitget ${j.codigoBitget}`),
+        /*
+         * El `clientOid` vacío marca las filas que no son la operación en sí:
+         * los descartes y las derivadas de la apertura -«Sub-01 · TP»,
+         * «Sub-01 · MGA»-. Reintentarlas reenviaría la apertura entera, porque
+         * el reintento se pide por cuenta y lado y las tres filas comparten los
+         * dos. Ver `BatchFailure.retryable`.
+         */
+        retryable: j.clientOid !== ''
       }));
 
   return {
