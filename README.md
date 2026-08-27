@@ -19,9 +19,16 @@ de una fase posterior; ver [`docs/00-fase-4-pantalla.md`](docs/00-fase-4-pantall
 
 ```bash
 npm install
-npm run dev          # datos de demostración, sin salir a la red
-npm run dev:staging  # API real de Bitget, vault real, carpeta de datos propia
+npm run dev          # API real de Bitget, MERCADO REAL: las órdenes mueven dinero
+npm run dev:staging  # API real de Bitget, mercado simulado, vault real
+npm run dev:demo     # datos de demostración, sin salir a la red
 ```
+
+> **`npm run dev` opera con dinero real.** Es el atajo corto porque es el trabajo diario, no un
+> descuido: al arrancar imprime el aviso en la terminal, la cabecera dice `MERCADO REAL` en rojo y
+> cada confirmación empieza por `REVISAR ANTES DE ENVIAR · MERCADO REAL`. Lo que se **empaqueta**
+> sigue siendo lo contrario —`package:portable` produce la demostración—, porque un ejecutable lo
+> abre alguien que no eligió nada.
 
 Las pruebas contra la API real necesitan un `.env` con las claves de la cuenta demo; ver
 [`.env.example`](.env.example).
@@ -30,9 +37,10 @@ Las pruebas contra la API real necesitan un `.env` con las claves de la cuenta d
 
 | Comando | Qué hace |
 |---|---|
-| `npm run dev` | Aplicación en desarrollo, con recarga en caliente |
-| `npm run dev:staging` | Igual, contra la API real de Bitget, **mercado simulado**. [ADR 0007](docs/adr/0007-entorno-staging-sin-docker.md) |
-| `npm run dev:real` | Igual, contra el **mercado real**: es el binario del cliente, pero con terminal donde leer el log. Las órdenes mueven dinero de verdad |
+| `npm run dev` | Aplicación en desarrollo contra el **mercado real**. Las órdenes mueven dinero de verdad |
+| `npm run dev:real` | Lo mismo. El nombre largo se conserva por costumbre y por los documentos que lo citan |
+| `npm run dev:staging` | Igual, contra la API real de Bitget pero en **mercado simulado**. [ADR 0007](docs/adr/0007-entorno-staging-sin-docker.md) |
+| `npm run dev:demo` | Datos de demostración, sin salir a la red ni tocar ninguna cuenta |
 | `npm run typecheck` | `tsc --noEmit` sobre los dos proyectos (node y web) |
 | `npm run lint` | ESLint, cero avisos tolerados |
 | `npm run format` | Prettier sobre `src/` y `test/` |

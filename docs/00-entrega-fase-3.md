@@ -49,6 +49,10 @@ npm run dev            # datos de demostración: 2 cuentas × 20 subcuentas
 npm run dev:staging    # Bitget real, con la credencial de la cuenta demo
 ```
 
+> **Nota del 26/08/2026.** El comando de la demostración pasó a llamarse **`npm run dev:demo`**.
+> `npm run dev` arranca ahora contra el **mercado real**. Donde este documento diga `npm run dev`
+> para ver datos de demostración, hoy es `npm run dev:demo`.
+
 Se recorren los dos. El primero enseña la fase completa —cuarenta subcuentas, unas
 conectadas y otras no— sin depender de la red. El segundo demuestra que lo mismo funciona
 contra Bitget de verdad.

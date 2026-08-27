@@ -31,9 +31,9 @@ contra Bitget de verdad.
 ## 2. Antes de empezar
 
 ```bash
-npm run dev            # datos de demostración, sin salir a la red
+npm run dev            # Bitget real, MERCADO REAL: las órdenes mueven dinero
 npm run dev:staging    # Bitget real, mercado simulado
-npm run dev:real       # Bitget real, MERCADO REAL: las órdenes mueven dinero
+npm run dev:demo       # datos de demostración, sin salir a la red
 ```
 
 Tres avisos que evitan confundir un dato correcto con un fallo:
@@ -83,7 +83,7 @@ hoy: estaban en cruzado, y en cruzado Bitget no admite «agregar margen».
       comprobada y, **sin tocar nada**, pasa sola a conectada en unos segundos.
 - [ ] **B3.** Pasar el cursor por una casilla: aparece el estado de esa subcuenta y ese lado.
 
-### C · La matriz y la selección múltiple — Fase 3 · `npm run dev`
+### C · La matriz y la selección múltiple — Fase 3 · `npm run dev:demo`
 
 - [ ] **C1.** Dos cuentas principales, cada una con sus subcuentas numeradas y su saldo.
 - [ ] **C2.** Una casilla con **⚠** es una subcuenta **sin conexión**, y se distingue a simple
