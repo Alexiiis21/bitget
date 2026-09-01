@@ -107,6 +107,7 @@ function enrutar(opciones: {
   posicionesDe?: (apiKey: string) => unknown[];
   alColocar?: (cuerpo: Record<string, unknown>, apiKey: string) => Respuesta;
   planesDe?: (apiKey: string) => unknown[];
+  alCancelar?: (cuerpo: Record<string, unknown>, apiKey: string) => Respuesta;
 }): void {
   const posicionesDe = opciones.posicionesDe ?? (() => [posicion('long')]);
   const planesDe = opciones.planesDe ?? (() => []);
@@ -114,6 +115,15 @@ function enrutar(opciones: {
     opciones.alColocar ??
     ((c) => ({
       cuerpo: sobreOk({ orderId: `plan_${String(c['clientOid'])}`, clientOid: c['clientOid'] })
+    }));
+  /* Colocar sobre una posicion que ya tiene Take Profit quita antes el anterior. */
+  const alCancelar =
+    opciones.alCancelar ??
+    ((c) => ({
+      cuerpo: sobreOk({
+        successList: (c['orderIdList'] as { orderId: string }[] | undefined) ?? [],
+        failureList: []
+      })
     }));
 
   exchange.responderCon((p) => {
@@ -125,12 +135,26 @@ function enrutar(opciones: {
     if (p.url.startsWith('/api/v2/mix/order/orders-plan-pending')) {
       return { cuerpo: sobreOk({ entrustedList: planesDe(apiKey) }) };
     }
+    if (p.url.startsWith('/api/v2/mix/order/cancel-plan-order')) {
+      return alCancelar(JSON.parse(p.cuerpo) as Record<string, unknown>, apiKey);
+    }
     if (p.url.startsWith('/api/v2/mix/order/place-tpsl-order')) {
       return alColocar(JSON.parse(p.cuerpo) as Record<string, unknown>, apiKey);
     }
     return null;
   });
 }
+
+/** Un Take Profit ya puesto en Bitget, tal como lo devuelve el listado. */
+const tpPuesto = (precio = '63100', orderId = 'plan_viejo'): unknown => ({
+  orderId,
+  clientOid: 'oid_viejo',
+  symbol: SIMBOLO,
+  planType: 'pos_profit',
+  triggerPrice: precio,
+  posSide: 'long',
+  status: 'live'
+});
 
 const peticion = (cuantas: number, porcentaje = '35', lado: 'long' | 'short' = 'long') => ({
   mercado: MERCADO_SIMULADO,
@@ -300,6 +324,104 @@ describe('ejecutar: colocar el Take Profit', () => {
 
     expect(reintento.jobs[0]?.clientOid).toBe(fallido?.clientOid);
     expect(reintento.jobs[0]?.estado).toBe('exito');
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Poner Take Profit sobre una posicion que ya tiene uno
+ * ---------------------------------------------------------------------------
+ * `place-tpsl-order` no reemplaza nada: cada llamada crea su plan, con su
+ * `clientOid`. Sin quitar el anterior, «poner Take Profit» sobre una posicion
+ * protegida la dejaria con **dos ordenes de cierre**, y la primera que se
+ * disparase cerraria la posicion entera al precio que no era.
+ *
+ * Es la mitad del arreglo con el que esta operacion volvio el 01/09/2026; la
+ * otra mitad -que el campo del ajuste no sea el de la apertura- vive en el
+ * store. Ver `PlanKind`.
+ */
+describe('poner Take Profit sustituye el que hubiera, no lo duplica', () => {
+  it('el plan trae el precio anterior para poder enseñar la sustitucion', async () => {
+    enrutar({ planesDe: () => [tpPuesto('63100')] });
+
+    const plan = await motor.planificarTakeProfit(peticion(1));
+
+    expect(plan.entradas[0]?.precioDisparoAnterior).toBe('63100');
+    expect(plan.entradas[0]?.orderIdAnterior).toBe('plan_viejo');
+    expect(plan.entradas[0]?.planTypeAnterior).toBe('pos_profit');
+  });
+
+  it('sin Take Profit puesto no hay nada anterior que quitar', async () => {
+    enrutar({ planesDe: () => [] });
+
+    const plan = await motor.planificarTakeProfit(peticion(1));
+
+    expect(plan.entradas[0]?.precioDisparoAnterior).toBeNull();
+    expect(plan.entradas[0]?.orderIdAnterior).toBeNull();
+  });
+
+  /* El orden importa: cancelar y despues colocar. Al reves quedarian dos a la vez. */
+  it('cancela el anterior antes de colocar el nuevo', async () => {
+    const orden: string[] = [];
+    enrutar({
+      planesDe: () => [tpPuesto('63100')],
+      alCancelar: (c) => {
+        orden.push('cancelar');
+        expect(c['planType']).toBe('pos_profit');
+        expect(c['orderIdList']).toEqual([{ orderId: 'plan_viejo' }]);
+        return { cuerpo: sobreOk({ successList: [{ orderId: 'plan_viejo' }], failureList: [] }) };
+      },
+      alColocar: (c) => {
+        orden.push('colocar');
+        return { cuerpo: sobreOk({ orderId: 'plan_nuevo', clientOid: c['clientOid'] }) };
+      }
+    });
+
+    const plan = await motor.planificarTakeProfit(peticion(1));
+    const lote = await motor.ejecutarTakeProfit(plan);
+
+    expect(orden).toEqual(['cancelar', 'colocar']);
+    expect(lote.jobs[0]?.estado).toBe('exito');
+    expect(lote.jobs[0]?.mensaje).toContain('63100 → 63220.5');
+  });
+
+  it('sin anterior no gasta una peticion en cancelar nada', async () => {
+    enrutar({ planesDe: () => [] });
+
+    const plan = await motor.planificarTakeProfit(peticion(1));
+    await motor.ejecutarTakeProfit(plan);
+
+    expect(exchange.peticiones.filter((p) => p.url.includes('cancel-plan-order'))).toHaveLength(0);
+  });
+
+  /*
+   * Hay uno puesto y Bitget no dice con que identificador: no se puede quitar, y
+   * colocar encima dejaria dos. De las dos salidas, la que no toca dinero es
+   * dejar la casilla como esta.
+   */
+  it('un Take Profit puesto sin orderId descarta la casilla en vez de duplicar', async () => {
+    enrutar({ planesDe: () => [{ ...(tpPuesto() as object), orderId: null }] });
+
+    const plan = await motor.planificarTakeProfit(peticion(1));
+
+    expect(plan.entradas).toHaveLength(0);
+    expect(plan.descartes[0]?.motivo).toBe('tp-anterior-sin-identificador');
+  });
+
+  /*
+   * Un Stop Loss no es un Take Profit, y quitarlo creyendo que lo es dejaria la
+   * posicion sin su otra proteccion. `buscarTakeProfit` filtra por `planType`.
+   */
+  it('no confunde un Stop Loss con el Take Profit puesto', async () => {
+    enrutar({
+      planesDe: () => [{ ...(tpPuesto() as object), planType: 'pos_loss', orderId: 'plan_sl' }]
+    });
+
+    const plan = await motor.planificarTakeProfit(peticion(1));
+    await motor.ejecutarTakeProfit(plan);
+
+    expect(plan.entradas[0]?.orderIdAnterior).toBeNull();
+    expect(exchange.peticiones.filter((p) => p.url.includes('cancel-plan-order'))).toHaveLength(0);
   });
 });
 

@@ -300,6 +300,92 @@ describe('planificacion: nada sale sin haberse calculado antes', () => {
     expect(plan.descartes.find((d) => d.cuentaId === 'cta_007')?.motivo).toBe('cuenta-desconocida');
   });
 
+  /*
+   * ========================================================================
+   * El margen adicional que no cabe impide el lote entero.
+   * ========================================================================
+   * Lo pidio el cliente el 29/08/2026, y es la misma regla que ya rige el
+   * margen adicional en cruzado: si el colchon que se aprobo no se puede poner
+   * en todas, abrir solo las que si dejaria medio lote con menos proteccion de
+   * la que el operador confirmo.
+   *
+   * La diferencia con el caso del cruzado es donde se corta. Alli se lanza y no
+   * hay plan; aqui se construye el plan entero -con sus descartes, con el
+   * motivo de cada casilla- y solo se cierra la salida, porque el operador
+   * necesita saber **cuales** de sus cuarenta casillas van cortas para poder
+   * desmarcarlas.
+   */
+  it('impide el lote entero si a una casilla no le cabe el margen adicional', async () => {
+    enrutar(ordenAceptada);
+    /* Le cabe el margen inicial de 100, pero no los 50 adicionales. */
+    cuentas.fijarSaldo('cta_003', '120');
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(5),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated',
+      margenAdicional: '50'
+    });
+
+    expect(plan.impedimento?.codigo).toBe('saldo-margen-adicional');
+    expect(plan.impedimento?.casillas).toBe(1);
+    /* Nombra las tres salidas que pidio el cliente. */
+    expect(plan.impedimento?.mensaje).toMatch(/desmarque/i);
+
+    /* El plan se construye entero: las cuatro que si caben siguen listadas. */
+    expect(plan.entradas).toHaveLength(4);
+    expect(plan.descartes.find((d) => d.cuentaId === 'cta_003')?.motivo).toBe('margen-insuficiente');
+
+    /* Y nada ha salido: planificar nunca envia. */
+    expect(exchange.peticiones.filter((p) => p.url.includes('place-order'))).toHaveLength(0);
+  });
+
+  /*
+   * Sin margen adicional pedido, una casilla corta sigue siendo un descarte y
+   * las demas abren. Pedir margen adicional es declarar un colchon concreto; no
+   * pedirlo no declara nada, y bloquear el lote entero por una cuenta con poco
+   * saldo convertiria el panel en inoperable.
+   */
+  it('sin margen adicional, la casilla corta se descarta y las demas abren', async () => {
+    enrutar(ordenAceptada);
+    cuentas.fijarSaldo('cta_003', '10');
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(5),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated',
+    });
+
+    expect(plan.impedimento).toBeNull();
+    expect(plan.entradas).toHaveLength(4);
+  });
+
+  it('con margen adicional que cabe en todas, no hay impedimento', async () => {
+    enrutar(ordenAceptada);
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(5),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated',
+      margenAdicional: '50'
+    });
+
+    expect(plan.impedimento).toBeNull();
+    expect(plan.entradas).toHaveLength(5);
+  });
+
   it('el catalogo se pide una vez, no una por lote', async () => {
     enrutar(ordenAceptada);
     const peticion = {

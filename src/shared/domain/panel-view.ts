@@ -108,7 +108,15 @@ export interface Position {
   entryPrice: Decimal;
   liquidationPrice: Decimal;
   takeProfitPrice: Decimal | null;
-  initialMarginAccum: Decimal;
+  /**
+   * `null` en una posición que ya estaba abierta cuando arrancó el panel.
+   *
+   * Bitget no tiene este número —su `marginSize` es el margen de ahora, con el
+   * adicional dentro y moviéndose solo— y deducirlo de él sería enseñar como
+   * aprobado algo que nadie aprobó. La pantalla enseña un guion, que es la
+   * verdad, y empieza a contar desde el primer lote de esta sesión.
+   */
+  initialMarginAccum: Decimal | null;
   leverage: number;
   actions: ActionState;
   /**
@@ -122,7 +130,8 @@ export interface Position {
   /** `true` si la última consulta a Bitget para esta punta falló. */
   hasError: boolean;
   errorReason: string | null;
-  openedAt: string;
+  /** `null` si la posición ya estaba abierta al arrancar: el panel no la vio abrirse. */
+  openedAt: string | null;
 }
 
 export interface PositionSnapshot {
@@ -202,24 +211,46 @@ export interface BatchResult {
  * Las operaciones que el panel sabe planificar y enviar.
  *
  * --------------------------------------------------------------------------
- * No hay «editar una posición abierta»
+ * Editar una posición abierta: cómo vuelve sin traerse el fallo
  * --------------------------------------------------------------------------
- * El Take Profit y el margen adicional **no** están aquí, y es deliberado:
- * viajan dentro de `open` y solo dentro de `open`. Tuvieron su propia entrada
- * -`tp` y `margin`- hasta el 26/08/2026, y convivir con la apertura que ya los
- * lleva dentro significaba que la misma cantidad se podía enviar dos veces
- * sobre la misma posición. Con `set-margin`, que es la única petición del panel
- * sin identificador propio, eso dejaba la posición con el doble del margen que
- * el operador había aprobado, sin que nada lo impidiera.
+ * `tp`, `margin-add` y `margin-remove` estuvieron retirados entre el 26/08/2026
+ * y el 01/09/2026. Se quitaron porque el Take Profit y el margen adicional
+ * viajan **también** dentro de `open`, y con las dos vías abiertas la misma
+ * cantidad se podía enviar dos veces sobre la misma posición: el 26/08/2026 una
+ * acabó con 2 USDT de margen donde el operador había escrito 1. `set-margin` es
+ * la única petición del panel sin identificador propio, así que ahí nada rechaza
+ * el repetido.
  *
- * La regla que queda es una y se puede sostener: **todo lo que define una
- * posición se decide antes de abrirla y sale con ella**. Después solo se puede
- * quitar el Take Profit o cerrar.
+ * Vuelven porque el cliente los necesita —una posición que quedó sin Take
+ * Profit, otra a la que hay que darle o quitarle colchón—, y con las tres cosas
+ * que faltaban:
  *
- * `leverage` sigue siendo suya porque no es una edición: es configuración de la
+ *  1. **Campos distintos.** El importe que sale con la apertura y el del ajuste
+ *     posterior se teclean en casillas separadas, así que el valor que quedó
+ *     escrito para abrir no se puede reenviar por inercia. Ver `CAMPOS` en la
+ *     barra lateral.
+ *  2. **`tp` sustituye, no añade.** El plan lee lo que Bitget tiene puesto, lo
+ *     cancela y coloca el nuevo, de modo que una posición nunca acaba con dos
+ *     órdenes de cierre. La confirmación enseña «0,00263 → 0,00271».
+ *  3. **El margen enseña `actual → resultante`**, leído de Bitget al planificar.
+ *     Aplicarlo dos veces se ve en la confirmación, antes de enviar.
+ *
+ * Agregar y quitar margen son dos entradas y no una con signo: la dirección la
+ * elige el operador con el botón que pulsa, no con un `-` que puede sobrar o
+ * faltar. Retirar margen acerca la liquidación, y esa no es una diferencia que
+ * pueda depender de un carácter.
+ *
+ * `leverage` nunca se fue porque no es una edición: es configuración de la
  * cuenta que se deja puesta **antes** de operar, y no viaja en ninguna orden.
  */
-export type PlanKind = 'open' | 'close' | 'tp-remove' | 'leverage';
+export type PlanKind =
+  | 'open'
+  | 'close'
+  | 'tp'
+  | 'tp-remove'
+  | 'margin-add'
+  | 'margin-remove'
+  | 'leverage';
 
 /** Una casilla que sí va a recibir la operación, con lo que le va a pasar. */
 export interface PlanEntry extends BatchTarget {
@@ -247,6 +278,20 @@ export interface PlanDiscard extends BatchTarget {
  * que enseñar. Confirmar devuelve ese `id`, de modo que ninguna cantidad puede
  * cambiar entre lo aprobado y lo enviado.
  */
+/**
+ * Lo que impide enviar el plan entero.
+ *
+ * Ni descarte ni aviso: un descarte deja fuera una casilla y las demás salen,
+ * un aviso no frena nada. Esto cierra la puerta del lote completo, y la
+ * confirmación lo enseña en lugar de pedir la contraseña.
+ */
+export interface PlanBlocker {
+  code: string;
+  message: string;
+  /** Cuántas casillas lo provocan. Están nombradas en `discards`. */
+  boxes: number;
+}
+
 export interface BatchPlan {
   kind: PlanKind;
   id: string;
@@ -258,6 +303,14 @@ export interface BatchPlan {
   reference: string | null;
   entries: PlanEntry[];
   discards: PlanDiscard[];
+  /**
+   * Lo que impide enviarlo, o `null`.
+   *
+   * Es obligatorio y no opcional a propósito: un plan que se construye sin
+   * pensar en esto se envía, y el olvido no se ve en ninguna prueba. Quien
+   * arma un `BatchPlan` tiene que decir explícitamente que no hay impedimento.
+   */
+  blocker: PlanBlocker | null;
 }
 
 export interface OpenRequest {
@@ -302,6 +355,32 @@ export interface CloseRequest {
   assetId: string;
 }
 
+/**
+ * Poner Take Profit sobre posiciones **ya abiertas**.
+ *
+ * Distinto de `OpenRequest.takeProfitPercent`, que sale con la orden. Este
+ * sustituye el que la posición tuviera puesto; ver `PlanKind`.
+ */
+export interface TpRequest {
+  targets: BatchTarget[];
+  assetId: string;
+  /** Ganancia sobre el margen inicial, en porcentaje. */
+  percent: Decimal;
+}
+
+/**
+ * Mover margen en posiciones **ya abiertas**: agregarlo o retirarlo.
+ *
+ * `amount` es siempre positivo y `direction` dice hacia dónde va. El signo lo
+ * pone el proceso principal, nunca lo que se teclea. Ver `PlanKind`.
+ */
+export interface MarginRequest {
+  targets: BatchTarget[];
+  assetId: string;
+  amount: Decimal;
+  direction: 'agregar' | 'quitar';
+}
+
 export interface LeverageRequest {
   targets: BatchTarget[];
   assetId: string;
@@ -331,7 +410,10 @@ export interface ApiKeyRow {
 
 export interface ApiKeyInput {
   subAccountLabel: string;
+  /** Cuenta principal: una de las quince del panel, de la `A` a la `O`. */
   accountName: string;
+  /** Casilla de esa cuenta principal, de 1 a 20. La elige el operador. */
+  slot: number;
   apiKey: string;
   secretKey: string;
   passphrase: string;
@@ -353,6 +435,16 @@ export interface ValidationResult {
   /** UID de la cuenta principal detectado en Bitget, si la cuenta es subcuenta. */
   parentUid: string | null;
 }
+
+/**
+ * Desenlace de una baja de API key.
+ *
+ * La baja pide la contraseña de paso —la misma de abrir y cerrar—, así que «no
+ * se borró» tiene dos motivos que la pantalla trata distinto: `paso-incorrecto`
+ * se puede reintentar y `no-estaba` no. Ver `ResultadoBaja` en el contrato de
+ * IPC, que es la misma respuesta al otro lado de la frontera.
+ */
+export type DeleteOutcome = 'borrada' | 'paso-incorrecto' | 'no-estaba';
 
 /** Resultado de crear o abrir el almacén. `reason` distingue contraseña incorrecta de archivo dañado. */
 export interface UnlockResult {

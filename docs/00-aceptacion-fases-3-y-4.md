@@ -71,9 +71,22 @@ hoy: estaban en cruzado, y en cruzado Bitget no admite «agregar margen».
 - [ ] **A5.** Pulsar **Probar**. Vuelve a preguntar a Bitget y confirma en el momento.
 - [ ] **A6.** Registrar **la misma subcuenta otra vez** con otra API Key. *Debe verse:* **no se
       duplica la fila** — es rotar la clave, no una cuenta nueva.
-- [ ] **A7.** Pulsar **Eliminar**. La fila desaparece y su credencial se borra del almacén.
+- [ ] **A7.** Pulsar **Eliminar**. *Debe verse:* una confirmación que pide la **contraseña de
+      paso** —la misma de abrir y cerrar—. Con una clave equivocada **no se borra nada** y
+      quedan dos intentos; al tercero la baja se cancela. Con la correcta, la fila desaparece y
+      su credencial se borra del almacén.
 - [ ] **A8.** Volver a registrarla y **Volver al panel**: aparece en la matriz con su casilla y
       su saldo.
+- [ ] **A9.** **Cuenta principal** es un desplegable **fijo de la A a la O** —quince— y ya no un
+      campo donde se escribe. *Esto es lo que quedamos el 28 de agosto.*
+- [ ] **A10.** **Casilla** es un desplegable **de la 1 a la 20**: la subcuenta aparece en la matriz
+      **exactamente en la casilla elegida**, no en la primera libre.
+- [ ] **A11.** Las casillas ya ocupadas salen en el desplegable **con el nombre de quien las ocupa
+      y no se pueden elegir**. Al cambiar de cuenta principal, la casilla propuesta cambia a la
+      primera libre **de esa** cuenta.
+- [ ] **A12.** Tras un alta correcta se conservan la cuenta principal y **avanza la casilla** a la
+      siguiente libre: dar de alta veinte seguidas no obliga a reelegir las dos cosas cada vez. Las
+      tres claves sí se borran.
 
 ### B · Estado de conexión — Fase 3
 
@@ -82,28 +95,60 @@ hoy: estaban en cruzado, y en cruzado Bitget no admite «agregar margen».
 - [ ] **B2.** **Cerrar sesión** y volver a entrar. *Debe verse:* la cuenta aparece como no
       comprobada y, **sin tocar nada**, pasa sola a conectada en unos segundos.
 - [ ] **B3.** Pasar el cursor por una casilla: aparece el estado de esa subcuenta y ese lado.
+- [ ] **B4.** El **número de panel** de la cabecera —`#1`— se puede **borrar y reescribir**, y al
+      **cerrar y volver a abrir el panel sigue puesto**. *Antes se dejaba teclear pero volvía al
+      anterior en cada arranque: nada lo guardaba.*
+- [ ] **B5.** Junto al distintivo del mercado, el **último precio** del activo seleccionado, con su
+      par. Es el precio de marca, el mismo con el que se calculan las cantidades.
 
 ### C · La matriz y la selección múltiple — Fase 3 · `npm run dev:demo`
 
-- [ ] **C1.** Dos cuentas principales, cada una con sus subcuentas numeradas y su saldo.
+- [ ] **C1.** Dos cuentas principales, cada una con sus subcuentas numeradas. Cada columna enseña
+      el **saldo en la fila LONG** y el **apalancamiento aplicado en la fila SHORT** —el de la
+      posición abierta en el activo elegido, o un guion si no hay ninguna—. El saldo salía antes en
+      las dos filas: es de la subcuenta, no de un lado.
 - [ ] **C2.** Una casilla con **⚠** es una subcuenta **sin conexión**, y se distingue a simple
       vista de una que no tiene posición abierta.
-- [ ] **C3.** Marcar **una** casilla: abajo a la derecha, *1 casilla seleccionada*.
+- [ ] **C3.** Con el alcance en **Ambos** (el de partida), marcar **una** casilla: se marca
+      también **la otra punta de esa columna** y el contador dice *2 casillas seleccionadas* —una
+      columna en «Ambos» son dos órdenes, una long y una short—. No hay forma de dejar media
+      columna marcada.
 - [ ] **C4.** **Todas** en la barra de una cuenta principal: sus cuarenta casillas.
 - [ ] **C5.** **Todas** en la barra lateral: *80 casillas seleccionadas*.
 - [ ] **C6.** **Ninguna**: la selección se vacía.
-- [ ] **C7.** Cambiar el alcance a **Long** y a **Short**: el contador cambia.
+- [ ] **C7.** Cambiar el alcance a **Long**: la fila SHORT **se destilda y se apaga** —no admite
+      clics— y el contador baja a la mitad. Igual con **Short** y la fila LONG.
+- [ ] **C8.** Pulsar **Todas** con el alcance en **Long** y volver a **Ambos**: la fila SHORT
+      **se enciende a la vista** y el contador se duplica, porque «Ambos» son las dos puntas.
+      *Antes el contador se duplicaba igual, pero la matriz no cambiaba: las short venían
+      marcadas por debajo desde el principio y no había manera de saberlo.*
 
 ### D · Estructura y límites — Fase 3 (pruebas automáticas)
 
-- [ ] **D1.** Hasta **5 cuentas principales**; la sexta se rechaza **sin gastar una petición**.
-- [ ] **D2.** Hasta **20 subcuentas** por cuenta principal; la 21 se rechaza igual.
-- [ ] **D3.** Comprobable con `npm test`.
+- [ ] **D1.** Hasta **15 cuentas principales** —de la A a la O—; una más se rechaza **sin gastar
+      una petición**. *Eran cinco hasta el 28 de agosto.*
+- [ ] **D2.** Hasta **20 subcuentas** por cuenta principal; la 21 se rechaza igual. Son **300
+      subcuentas** en total.
+- [ ] **D3.** Una casilla ya ocupada se rechaza **antes de preguntar a Bitget**, diciendo qué
+      subcuenta la ocupa.
+- [ ] **D4.** Comprobable con `npm test`.
 
 ### E · Las seis funciones, en pantalla — Fase 4 · `npm run dev:staging`
 
 - [ ] **E1.** El selector de activo trae los del **catálogo de Bitget**, con su tope de
       apalancamiento. En el mercado de pruebas son tres (BTC, ETH, XRP); en el real, ocho.
+- [ ] **E1a.** El **✎** de una casilla abre el **buscador**: escribir `DOGE` (o `DOGEUSDT`) la deja
+      en un puñado de resultados. Elegir uno **sustituye** el activo de esa casilla; las demás no se
+      mueven. *Esto es lo que pediste el 28 de agosto.*
+- [ ] **E1b.** Siguen siendo **ocho casillas**: no hay forma de añadir una novena. Una casilla se
+      puede dejar **vacía** —«Vaciar la casilla N»— y se sigue viendo, con su número.
+- [ ] **E1c.** Un activo que ya está en otra casilla aparece en el buscador **marcado y sin poder
+      elegirse**, con el número de la casilla que ocupa. Dos casillas con el mismo activo serían dos
+      botones llamados igual.
+- [ ] **E1d.** Cerrar el panel y volver a abrirlo: **las casillas siguen como se dejaron**. Se
+      guardan por mercado, así que las del real y las del simulado son independientes.
+- [ ] **E1e.** Vaciar la casilla del activo **que estaba seleccionado**: la selección salta al
+      primero que quede, y el pie de la matriz enseña ese activo. Ninguna orden sale de aquí.
 - [ ] **E2.** Elegir un activo pone el campo de apalancamiento en **el máximo de ese activo**.
 - [ ] **E3.** Marcar casillas, escribir margen, y pulsar **Abrir**. *Debe verse:* el **diálogo de
       confirmación** con el precio de referencia, lo que recibe cada casilla —cantidad, margen
@@ -120,6 +165,14 @@ hoy: estaban en cruzado, y en cruzado Bitget no admite «agregar margen».
       precio. *Esta es la función que pediste el 18 de agosto.*
 - [ ] **E8.** Escribir un **margen adicional** con el modo en **Cruzado** y pulsar *Abrir*: **no
       se abre nada** y se dice por qué. En cruzado el margen sale del saldo total de la cuenta.
+- [ ] **E8b.** Marcar varias casillas, entre ellas una de una subcuenta **sin saldo para el margen
+      inicial más el adicional**, y pulsar *Abrir*. La confirmación se abre con el aviso **NO SE VA
+      A ENVIAR NADA** arriba, **no pide la contraseña de paso**, y el botón de confirmar queda
+      apagado diciendo *Corrija los valores para continuar*. Abajo, en *SE QUEDAN FUERA*, está
+      nombrada la casilla que va corta con su motivo. *Añadido el 29/08/2026 a petición tuya: se
+      pidió abrir con ese margen adicional, y abrir solo las que caben dejaría medio lote con menos
+      colchón del aprobado. Se sale bajando los importes, añadiendo saldo o desmarcando esa
+      casilla.*
 - [ ] **E9.** Cambiar el **apalancamiento** y aplicarlo.
 - [ ] **E10.** Pulsar **Cerrar**. El diálogo enseña qué cantidad se cierra en cada casilla, y
       pide la **contraseña de paso** igual que la apertura: cerrar realiza el resultado y no se
@@ -180,8 +233,13 @@ Y dos más, de los que se ven al ejecutar la batería entera:
 
 ## 5. Lo que estas fases **no** incluyen
 
-- **Las posiciones abiertas no se ven todavía.** El Centro de Monitoreo dice *sin datos de
-  posiciones*. Llegan por conexión en vivo en la **Fase 6**.
+- **Las posiciones abiertas siguen siendo de la Fase 6.**
+
+  > **Corregido el 29/08/2026.** Esto decía que el Centro de Monitoreo dice *sin datos de
+  > posiciones*, y ya no es verdad: el barrido REST y el pool de sockets están construidos y
+  > probados, así que las posiciones **se ven**. Lo que no ha ocurrido es la fase: no se ha
+  > revisado contra el uso real ni entra en la validación de la Fase 5. Se deja escrito porque lo
+  > contrario —callar que se ve— haría que se reportaran fallos contra una fase sin abrir.
 - **No se puede editar una subcuenta registrada** —renombrarla o moverla—. Hoy se da de baja y
   se vuelve a dar de alta.
 - **El alta en tanda desde la interfaz** no existe: la carga masiva funciona por herramienta

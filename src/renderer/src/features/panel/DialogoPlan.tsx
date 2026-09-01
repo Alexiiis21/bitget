@@ -51,11 +51,20 @@ export function DialogoPlan() {
 
   const activo = activos.find((a) => a.id === activoId);
   /*
+   * Un plan impedido no sale, y por eso ni siquiera pide la contraseña.
+   *
+   * Teclearla para que después se rechace el envío sería pedirle al operador
+   * que ejecute un trámite cuyo único desenlace posible es un error. Lo que
+   * tiene que hacer es lo que dice el mensaje: bajar los importes, añadir saldo
+   * o desmarcar las casillas que van cortas.
+   */
+  const impedido = plan.blocker !== null;
+  /*
    * La misma lista que comprueba `confirmarPlan`, no una copia. Duplicarla
    * dejaría abierta la posibilidad de enseñar el campo sin comprobarlo, o de
    * comprobarlo sin enseñarlo —que es no poder confirmar nunca—.
    */
-  const pidePaso = PIDE_PASO.has(plan.kind);
+  const pidePaso = PIDE_PASO.has(plan.kind) && !impedido;
 
   const alPulsarTecla = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') void confirmarPlan();
@@ -139,9 +148,44 @@ export function DialogoPlan() {
             )}
           </div>
 
+          {/*
+            * El impedimento va arriba del todo, antes que las listas.
+            *
+            * Es lo único que cambia lo que el operador tiene que hacer a
+            * continuación, y ponerlo debajo de cuarenta filas sería enseñarlo
+            * después de que haya decidido. Las casillas que lo causan están
+            * nombradas más abajo, en «SE QUEDAN FUERA», con su motivo.
+            */}
+          {plan.blocker !== null && (
+            <div
+              role="alert"
+              style={{ padding: '12px 14px', borderRadius: 9, border: `1px solid ${CAJA_ERROR.borde}`, borderLeft: `4px solid ${CAJA_ERROR.acento}`, background: CAJA_ERROR.fondo, display: 'flex', flexDirection: 'column', gap: 5 }}
+            >
+              <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.1em', color: CAJA_ERROR.acento }}>
+                NO SE VA A ENVIAR NADA
+              </span>
+              <span style={{ fontSize: 12.5, lineHeight: 1.5, color: CAJA_ERROR.texto }}>
+                {plan.blocker.message}
+              </span>
+            </div>
+          )}
+
+          {/*
+            * Con el plan impedido la lista sigue enseñándose, con otro rótulo.
+            *
+            * Son las casillas que sí cabrían, y verlas es parte de la decisión:
+            * el operador está eligiendo entre bajar el importe —y que salgan
+            * todas— o desmarcar las que van cortas y quedarse con estas.
+            *
+            * Vacía no se dibuja: un titular sobre cero filas no dice nada que
+            * no diga ya el recuadro de arriba.
+            */}
+          {plan.entries.length > 0 && (
           <div>
             <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.1em', color: T.texto3 }}>
-              SE VA A ENVIAR A {plan.entries.length} {plan.entries.length === 1 ? 'CASILLA' : 'CASILLAS'}
+              {impedido
+                ? `NO SALDRÁ NINGUNA DE ESTAS ${plan.entries.length}`
+                : `SE VA A ENVIAR A ${plan.entries.length} ${plan.entries.length === 1 ? 'CASILLA' : 'CASILLAS'}`}
             </span>
             <div style={{ marginTop: 5 }}>
               {plan.entries.map((e) => (
@@ -159,6 +203,7 @@ export function DialogoPlan() {
               ))}
             </div>
           </div>
+          )}
 
           {plan.discards.length > 0 && (
             <div>
@@ -214,14 +259,26 @@ export function DialogoPlan() {
           >
             Cancelar
           </button>
+          {/*
+            * Impedido, el botón se apaga y dice por qué en su rótulo.
+            *
+            * Se deja a la vista en lugar de esconderlo: un botón que desaparece
+            * se lee como un fallo de la pantalla, y uno apagado que dice
+            * «Corrija los valores» dice qué falta para volver a encenderlo.
+            */}
           <button
             type="button"
             className="pcb-boton-acento"
-            disabled={enviando}
+            disabled={enviando || impedido}
+            title={impedido ? plan.blocker?.message : undefined}
             onClick={() => void confirmarPlan()}
-            style={{ flex: 1.4, padding: '11px 15px', borderRadius: 9, fontSize: 13, fontWeight: 600, cursor: enviando ? 'wait' : 'pointer', opacity: enviando ? 0.6 : 1, border: `1px solid ${T.marcaRelleno}`, background: T.marcaRelleno, color: '#ffffff' }}
+            style={{ flex: 1.4, padding: '11px 15px', borderRadius: 9, fontSize: 13, fontWeight: 600, cursor: impedido ? 'not-allowed' : enviando ? 'wait' : 'pointer', opacity: enviando || impedido ? 0.55 : 1, border: `1px solid ${impedido ? T.bordeFuerte : T.marcaRelleno}`, background: impedido ? T.superficie2 : T.marcaRelleno, color: impedido ? T.texto3 : '#ffffff' }}
           >
-            {enviando ? 'Enviando…' : `Confirmar · ${plan.entries.length}`}
+            {impedido
+              ? 'Corrija los valores para continuar'
+              : enviando
+                ? 'Enviando…'
+                : `Confirmar · ${plan.entries.length}`}
           </button>
         </div>
       </div>

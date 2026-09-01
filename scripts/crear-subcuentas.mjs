@@ -13,10 +13,11 @@
  * --------------------------------------------------------------------------
  *  1. Necesita la API Key de la **cuenta madre**, no la de una subcuenta. Una
  *     subcuenta no puede crear subcuentas.
- *  2. Crea las keys con permiso `contract_trade` **y nada mas**. No es un
- *     capricho: el panel rechaza toda credencial con un permiso que no
- *     reconozca -politica de fallar cerrado, ver src/main/bitget/verificacion.ts-
- *     asi que una key con permiso de spot no pasaria la verificacion.
+ *  2. Crea las keys con permiso `contract_trade` **y nada mas**. Desde el
+ *     29/08/2026 el panel ya no rechaza los permisos de mas -los avisa, ver
+ *     src/main/bitget/verificacion.ts-, asi que esto dejo de ser un requisito
+ *     tecnico y paso a ser lo que siempre debio ser: no pedir para cien claves
+ *     de subcuenta un permiso que ninguna necesita.
  *  3. El archivo de salida contiene **secretos en claro**. Es la unica copia:
  *     Bitget no vuelve a mostrar una secretKey. Guardalo, importalo al panel y
  *     borralo.

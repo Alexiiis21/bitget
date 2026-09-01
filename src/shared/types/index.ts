@@ -73,8 +73,19 @@ export interface Cuenta {
 /* ---------- posiciones ---------- */
 
 export interface TakeProfit {
+  /** Precio de disparo. Es lo unico que devuelve el exchange. */
   precio: Decimal;
-  porcentaje: number;
+  /**
+   * Porcentaje de ganancia con el que se aprobo, o `null` si no se sabe.
+   *
+   * Es `null` en todo Take Profit que el panel no puso en esta sesion: el
+   * porcentaje se escribio en un formulario y no viaja en ninguna respuesta de
+   * Bitget, que solo conoce el precio de disparo. Un `0` en su lugar se
+   * ensenaria como «0 %» y el operador leeria que su posicion cierra sin
+   * ganancia.
+   */
+  porcentaje: number | null;
+  /** `orderId` del plan en Bitget. Es con el que se cancela. */
   planId: string;
 }
 
@@ -108,34 +119,87 @@ export const clavePosicion = (cuentaId: string, simbolo: string, lado: Lado): st
 
 /* ---------- proyeccion del monitor ---------- */
 
-export interface PuntaMonitor {
-  liquidacion: Decimal;
-  entrada: Decimal;
-  takeProfit: Decimal | null;
-}
+export type EstadoPunta = 'ok' | 'indeterminada' | 'sin-conexion' | 'modo-rest';
 
-export type EstadoFila = 'ok' | 'indeterminada' | 'sin-conexion' | 'modo-rest';
-
-/** Una fila del Centro de Monitoreo. Corresponde 1:1 con docs/04 W-01. */
-export interface FilaMonitor {
+/**
+ * Una punta viva, tal como la publica el proceso principal al Centro de
+ * Monitoreo.
+ *
+ * --------------------------------------------------------------------------
+ * Viaja la punta, no la fila
+ * --------------------------------------------------------------------------
+ * Hasta la Fase 6 este canal transportaba una `FilaMonitor` con las dos puntas
+ * dentro y una fila por subcuenta. No servia: en Bitget la posicion se
+ * identifica por cuenta, **simbolo** y lado -por eso `clavePosicion` lleva los
+ * tres-, y una casilla con BTC y ETH abiertos no cabe en una fila por
+ * subcuenta; la segunda posicion se perdia sin decirlo.
+ *
+ * Ahora viaja lo que el exchange tiene: una punta por posicion viva. Agrupar
+ * en filas -una por casilla y activo, con su long, su short y su distancia
+ * L/S- es cosa de la pantalla, que es la que sabe como se dibuja.
+ *
+ * Es tambien la unidad que ya usa la vista del renderer (`Position` de
+ * `shared/domain/panel-view.ts`), asi que la traduccion es campo a campo y no
+ * hay que partir ni recomponer nada por el camino.
+ */
+export interface PosicionMonitor {
+  /** La subcuenta, que es la casilla del panel. */
   cuentaId: string;
-  etiqueta: string;
+  /** La cuenta principal que la agrupa. La pantalla dibuja un acordeon por cada una. */
   grupoId: string;
-  long: PuntaMonitor | null;
-  short: PuntaMonitor | null;
-  /** `null` cuando falta cualquiera de las dos puntas. Nunca cero. */
-  distanciaLS: Decimal | null;
-  estado: EstadoFila;
+  etiqueta: string;
+  /** Simbolo de la API: `BTCUSDT`, `SBTCSUSDT`. */
+  simbolo: string;
+  /** Nombre corto del catalogo: `BTC`. Es lo que se ensena y con lo que se opera. */
+  activoId: string;
+  lado: Lado;
+  entrada: Decimal;
+  liquidacion: Decimal;
+  takeProfit: Decimal | null;
+  /** Porcentaje con el que se aprobo el Take Profit, para el distintivo. */
+  takeProfitPorcentaje: number | null;
+  /**
+   * Margen inicial acumulado, propiedad del panel.
+   *
+   * `null` en una posicion que ya estaba abierta cuando arranco el panel: ese
+   * numero no lo tiene Bitget -su `margen` es el de ahora, con el adicional
+   * dentro- y deducirlo seria ensenar como aprobado algo que nadie aprobo. La
+   * pantalla enseña un guion, que es la verdad.
+   */
+  margenInicial: Decimal | null;
+  /** Margen adicional agregado por el panel, o `null`. */
+  margenAdicional: Decimal | null;
+  /** Margen que la posicion tiene ahora segun Bitget. */
+  margenActual: Decimal;
+  apalancamiento: number;
+  tamano: Decimal;
+  /** De donde salio el ultimo dato. Distingue lo instantaneo de lo de hace 45 s. */
+  origen: 'ws' | 'rest';
+  actualizadoEn: string;
+  /** Cuando la abrio el panel. `null` si ya estaba abierta al arrancar. */
+  abiertaEn: string | null;
+  estado: EstadoPunta;
+  /** Texto para el operador cuando el estado no es `ok`. */
+  motivo: string | null;
 }
 
 /* ---------- lotes de ejecucion ---------- */
 
+/**
+ * Agregar y quitar margen son dos acciones, no una con signo.
+ *
+ * Comparten endpoint -`set-margin` con `amount` positivo o negativo- y comparten
+ * el codigo del motor, pero no el rotulo del informe: un lote que retira margen
+ * anunciado como «agregar-margen» dice al operador lo contrario de lo que hizo,
+ * y el margen es justo lo que el cliente pidio poder revisar sin margen de duda.
+ */
 export type AccionLote =
   | 'abrir'
   | 'cerrar'
   | 'take-profit'
   | 'quitar-take-profit'
   | 'agregar-margen'
+  | 'quitar-margen'
   | 'apalancamiento';
 
 /**

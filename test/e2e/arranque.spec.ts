@@ -106,8 +106,24 @@ test('los canales de operacion existen y ninguno opera con el panel bloqueado', 
 
     return {
       cierre: await intentar(() => window.pcb.cierrePlanificar({ simbolo: 'SBTCSUSDT', objetivos })),
+      tp: await intentar(() =>
+        window.pcb.tpPlanificar({ simbolo: 'SBTCSUSDT', objetivos, porcentaje: '35' })
+      ),
       quitarTp: await intentar(() =>
         window.pcb.tpPlanificarQuitar({ simbolo: 'SBTCSUSDT', objetivos })
+      ),
+      /*
+       * `cantidad` sin signo y `direccion` aparte: es lo que exige el esquema
+       * del canal. Un `-50` aqui lo rechazaria la validacion, y entonces este
+       * caso comprobaria el esquema en vez del cerrojo del panel bloqueado.
+       */
+      margen: await intentar(() =>
+        window.pcb.margenPlanificar({
+          simbolo: 'SBTCSUSDT',
+          objetivos,
+          cantidad: '50',
+          direccion: 'agregar'
+        })
       ),
       apalancamiento: await intentar(() =>
         window.pcb.apalancamientoPlanificar({ simbolo: 'SBTCSUSDT', objetivos, apalancamiento: 20 })
@@ -121,37 +137,104 @@ test('los canales de operacion existen y ninguno opera con el panel bloqueado', 
 });
 
 /*
- * Y los dos que se retiraron el 26/08/2026 **no existen**.
+ * La superficie de `window.pcb`, contra el binario ya compilado.
  *
- * Es la mitad de la garantia que el compilador no puede dar: el Take Profit y el
- * margen adicional viajan dentro de la apertura, y mientras su canal siguiera en
- * pie se podrian volver a enviar sobre una posicion que ya los recibio. Aqui se
- * comprueba contra el binario ya compilado, que es donde importa.
+ * --------------------------------------------------------------------------
+ * Esta prueba comprobaba lo contrario
+ * --------------------------------------------------------------------------
+ * Entre el 26/08/2026 y el 01/09/2026 exigia que los cuatro canales de ajuste
+ * **no** existieran: se habian retirado porque el Take Profit y el margen
+ * adicional viajan tambien dentro de la apertura, y con las dos vias abiertas la
+ * misma cantidad se podia enviar dos veces sobre la misma posicion.
+ *
+ * Volvieron porque el cliente necesita corregir lo que ya esta abierto, y lo que
+ * impide la repeticion ya no es que el canal no exista: es que el Take Profit
+ * sustituye el anterior en vez de anadirse, que el margen enseña `actual →
+ * resultante` antes de confirmar, y que en la pantalla los importes de la
+ * apertura y los del ajuste son campos distintos. Ver `PlanKind`.
+ *
+ * Lo que se comprueba aqui es que la superficie es **exactamente** la declarada,
+ * ni un canal de mas: un metodo que sobra en el preload es un canal que la
+ * pantalla puede llamar sin que ningun tipo lo impida.
  */
-test('no hay canal para aplicar Take Profit ni margen por separado', async () => {
-  const superficie = await ventana.evaluate(() => Object.keys(window.pcb));
+test('la superficie de window.pcb es la del contrato, sin canales de sobra', async () => {
+  const superficie = await ventana.evaluate(() => Object.keys(window.pcb).sort());
 
-  expect(superficie).not.toContain('tpPlanificar');
-  expect(superficie).not.toContain('tpEjecutar');
-  expect(superficie).not.toContain('margenPlanificar');
-  expect(superficie).not.toContain('margenEjecutar');
-  /* Los que sí quedan, para que la prueba falle si se cae la superficie entera. */
-  expect(superficie).toContain('aperturaPlanificar');
-  expect(superficie).toContain('tpPlanificarQuitar');
+  expect(superficie).toEqual(
+    [
+      'apalancamientoEjecutar',
+      'apalancamientoPlanificar',
+      'aperturaEjecutar',
+      'aperturaPlanificar',
+      'cierreEjecutar',
+      'cierrePlanificar',
+      'cuentasAgregar',
+      'cuentasEliminar',
+      'cuentasListar',
+      'cuentasVerificar',
+      'margenEjecutar',
+      'margenPlanificar',
+      'mercadoCatalogo',
+      'mercadoFijarRanura',
+      'mercadoPrecios',
+      'mercadoRanuras',
+      'monitorInstantanea',
+      'panelCuentas',
+      'pasoComprobar',
+      'pasoFijar',
+      'pasoHay',
+      'sistemaEstado',
+      'sistemaFijarNumeroPanel',
+      'sistemaInfo',
+      'suscribir',
+      'tpEjecutar',
+      'tpEjecutarQuitar',
+      'tpPlanificar',
+      'tpPlanificarQuitar',
+      'vaultAbrir',
+      'vaultCerrar',
+      'vaultComprobar',
+      'vaultCrear',
+      'vaultEstado'
+    ].sort()
+  );
 });
 
 /*
  * El catalogo es publico: no necesita credenciales ni almacen abierto, y por eso
  * la pantalla puede dibujar el selector de activo antes de desbloquear. Trae los
  * simbolos del mercado simulado, que es donde arranca un panel nuevo.
+ *
+ * --------------------------------------------------------------------------
+ * Esta prueba llamaba a un canal que ya no existe
+ * --------------------------------------------------------------------------
+ * Pedia `mercadoActivos`, la lista fija de ocho, retirada el 28/08/2026 cuando
+ * las casillas del selector pasaron a ser configurables. La sustituyen dos:
+ * `mercadoCatalogo` -el catalogo entero del mercado- y `mercadoRanuras` -las
+ * ocho casillas, con sus huecos y en su orden-.
+ *
+ * Se comprueban las dos, y no solo la que hacia falta para arreglar el rojo: lo
+ * que esta prueba defiende es que el selector se puede dibujar con el panel
+ * bloqueado, y eso hoy necesita las dos respuestas.
  */
 test('el catalogo de activos responde con el panel aun bloqueado', async () => {
-  const activos = await ventana.evaluate(() => window.pcb.mercadoActivos());
+  const catalogo = await ventana.evaluate(() => window.pcb.mercadoCatalogo());
 
-  expect(activos.length).toBeGreaterThan(0);
-  for (const activo of activos) {
+  expect(catalogo.length).toBeGreaterThan(0);
+  for (const activo of catalogo) {
     expect(activo.simbolo).toContain('SUSDT');
     expect(activo.apalancamientoMax).toBeGreaterThan(0);
+  }
+});
+
+test('las casillas de activo responden con el panel aun bloqueado', async () => {
+  const ranuras = await ventana.evaluate(() => window.pcb.mercadoRanuras());
+
+  /* Ocho huecos siempre, ocupados o no: es lo que dibuja el selector. */
+  expect(ranuras).toHaveLength(8);
+  for (const ranura of ranuras) {
+    if (ranura === null) continue;
+    expect(ranura.simbolo).toContain('SUSDT');
   }
 });
 

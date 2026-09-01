@@ -236,7 +236,11 @@ beforeEach(async () => {
   cuentas = new Cuentas(3);
   motor = new MotorLotes(cliente, cuentas, { dormir: async () => undefined });
   sesion = new Sesion(
-    { vault: join(carpeta, 'vault.enc'), cuentas: join(carpeta, 'cuentas.json') },
+    {
+      vault: join(carpeta, 'vault.enc'),
+      cuentas: join(carpeta, 'cuentas.json'),
+      activos: join(carpeta, 'activos.json')
+    },
     cliente,
     { mercado: 'simulado', motor, dormir: async () => undefined }
   );

@@ -14,6 +14,11 @@
  *   node scripts/ver-permisos.mjs                      (lee subcuentas-generadas.json)
  *   node scripts/ver-permisos.mjs --archivo otro.json
  *   node scripts/ver-permisos.mjs --env                (usa BITGET_DEMO_* de .env)
+ *   node scripts/ver-permisos.mjs --env MADRE          (usa BITGET_MADRE_* de .env)
+ *
+ * El prefijo de `--env` importa: las subcuentas se crean solo con futuros y
+ * todas devuelven los mismos codigos, asi que catalogar el traspaso o el retiro
+ * exige preguntar por una clave que los tenga -hoy, la de la cuenta madre-.
  */
 import { createHmac } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -61,12 +66,16 @@ async function principal() {
   const credenciales = [];
 
   if (args.includes('--env')) {
+    const prefijo = (opcion('env', 'DEMO') ?? 'DEMO').toUpperCase();
     credenciales.push({
-      etiqueta: 'BITGET_DEMO (.env)',
-      apiKey: process.env['BITGET_DEMO_API_KEY'] ?? '',
-      secretKey: process.env['BITGET_DEMO_SECRET_KEY'] ?? '',
-      passphrase: process.env['BITGET_DEMO_PASSPHRASE'] ?? ''
+      etiqueta: `BITGET_${prefijo}`,
+      apiKey: process.env[`BITGET_${prefijo}_API_KEY`] ?? '',
+      secretKey: process.env[`BITGET_${prefijo}_SECRET_KEY`] ?? '',
+      passphrase: process.env[`BITGET_${prefijo}_PASSPHRASE`] ?? ''
     });
+    if (credenciales[0].apiKey === '') {
+      throw new Error(`No hay BITGET_${prefijo}_API_KEY en el entorno ni en .env.`);
+    }
   } else {
     const archivo = opcion('archivo', 'subcuentas-generadas.json');
     const lista = JSON.parse(await readFile(archivo, 'utf8'));

@@ -26,7 +26,6 @@ import type { Lado } from '@shared/types';
 import type { Mercado } from '../../mercado';
 import type { ClienteBitget, RespuestaRest } from '../client';
 import type { Credencial } from '../signer';
-import { trazaApertura } from '../../../debug-apertura';
 
 export interface ColocacionTakeProfit {
   mercado: Mercado;
@@ -60,9 +59,6 @@ export function colocarTakeProfit(
     holdSide: tp.lado,
     clientOid: tp.clientOid
   };
-
-  /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
-  trazaApertura('3·cuerpo-take-profit', cuerpo);
 
   return cliente.peticionFirmada(
     credencial,

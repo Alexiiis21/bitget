@@ -9,7 +9,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { SUBCUENTAS_POR_GRUPO } from '@shared/constants';
+import { CUENTAS_MADRE_MAX, NOMBRES_CUENTA_MADRE, SUBCUENTAS_POR_GRUPO } from '@shared/constants';
 import { ErrorRegistro, RegistroCuentas } from '@main/domain/registro-cuentas';
 
 let carpeta: string;
@@ -338,6 +338,93 @@ describe('casillas', () => {
     expect(registro.cuenta(tercera.id)?.slot).toBe(3);
   });
 
+  /*
+   * La casilla la elige el operador desde el 28/08/2026: «esta subcuenta va en
+   * la 7». Antes la repartia el registro -la primera libre- y no habia forma de
+   * decirlo, asi que organizar la rejilla obligaba a dar de alta en el orden
+   * exacto en que se querian ver.
+   */
+  it('respeta la casilla que pide el alta, aunque haya huecos antes', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+
+    const cuenta = registro.agregar({
+      ...alta(registro.reservarId('A', 'Sub-07'), 'Sub-07'),
+      slot: 7
+    });
+
+    expect(cuenta.slot).toBe(7);
+    /* Y la siguiente sin casilla pedida sigue tomando la primera libre. */
+    expect(registro.agregar(alta(registro.reservarId('A', 'Sub-01'), 'Sub-01')).slot).toBe(1);
+  });
+
+  /* Un choque rechaza el alta en vez de desalojar a quien estuviera. */
+  it('no deja poner dos subcuentas en la misma casilla', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    registro.agregar({ ...alta(registro.reservarId('A', 'Sub-07'), 'Sub-07'), slot: 7 });
+
+    expect(() =>
+      registro.agregar({ ...alta(registro.reservarId('A', 'Sub-08'), 'Sub-08'), slot: 7 })
+    ).toThrow(/ya la ocupa «Sub-07»/);
+    /* Y el estorbo se dice antes de salir a la red, con el mismo mensaje. */
+    expect(registro.comprobarCabida('A', 'Sub-08', 7)?.motivo).toBe('casilla-ocupada');
+  });
+
+  /* La misma casilla de otra cuenta principal no es la misma casilla. */
+  it('la casilla 7 de la A y la 7 de la B conviven', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    registro.agregar({ ...alta(registro.reservarId('A', 'Sub-07'), 'Sub-07'), slot: 7 });
+
+    const b = registro.agregar({
+      ...alta(registro.reservarId('B', 'Sub-27'), 'Sub-27', 'B'),
+      slot: 7
+    });
+
+    expect(b.slot).toBe(7);
+  });
+
+  /* Rotar la clave y dejarla donde estaba no es chocar consigo misma. */
+  it('pedir la casilla que uno ya ocupa no molesta', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    const antes = registro.agregar({
+      ...alta(registro.reservarId('A', 'Sub-07'), 'Sub-07'),
+      slot: 7
+    });
+
+    const despues = registro.agregar({
+      ...alta(registro.reservarId('A', 'Sub-07'), 'Sub-07'),
+      slot: 7,
+      credencialId: 'cred_2'
+    });
+
+    expect(despues.id).toBe(antes.id);
+    expect(despues.slot).toBe(7);
+  });
+
+  /* Y mover una subcuenta de casilla es volver a darla de alta en otra. */
+  it('la misma subcuenta se puede mover a otra casilla libre', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    registro.agregar({ ...alta(registro.reservarId('A', 'Sub-07'), 'Sub-07'), slot: 7 });
+
+    const movida = registro.agregar({
+      ...alta(registro.reservarId('A', 'Sub-07'), 'Sub-07'),
+      slot: 12
+    });
+
+    expect(movida.slot).toBe(12);
+    expect(registro.listarCuentas()).toHaveLength(1);
+  });
+
+  it('una casilla fuera del 1 al 20 se rechaza', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+
+    expect(() =>
+      registro.agregar({
+        ...alta(registro.reservarId('A', 'Sub-01'), 'Sub-01'),
+        slot: SUBCUENTAS_POR_GRUPO + 1
+      })
+    ).toThrow(ErrorRegistro);
+  });
+
   it('rotar la clave de una subcuenta no la cambia de casilla', async () => {
     const registro = await RegistroCuentas.cargar(ruta);
     registro.agregar(alta(registro.reservarId('A', 'Sub-01'), 'Sub-01'));
@@ -353,17 +440,21 @@ describe('casillas', () => {
 });
 
 describe('topes del contrato', () => {
-  /* «Hasta 5 cuentas principales y 100 subcuentas». Presupuesto, seccion 1. */
-  it('no admite una sexta cuenta principal', async () => {
+  /*
+   * Quince cuentas principales -de la A a la O- y veinte subcuentas cada una:
+   * 300 en total. Eran cinco y 100 hasta el 28/08/2026. Ver `CUENTAS_MADRE_MAX`.
+   */
+  it('no admite una cuenta principal mas de las que caben', async () => {
     const registro = await RegistroCuentas.cargar(ruta);
-    for (const nombre of ['A', 'B', 'C', 'D', 'E']) {
+    for (const nombre of NOMBRES_CUENTA_MADRE) {
       registro.agregar(alta(registro.reservarId(nombre, 'Sub-01'), 'Sub-01', nombre));
     }
 
-    expect(() => registro.agregar(alta(registro.reservarId('F', 'Sub-01'), 'Sub-01', 'F'))).toThrow(
+    /* La que vendria despues de la O. */
+    expect(() => registro.agregar(alta(registro.reservarId('P', 'Sub-01'), 'Sub-01', 'P'))).toThrow(
       ErrorRegistro
     );
-    expect(registro.listarGrupos()).toHaveLength(5);
+    expect(registro.listarGrupos()).toHaveLength(CUENTAS_MADRE_MAX);
   });
 
   it('no admite la subcuenta 21 en la misma cuenta principal', async () => {

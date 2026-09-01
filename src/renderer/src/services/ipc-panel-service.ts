@@ -29,16 +29,21 @@ import type {
   BatchTarget,
   ClosedPosition,
   CloseRequest,
+  DeleteOutcome,
   LeverageRequest,
+  MarginRequest,
   OpenRequest,
   PlanDiscard,
   PlanKind,
+  Position,
+  PositionSnapshot,
   SystemInfo,
+  TpRequest,
   UnlockResult,
   ValidationResult
 } from '@shared/domain/panel-view';
 import type { ActivoIpc, CuentaPanel } from '@shared/ipc-contract';
-import type { EstadoConexion, EstadoJob, Lado, Lote } from '@shared/types';
+import type { EstadoConexion, EstadoJob, Lado, Lote, PosicionMonitor } from '@shared/types';
 import { NotImplementedError, type PanelService, type Unsubscribe } from '@shared/ports/panel-service';
 
 const ESTADO_A_STATUS: Record<EstadoConexion, ApiKeyStatus> = {
@@ -47,6 +52,26 @@ const ESTADO_A_STATUS: Record<EstadoConexion, ApiKeyStatus> = {
   conectando: 'conectando',
   desconectada: 'error'
 };
+
+/**
+ * Un activo del proceso principal, o el hueco de una casilla vacía.
+ *
+ * Acepta `null` porque las ocho casillas del selector llegan con sus huecos: la
+ * posición es parte del dato —el operador las edita por su número— y compactar
+ * la lista aquí las renumeraría al vaciar una.
+ */
+const aActivo = (a: ActivoIpc | null): Asset | null =>
+  a === null
+    ? null
+    : {
+        id: a.id,
+        symbol: a.simbolo,
+        label: a.etiqueta,
+        priceDecimals: a.decimalesPrecio,
+        maxLeverage: a.apalancamientoMax,
+        minLeverage: a.apalancamientoMin,
+        tradable: a.operable
+      };
 
 /** Proyección de la matriz tal como la envía el proceso principal. */
 const aCuenta = (c: CuentaPanel): Account => ({
@@ -61,6 +86,55 @@ const aCuenta = (c: CuentaPanel): Account => ({
     status: ESTADO_A_STATUS[s.estado],
     statusReason: s.motivo
   }))
+});
+
+/**
+ * Una punta viva del proceso principal, traducida a lo que dibuja la pantalla.
+ *
+ * Es traducción campo a campo y nada más: los cuatro distintivos se derivan de
+ * lo que la punta ya trae, sin preguntar nada ni recalcular ningún número.
+ *
+ * `tpDisplay` queda vacío —y el distintivo enseña un guion— cuando hay Take
+ * Profit pero no se sabe con qué porcentaje se puso. Pasa con las posiciones
+ * que ya estaban abiertas al arrancar: de esas el panel lee el precio de
+ * disparo del exchange, pero el porcentaje era del formulario y no viaja en
+ * ninguna respuesta. El precio sí se enseña, en su columna.
+ */
+const aPosicion = (p: PosicionMonitor): Position => ({
+  subAccountId: p.cuentaId,
+  side: p.lado,
+  assetId: p.activoId,
+  entryPrice: p.entrada,
+  liquidationPrice: p.liquidacion,
+  takeProfitPrice: p.takeProfit,
+  initialMarginAccum: p.margenInicial,
+  leverage: p.apalancamiento,
+  actions: {
+    /* Si llega hasta aquí, está abierta: es lo que significa estar viva. */
+    oe: true,
+    tp: p.takeProfit !== null,
+    mg: p.margenAdicional !== null,
+    /* El apalancamiento siempre está puesto; lo que importa es cuál. */
+    ap: true,
+    tpDisplay: p.takeProfitPorcentaje === null ? '' : `${p.takeProfitPorcentaje}%`,
+    mgDisplay: p.margenAdicional ?? '',
+    apDisplay: `${p.apalancamiento}x`
+  },
+  /*
+   * Sin calcular todavía, y por eso `false` en lugar de un valor inventado.
+   *
+   * «En riesgo de liquidación» es la distancia del precio de ahora al de
+   * liquidación, y eso pide el precio de marca junto a la posición y un umbral
+   * con justificación escrita en `shared/constants.ts`. Ninguna de las dos cosas
+   * entra en esta rebanada, que es liquidación, entrada y Take Profit. Poner
+   * aquí una aproximación —la pérdida no realizada contra el margen, por
+   * ejemplo— encendería el banner CRÍTICO con un umbral que nadie aprobó, y ese
+   * banner solo sirve mientras el operador se lo crea.
+   */
+  marginCritical: false,
+  hasError: p.estado === 'sin-conexion' || p.estado === 'indeterminada',
+  errorReason: p.motivo,
+  openedAt: p.abiertaEn
 });
 
 /**
@@ -96,7 +170,11 @@ const EJECUTORES: Record<
 > = {
   open: (id, solo) => window.pcb.aperturaEjecutar(id, solo),
   close: (id, solo) => window.pcb.cierreEjecutar(id, solo),
+  tp: (id, solo) => window.pcb.tpEjecutar(id, solo),
   'tp-remove': (id, solo) => window.pcb.tpEjecutarQuitar(id, solo),
+  /* Los dos sentidos comparten canal: la dirección ya viajó con el plan. */
+  'margin-add': (id, solo) => window.pcb.margenEjecutar(id, solo),
+  'margin-remove': (id, solo) => window.pcb.margenEjecutar(id, solo),
   leverage: (id, solo) => window.pcb.apalancamientoEjecutar(id, solo)
 };
 
@@ -156,27 +234,30 @@ export class IpcPanelService implements PanelService {
     };
   }
 
-  async setPanelNumber(): Promise<void> {
-    /*
-     * `numeroPanel` hoy es fijo por instancia (storage/instancia.ts), no
-     * editable desde la pantalla. Falta un canal IPC nuevo que lo persista.
-     * Ver reporte de brechas: "número de panel editable".
-     */
-    throw new NotImplementedError('setPanelNumber');
+  /**
+   * Cambia el número visible del panel. Lo guarda `instancia.json`.
+   *
+   * Estuvo sin implementar hasta el 28/08/2026 —lanzaba `NotImplemented`— y esa
+   * era la brecha completa: la pantalla dejaba teclear el número, el store lo
+   * aplicaba en el acto y el aviso «número de panel no persistido» pasaba
+   * desapercibido, así que el cambio duraba hasta el siguiente arranque.
+   */
+  async setPanelNumber(numeroPanel: number): Promise<void> {
+    await window.pcb.sistemaFijarNumeroPanel(numeroPanel);
   }
 
   /* ---------------- activos ---------------- */
 
-  async listAssets(): Promise<Asset[]> {
-    return (await window.pcb.mercadoActivos()).map((a) => ({
-      id: a.id,
-      symbol: a.simbolo,
-      label: a.etiqueta,
-      priceDecimals: a.decimalesPrecio,
-      maxLeverage: a.apalancamientoMax,
-      minLeverage: a.apalancamientoMin,
-      tradable: a.operable
-    }));
+  async listAssetSlots(): Promise<(Asset | null)[]> {
+    return (await window.pcb.mercadoRanuras()).map(aActivo);
+  }
+
+  async listAssetCatalog(): Promise<Asset[]> {
+    return (await window.pcb.mercadoCatalogo()).map((a) => aActivo(a) as Asset);
+  }
+
+  async setAssetSlot(index: number, symbol: string | null): Promise<(Asset | null)[]> {
+    return (await window.pcb.mercadoFijarRanura(index, symbol)).map(aActivo);
   }
 
   /**
@@ -238,16 +319,39 @@ export class IpcPanelService implements PanelService {
     throw new NotImplementedError('getHistory');
   }
 
-  subscribePositions(): Unsubscribe {
-    /*
-     * `monitor:instantanea` existe pero devuelve `[]` fijo, y el evento
-     * `monitor:filas` nunca lo emite el proceso principal (Fase 6, WebSocket
-     * de posiciones). Aunque se cableara hoy, `FilaMonitor` no lleva
-     * `assetId`, distintivos de acción ni margen inicial acumulado: faltaría
-     * ampliar ese tipo antes de poder traducirlo a `Position` sin inventar
-     * campos.
-     */
-    throw new NotImplementedError('subscribePositions');
+  /**
+   * Las posiciones vivas, del proceso principal.
+   *
+   * Se suscribe **antes** de pedir la foto inicial, no después: entre la
+   * petición y la suscripción cabe un empujón, y perderlo dejaría la pantalla
+   * con una posición cerrada dibujada hasta el siguiente cambio, que puede
+   * tardar minutos. Suscribirse primero puede repetir un dato; al revés,
+   * pierde uno.
+   */
+  subscribePositions(cb: (snapshot: PositionSnapshot) => void): Unsubscribe {
+    let vivo = true;
+
+    const cancelar = window.pcb.suscribir('monitor:posiciones', (posiciones) => {
+      if (vivo) cb({ positions: posiciones.map(aPosicion) });
+    });
+
+    void window.pcb.monitorInstantanea().then(
+      (posiciones) => {
+        if (vivo) cb({ positions: posiciones.map(aPosicion) });
+      },
+      () => {
+        /*
+         * La foto inicial no se pudo leer. No es motivo para tumbar la
+         * suscripción: el primer empujón la deja al día igual, y hasta
+         * entonces el monitor enseña que no hay nada, que es lo que sabe.
+         */
+      }
+    );
+
+    return () => {
+      vivo = false;
+      cancelar();
+    };
   }
 
   /* ---------------- escritura, en dos fases ---------------- */
@@ -328,7 +432,19 @@ export class IpcPanelService implements PanelService {
             : ` · ${e.modoMargenActual === 'isolated' ? 'aislado' : 'cruzado'} → ` +
               `${plan.modoMargen === 'isolated' ? 'aislado' : 'cruzado'}`)
       })),
-      discards: aDescartes(plan.descartes)
+      discards: aDescartes(plan.descartes),
+      /*
+       * La única de las cuatro que puede venir impedida. Las otras tres no
+       * comprometen saldo nuevo, así que no hay nada que pueda no caber.
+       */
+      blocker:
+        plan.impedimento === null
+          ? null
+          : {
+              code: plan.impedimento.codigo,
+              message: plan.impedimento.mensaje,
+              boxes: plan.impedimento.casillas
+            }
     };
   }
 
@@ -353,7 +469,46 @@ export class IpcPanelService implements PanelService {
           `${e.size} ${activo.id} · entrada ${e.precioEntrada ?? '—'}` +
           (e.margenLiberado === null ? '' : ` · libera ${e.margenLiberado} ${plan.monedaMargen}`)
       })),
-      discards: aDescartes(plan.descartes)
+      /* Cerrar libera saldo, nunca lo compromete: no hay nada que pueda no caber. */
+      discards: aDescartes(plan.descartes),
+      blocker: null
+    };
+  }
+
+  /**
+   * Pone —o sustituye— el Take Profit de posiciones ya abiertas.
+   *
+   * El detalle de cada casilla dice de dónde sale el precio, y dice además qué
+   * se quita cuando hay algo que quitar: «0,00263 → 0,00271» en vez de solo el
+   * destino. Sustituir sin enseñar qué se sustituye es hacerlo a escondidas.
+   */
+  async planTakeProfit(req: TpRequest): Promise<BatchPlan> {
+    const plan = await window.pcb.tpPlanificar({
+      simbolo: (await this.activoDe(req.assetId)).simbolo,
+      objetivos: req.targets.map(aObjetivo),
+      porcentaje: req.percent
+    });
+
+    return {
+      kind: 'tp',
+      id: plan.id,
+      title: 'Poner Take Profit',
+      summary: `${req.percent}% de ganancia sobre el margen inicial de cada posición`,
+      reference: null,
+      entries: plan.entradas.map((e) => ({
+        subAccountId: e.cuentaId,
+        side: e.lado,
+        label: e.etiqueta,
+        detail:
+          (e.precioDisparoAnterior === null
+            ? `TP a ${e.precioDisparo}`
+            : `TP ${e.precioDisparoAnterior} → ${e.precioDisparo} (sustituye el puesto)`) +
+          ` · entrada ${e.precioEntrada} · ${e.apalancamiento}x · ` +
+          `el precio se mueve ${e.movimientoPorcentaje}%`
+      })),
+      discards: aDescartes(plan.descartes),
+      /* Poner Take Profit no compromete saldo: no hay nada que pueda no caber. */
+      blocker: null
     };
   }
 
@@ -375,7 +530,50 @@ export class IpcPanelService implements PanelService {
         label: e.etiqueta,
         detail: `se quita el Take Profit puesto en ${e.precioDisparo}`
       })),
-      discards: aDescartes(plan.descartes)
+      discards: aDescartes(plan.descartes),
+      blocker: null
+    };
+  }
+
+  /**
+   * Agrega o retira margen de posiciones ya abiertas.
+   *
+   * El detalle es siempre `margen actual → resultante`, con el actual leído de
+   * Bitget al planificar y no de lo que el panel recuerde. Es lo que hace
+   * visible un envío repetido **antes** de enviarlo: una casilla que ya recibió
+   * el margen se ve porque su «actual» ya lo lleva dentro.
+   */
+  async planMargin(req: MarginRequest): Promise<BatchPlan> {
+    const quita = req.direction === 'quitar';
+    const plan = await window.pcb.margenPlanificar({
+      simbolo: (await this.activoDe(req.assetId)).simbolo,
+      objetivos: req.targets.map(aObjetivo),
+      cantidad: req.amount,
+      direccion: req.direction
+    });
+
+    return {
+      kind: quita ? 'margin-remove' : 'margin-add',
+      id: plan.id,
+      title: quita ? 'Quitar margen' : 'Agregar margen',
+      summary:
+        `${req.amount} ${plan.monedaMargen} por casilla · ` +
+        (quita
+          ? `libera ${plan.totalComprometido} ${plan.monedaMargen} en total`
+          : `compromete ${plan.totalComprometido} ${plan.monedaMargen} en total`),
+      reference: null,
+      entries: plan.entradas.map((e) => ({
+        subAccountId: e.cuentaId,
+        side: e.lado,
+        label: e.etiqueta,
+        detail: `margen ${e.margenActual} → ${e.margenResultante} ${plan.monedaMargen}`
+      })),
+      discards: aDescartes(plan.descartes),
+      /*
+       * El saldo insuficiente se resuelve casilla a casilla, como descarte: cada
+       * cuenta tiene el suyo, así que no hay un impedimento del lote entero.
+       */
+      blocker: null
     };
   }
 
@@ -398,7 +596,8 @@ export class IpcPanelService implements PanelService {
         label: e.etiqueta,
         detail: `${e.apalancamientoActual ?? '?'}x → ${e.apalancamiento}x`
       })),
-      discards: aDescartes(plan.descartes)
+      discards: aDescartes(plan.descartes),
+      blocker: null
     };
   }
 
@@ -433,8 +632,14 @@ export class IpcPanelService implements PanelService {
    * rotula la cantidad —`331 XRP`—, ya sin el prefijo del mercado simulado.
    */
   private async activoDe(assetId: string): Promise<ActivoIpc> {
-    const activo = (await window.pcb.mercadoActivos()).find((a) => a.id === assetId);
-    if (activo === undefined) {
+    /*
+     * Se busca entre las ocho casillas y no en el catálogo entero: lo que no
+     * ocupa una casilla no se opera. Es la misma regla que sostiene el buscador
+     * —elegir y operar son dos actos distintos—, y aquí es además la última
+     * comprobación antes de planificar sobre un activo que ya no está.
+     */
+    const activo = (await window.pcb.mercadoRanuras()).find((a) => a !== null && a.id === assetId);
+    if (activo === undefined || activo === null) {
       throw new Error(`El activo ${assetId} no está disponible en este mercado.`);
     }
     return activo;
@@ -460,6 +665,7 @@ export class IpcPanelService implements PanelService {
     const resultado = await window.pcb.cuentasAgregar({
       etiqueta: input.subAccountLabel,
       grupoNombre: input.accountName,
+      casilla: input.slot,
       apiKey: input.apiKey,
       secretKey: input.secretKey,
       passphrase: input.passphrase
@@ -488,8 +694,13 @@ export class IpcPanelService implements PanelService {
     };
   }
 
-  async deleteApiKey(id: string): Promise<void> {
-    await window.pcb.cuentasEliminar(id);
+  /*
+   * La contraseña de paso viaja con la baja y la comprueba el proceso principal.
+   * `ResultadoBaja` y `DeleteOutcome` son la misma respuesta a los dos lados de
+   * la frontera, así que no hay nada que traducir aquí.
+   */
+  async deleteApiKey(id: string, stepPassword: string): Promise<DeleteOutcome> {
+    return window.pcb.cuentasEliminar(id, stepPassword);
   }
 
   async unlockVault(masterPassword: string): Promise<UnlockResult> {

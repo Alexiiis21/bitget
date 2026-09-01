@@ -4,11 +4,16 @@ Aplicación de escritorio para Windows que centraliza la ejecución de acciones 
 múltiples cuentas de Bitget (futuros USDT-M) mediante su API oficial, desde una sola
 interfaz.
 
-**Estado: Fase 4 operable desde la pantalla.** Las seis funciones —abrir, cerrar, poner y quitar
-Take Profit, agregar margen y ajustar apalancamiento— se manejan con el ratón y sobre datos reales
-de Bitget: catálogo de activos, precios y saldos. Ninguna envía nada sin que el operador apruebe
-antes la lista concreta de lo que va a pasar en cada casilla. Las posiciones en vivo (Fase 6) son
-de una fase posterior; ver [`docs/00-fase-4-pantalla.md`](docs/00-fase-4-pantalla.md).
+**Estado: Fase 4 cerrada. Fase 5 —validación— en curso.** Las funciones —abrir, cerrar, poner
+y quitar Take Profit, agregar y quitar margen y ajustar apalancamiento— se manejan con el ratón y sobre
+datos reales de Bitget: catálogo de activos, precios y saldos. Ninguna envía nada sin que el
+operador apruebe antes la lista concreta de lo que va a pasar en cada casilla. El guion con el que
+se valida está en [`docs/00-validacion-fase-5.md`](docs/00-validacion-fase-5.md).
+
+**El Centro de Monitoreo pinta posiciones vivas, y aun así la Fase 6 no está abierta.** El barrido
+REST y el pool de sockets están construidos y probados, así que al abrir el panel las posiciones se
+ven. Lo que no está hecho es la fase: ni se ha revisado contra el uso real, ni entra en la
+validación en curso. Que se vea funcionando no significa que esté entregado.
 
 ## Requisitos
 
@@ -122,6 +127,7 @@ filtró lógica hacia el renderer.
 | [`docs/00-fase-4-take-profit.md`](docs/00-fase-4-take-profit.md) | Fase 4, función 3: Take Profit por porcentaje |
 | [`docs/00-fase-4-margen-apalancamiento.md`](docs/00-fase-4-margen-apalancamiento.md) | Fase 4, funciones 4 y 5: agregar margen y apalancamiento |
 | [`docs/00-fase-4-pantalla.md`](docs/00-fase-4-pantalla.md) | Fase 4: las seis funciones conectadas a la pantalla, con la prueba de QA |
+| [`docs/00-validacion-fase-5.md`](docs/00-validacion-fase-5.md) | Fase 5: el guion con el que el cliente valida, punto por punto |
 | [`docs/00-resumen-para-daniel.md`](docs/00-resumen-para-daniel.md) | Resumen para el cliente: lo que dijo y cómo quedó |
 | [`docs/cliente/entrega-mercado-real.md`](docs/cliente/entrega-mercado-real.md) | Los dos binarios del cliente, cómo se generan y cómo se distinguen |
 | [`docs/cotizacion-traspasos-entre-subcuentas.md`](docs/cotizacion-traspasos-entre-subcuentas.md) | Propuesta y estimación: traspaso de saldo entre subcuentas |

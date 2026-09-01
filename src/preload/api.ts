@@ -12,13 +12,16 @@ import type {
   PlanAperturaIpc,
   PlanApalancamientoIpc,
   PlanCierreIpc,
+  PlanMargenIpc,
   ActivoIpc,
   PlanQuitarTpIpc,
+  PlanTakeProfitIpc,
   ResultadoAlta,
+  ResultadoBaja,
   ResultadoPrueba,
   ResultadoVault
 } from '@shared/ipc-contract';
-import type { FilaMonitor, Lote } from '@shared/types';
+import type { Lote, PosicionMonitor } from '@shared/types';
 
 /**
  * Superficie minima expuesta al renderer.
@@ -30,6 +33,8 @@ import type { FilaMonitor, Lote } from '@shared/types';
 export const api: ApiPcb = {
   sistemaInfo: () => ipcRenderer.invoke('sistema:info') as Promise<InfoSistema>,
   sistemaEstado: () => ipcRenderer.invoke('sistema:estado') as Promise<EstadoApp>,
+  sistemaFijarNumeroPanel: (numero) =>
+    ipcRenderer.invoke('sistema:numero-panel', numero) as Promise<void>,
 
   vaultEstado: () => ipcRenderer.invoke('vault:estado') as Promise<EstadoVault>,
   vaultCrear: (contrasena) =>
@@ -43,13 +48,17 @@ export const api: ApiPcb = {
   cuentasListar: () => ipcRenderer.invoke('cuentas:listar') as Promise<FilaCuenta[]>,
   cuentasAgregar: (alta: AltaCuenta) =>
     ipcRenderer.invoke('cuentas:agregar', alta) as Promise<ResultadoAlta>,
-  cuentasEliminar: (cuentaId) => ipcRenderer.invoke('cuentas:eliminar', cuentaId) as Promise<boolean>,
+  cuentasEliminar: (cuentaId, contrasenaPaso) =>
+    ipcRenderer.invoke('cuentas:eliminar', cuentaId, contrasenaPaso) as Promise<ResultadoBaja>,
   cuentasVerificar: (cuentaId) =>
     ipcRenderer.invoke('cuentas:verificar', cuentaId) as Promise<ResultadoPrueba>,
 
   panelCuentas: () => ipcRenderer.invoke('panel:cuentas') as Promise<CuentaPanel[]>,
 
-  mercadoActivos: () => ipcRenderer.invoke('mercado:activos') as Promise<ActivoIpc[]>,
+  mercadoRanuras: () => ipcRenderer.invoke('mercado:ranuras') as Promise<(ActivoIpc | null)[]>,
+  mercadoCatalogo: () => ipcRenderer.invoke('mercado:catalogo') as Promise<ActivoIpc[]>,
+  mercadoFijarRanura: (indice, simbolo) =>
+    ipcRenderer.invoke('mercado:fijar-ranura', indice, simbolo) as Promise<(ActivoIpc | null)[]>,
   mercadoPrecios: () => ipcRenderer.invoke('mercado:precios') as Promise<Record<string, string>>,
 
   pasoHay: () => ipcRenderer.invoke('paso:hay') as Promise<boolean>,
@@ -64,16 +73,24 @@ export const api: ApiPcb = {
     ipcRenderer.invoke('cierre:planificar', peticion) as Promise<PlanCierreIpc>,
   cierreEjecutar: (planId, soloEstos) =>
     ipcRenderer.invoke('cierre:ejecutar', planId, soloEstos) as Promise<Lote>,
+  tpPlanificar: (peticion) =>
+    ipcRenderer.invoke('tp:planificar', peticion) as Promise<PlanTakeProfitIpc>,
+  tpEjecutar: (planId, soloEstos) =>
+    ipcRenderer.invoke('tp:ejecutar', planId, soloEstos) as Promise<Lote>,
   tpPlanificarQuitar: (peticion) =>
     ipcRenderer.invoke('tp:planificar-quitar', peticion) as Promise<PlanQuitarTpIpc>,
   tpEjecutarQuitar: (planId, soloEstos) =>
     ipcRenderer.invoke('tp:ejecutar-quitar', planId, soloEstos) as Promise<Lote>,
+  margenPlanificar: (peticion) =>
+    ipcRenderer.invoke('margen:planificar', peticion) as Promise<PlanMargenIpc>,
+  margenEjecutar: (planId, soloEstos) =>
+    ipcRenderer.invoke('margen:ejecutar', planId, soloEstos) as Promise<Lote>,
   apalancamientoPlanificar: (peticion) =>
     ipcRenderer.invoke('apalancamiento:planificar', peticion) as Promise<PlanApalancamientoIpc>,
   apalancamientoEjecutar: (planId, soloEstos) =>
     ipcRenderer.invoke('apalancamiento:ejecutar', planId, soloEstos) as Promise<Lote>,
 
-  monitorInstantanea: () => ipcRenderer.invoke('monitor:instantanea') as Promise<FilaMonitor[]>,
+  monitorInstantanea: () => ipcRenderer.invoke('monitor:instantanea') as Promise<PosicionMonitor[]>,
 
   suscribir<C extends CanalEvento>(canal: C, cb: (dato: EventosIpc[C]) => void): () => void {
     const escucha = (_e: unknown, dato: EventosIpc[C]): void => cb(dato);

@@ -32,12 +32,18 @@ export interface Mercado {
   /** Prefijo de los simbolos del mercado simulado. Vacio en el real. */
   prefijoSimbolo: string;
   /**
-   * Los simbolos que el panel deja operar, en el orden en que se enseñan.
+   * Los simbolos **de fabrica** del selector, en el orden en que se enseñan.
    *
    * Es una lista corta y explicita, no «todo lo que devuelva Bitget». El
    * cliente opera ocho activos y solo ocho; un selector con los 754 contratos
    * del exchange convertiria una eleccion de un vistazo en una busqueda, y
    * abriria la puerta a operar por error un activo que no es el suyo.
+   *
+   * Desde el 28/08/2026 esto es el **punto de partida**, no la ultima palabra:
+   * el operador cambia que activo hay en cada casilla desde el propio panel y
+   * su eleccion se guarda en `activos.json` -ver `ranuras-activos.ts`-. Lo que
+   * no puede cambiar es el numero de casillas. Un panel recien instalado, o uno
+   * cuyo archivo no se puede leer, arranca con esta lista.
    *
    * El mercado simulado no tiene los mismos: Bitget solo ofrece tres para
    * practicar, y XRP esta ahi porque es lo que hay, no porque se opere.

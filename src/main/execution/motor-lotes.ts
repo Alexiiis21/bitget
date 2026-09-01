@@ -46,7 +46,6 @@ import { randomUUID } from 'node:crypto';
 import Decimal from 'decimal.js';
 import { CONCURRENCIA_MAXIMA } from '@shared/constants';
 import type { AccionLote, Job, Lado, Lote } from '@shared/types';
-import { trazaApertura, trazaFallo } from '../debug-apertura';
 import { ErrorBitget } from '../bitget/errors';
 import type { Mercado } from '../bitget/mercado';
 import type { ClienteBitget } from '../bitget/rest/client';
@@ -331,8 +330,17 @@ export type MotivoDescarte =
   | 'sin-posicion'
   /** No se pudo consultar que tiene abierto, asi que no se toca. */
   | 'posiciones-ilegibles'
-  /** Bitget solo permite agregar margen en aislado. */
+  /** Bitget solo permite mover margen por posicion en aislado. */
   | 'margen-cruzado'
+  /** Se pedia retirar tanto margen como el que hay, o mas: eso es cerrar. */
+  | 'margen-no-disponible'
+  /**
+   * La posicion ya tiene Take Profit y Bitget no dice con que `orderId`.
+   *
+   * Sin el no se puede quitar, y poner el nuevo encima dejaria dos ordenes de
+   * cierre sobre la misma posicion. Ver `planificarTakeProfit`.
+   */
+  | 'tp-anterior-sin-identificador'
   /** No se pudo leer en que modo de margen esta el simbolo, asi que no se abre. */
   | 'modo-margen-ilegible'
   /** No hay ningun Take Profit puesto: no habia nada que quitar. */
@@ -363,6 +371,31 @@ export interface AvisoPlan {
   mensaje: string;
 }
 
+/**
+ * Lo que impide enviar el plan **entero**, aunque haya casillas viables.
+ *
+ * --------------------------------------------------------------------------
+ * La tercera categoria, y por que hacia falta
+ * --------------------------------------------------------------------------
+ * Ya habia dos: el descarte -«esta casilla no puede, las demas si»- y el aviso
+ * -«se puede, pero mira esto»-. Faltaba la de «no sale ninguna, y estas son las
+ * que lo impiden», que es distinta de las dos: el problema es de una casilla,
+ * pero la consecuencia es de todo el lote.
+ *
+ * Se resuelve como impedimento y no lanzando `ErrorPlan` a proposito. Lanzar
+ * corta antes de que exista plan, y entonces el operador ve un aviso suelto sin
+ * saber **cuales** de sus cuarenta casillas van cortas. El impedimento deja que
+ * el plan se construya entero -con sus descartes, con su motivo por casilla- y
+ * solo cierra la puerta de salida. El cliente lo pidio asi el 29/08/2026: que el
+ * motivo salga en la confirmacion, antes de teclear la contrasena.
+ */
+export interface ImpedimentoPlan {
+  codigo: 'saldo-margen-adicional';
+  mensaje: string;
+  /** Cuantas casillas lo provocan. Las nombra la lista de descartes. */
+  casillas: number;
+}
+
 export interface PlanApertura extends PlanBase<EntradaPlan> {
   apalancamiento: number;
   precioLimite: string | null;
@@ -390,6 +423,8 @@ export interface PlanApertura extends PlanBase<EntradaPlan> {
    * el momento de ejecutar podria no ser el mismo que se confirmo.
    */
   takeProfitPorcentaje: string | null;
+  /** Lo que impide enviar el lote entero, o `null`. Ver `ImpedimentoPlan`. */
+  impedimento: ImpedimentoPlan | null;
 }
 
 /* ---------------- cierre de operaciones ---------------- */
@@ -439,6 +474,31 @@ export interface EntradaTakeProfit extends EntradaLote {
   apalancamiento: number;
   /** Cuanto tiene que moverse el precio, en %. Util para ver si es alcanzable. */
   movimientoPorcentaje: string;
+  /**
+   * El Take Profit que la posicion **ya tiene puesto**, si tiene alguno.
+   *
+   * --------------------------------------------------------------------------
+   * Sin esto, poner el Take Profit dejaria dos
+   * --------------------------------------------------------------------------
+   * `place-tpsl-order` no reemplaza nada: cada llamada crea su plan. El
+   * `clientOid` protege del reenvio del **mismo** plan, pero no de colocar uno
+   * nuevo sobre una posicion que ya llevaba el suyo -son dos `clientOid`
+   * distintos, asi que Bitget acepta los dos y la posicion acaba con dos
+   * ordenes de cierre-.
+   *
+   * De ahi que el plan lea antes que hay puesto y lo traiga consigo: al
+   * ejecutar se quita el anterior y se coloca el nuevo, en ese orden, de modo
+   * que «poner Take Profit» sobre una posicion que ya lo tiene lo **sustituye**.
+   * Y de ahi que el precio anterior viaje hasta la pantalla: el operador aprueba
+   * «0,00263 → 0,00271», que es lo que de verdad va a pasar.
+   *
+   * Los tres campos van juntos o no van: `orderIdAnterior` es lo unico que
+   * sirve para cancelar, y `planTypeAnterior` es obligatorio porque cancelar con
+   * otro tipo responde exito y no quita nada. Ver `cancelarPlan`.
+   */
+  precioDisparoAnterior: string | null;
+  orderIdAnterior: string | null;
+  planTypeAnterior: string | null;
 }
 
 export interface PlanTakeProfit extends PlanBase<EntradaTakeProfit> {
@@ -474,17 +534,34 @@ export interface EntradaQuitarTakeProfit extends EntradaLote {
 
 export type PlanQuitarTakeProfit = PlanBase<EntradaQuitarTakeProfit>;
 
-/* ---------------- agregar margen ---------------- */
+/* ---------------- agregar y quitar margen ---------------- */
+
+/**
+ * Hacia donde va el margen. Lo decide el operador con el boton que pulsa.
+ *
+ * No se deduce del signo de un numero tecleado: un `-` de mas o de menos en un
+ * campo cambiaria agregar por retirar sin que nada lo enseñe, y retirar margen
+ * acerca la liquidacion. El signo lo pone el motor a partir de esto.
+ */
+export type DireccionMargen = 'agregar' | 'quitar';
 
 export interface PeticionMargen {
   mercado: Mercado;
   simbolo: string;
   objetivos: ObjetivoApertura[];
-  /** Margen a anadir a cada posicion, en moneda de margen. */
+  /** Margen a mover en cada posicion, en moneda de margen. Siempre positivo. */
   cantidad: string;
+  direccion: DireccionMargen;
 }
 
 export interface EntradaMargen extends EntradaLote {
+  /**
+   * Lo que se envia a `set-margin`, **ya con signo**: negativo para retirar.
+   *
+   * Es el unico sitio donde el signo existe. `PlanMargen.cantidad` es la cifra
+   * que tecleo el operador -siempre positiva- y `direccion` dice que se hace con
+   * ella; aqui las dos ya estan resueltas en el valor que viaja.
+   */
   cantidad: string;
   /** Margen que tiene la posicion ahora. */
   margenActual: string;
@@ -493,8 +570,16 @@ export interface EntradaMargen extends EntradaLote {
 }
 
 export interface PlanMargen extends PlanBase<EntradaMargen> {
+  /** La cifra tecleada, sin signo. El sentido lo da `direccion`. */
   cantidad: string;
-  /** Suma de lo que se va a comprometer. Es dinero nuevo saliendo del saldo. */
+  direccion: DireccionMargen;
+  /**
+   * Suma de lo que se mueve en total, sin signo.
+   *
+   * Al agregar es dinero nuevo saliendo del saldo; al quitar, dinero que vuelve
+   * al disponible. Las dos cifras importan al operador y por eso se calcula
+   * igual en los dos sentidos: quien pone el verbo delante es `direccion`.
+   */
   totalComprometido: string;
 }
 
@@ -721,11 +806,6 @@ export class MotorLotes {
           } catch (e) {
             configuracion.set(cuentaId, null);
             motivoIlegible.set(cuentaId, e instanceof Error ? e.message : String(e));
-            /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
-            trazaFallo('1·leer-config-simbolo-FALLÓ', e, {
-              cuentaId,
-              simbolo: peticion.simbolo
-            });
           }
         })
       );
@@ -839,21 +919,6 @@ export class MotorLotes {
         precioDisparoTp
       });
 
-      /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
-      trazaApertura('1·planificar-apertura', {
-        cuentaId: cuenta.cuentaId,
-        lado: objetivo.lado,
-        modoMargenPedido: peticion.modoMargen,
-        modoMargenSimbolo: config.modoMargen,
-        margenPedido: peticion.margenInicial,
-        margenAdicional,
-        apalancamientoPedido: peticion.apalancamiento,
-        apalancamientoVigente: apalancamientoDe(config, peticion.modoMargen, objetivo.lado),
-        size: calculo.dimension.size,
-        margenReal: calculo.dimension.margenReal,
-        nocional: calculo.dimension.nocional
-      });
-
       /*
        * El apalancamiento se fija una vez y queda fijo; la apertura no lo
        * cambia. Pero el margen que se compromete depende de el: la misma
@@ -884,20 +949,36 @@ export class MotorLotes {
     });
 
     /*
-     * DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts
+     * Si a alguna casilla no le cabe el margen adicional, no se abre ninguna.
      *
-     * El desenlace del plan entero, en una linea. Las trazas por casilla solo
-     * salen de las que **si** entran, asi que un plan que se queda sin ninguna
-     * -el caso de «no manda la operacion»- no dejaba rastro de por que.
+     * Es la misma regla que ya gobierna el margen adicional en cruzado, y la
+     * pidio el cliente con las mismas palabras: «si no se puede agregar el
+     * margen adicional, no abrir la operacion, porque eso indica que hay algun
+     * parametro mal». Aqui el parametro mal puede ser el importe, el saldo de
+     * esa cuenta o la casilla marcada, y por eso el mensaje nombra las tres
+     * salidas en lugar de decir solo que no se puede.
+     *
+     * Solo aplica **con margen adicional pedido**. Sin el, una casilla corta de
+     * saldo sigue siendo un descarte y las demas abren: pedir margen adicional
+     * es declarar un colchon concreto, y abrir la mitad de las casillas con ese
+     * colchon y la otra mitad sin el es justo lo que el operador no aprobo.
      */
-    trazaApertura('1·plan-apertura', {
-      planId: id,
-      simbolo: peticion.simbolo,
-      entradas: entradas.length,
-      descartes: descartes.length,
-      motivos: descartes.map((d) => d.motivo).join(',') || '—',
-      avisos: avisos.length
-    });
+    const cortas = descartes.filter((d) => d.motivo === 'margen-insuficiente');
+    const impedimento: ImpedimentoPlan | null =
+      margenAdicional === null || cortas.length === 0
+        ? null
+        : {
+            codigo: 'saldo-margen-adicional',
+            casillas: cortas.length,
+            mensaje:
+              `No se abre ninguna posición: a ${cortas.length} ` +
+              `${cortas.length === 1 ? 'casilla no le cabe' : 'casillas no les cabe'} ` +
+              `el margen inicial más los ${margenAdicional} de margen adicional. ` +
+              'Se pidió abrir con ese margen adicional, y abrir solo las que sí caben dejaría ' +
+              'la mitad del lote con menos colchón del aprobado. Baje los importes, añada saldo ' +
+              `a ${cortas.length === 1 ? 'esa cuenta' : 'esas cuentas'} o desmarque ` +
+              `${cortas.length === 1 ? 'esa casilla' : 'esas casillas'} para continuar.`
+          };
 
     return {
       id,
@@ -913,6 +994,7 @@ export class MotorLotes {
       entradas,
       descartes,
       avisos,
+      impedimento,
       creadoEn: this.ahora().toISOString()
     };
   }
@@ -1032,6 +1114,15 @@ export class MotorLotes {
    * El apalancamiento se toma **de la posicion**, no de la cuenta: es el que de
    * verdad se aplico al abrirla, y es el unico que hace que el porcentaje
    * signifique lo que el operador espera.
+   *
+   * --------------------------------------------------------------------------
+   * Tambien lee lo que ya hay puesto
+   * --------------------------------------------------------------------------
+   * Poner Take Profit sobre una posicion que ya lo tiene lo **sustituye**, no lo
+   * duplica, y para sustituirlo hace falta saber cual quitar. Por eso se
+   * consultan ademas los planes pendientes de la cuenta: si no se pueden leer,
+   * la casilla se descarta en lugar de colocar a ciegas -colocar sin saber
+   * dejaria dos ordenes de cierre sobre la misma posicion-.
    */
   async planificarTakeProfit(peticion: PeticionTakeProfitLote): Promise<PlanTakeProfit> {
     if (peticion.objetivos.length === 0) {
@@ -1068,9 +1159,11 @@ export class MotorLotes {
       }
 
       let abiertas: PosicionBitget[];
+      let puestos: PlanPendiente[];
       try {
         const r = await obtenerPosiciones(this.cliente, cuenta.credencial, peticion.mercado);
         abiertas = r.datos;
+        puestos = await planesPendientes(this.cliente, cuenta.credencial, peticion.mercado);
       } catch (e) {
         for (const objetivo of objetivos) {
           descartes.push({
@@ -1097,6 +1190,9 @@ export class MotorLotes {
           continue;
         }
 
+        /* El que ya esta puesto, para quitarlo antes de colocar el nuevo. */
+        const anterior = buscarTakeProfit(puestos, peticion.simbolo, objetivo.lado);
+
         const apalancamiento =
           Number(posicion.leverage ?? 0) || (apalancamientoVigente(cuenta, objetivo.lado) ?? 0);
 
@@ -1119,6 +1215,27 @@ export class MotorLotes {
           continue;
         }
 
+        /*
+         * Hay Take Profit puesto y Bitget no dice con que identificador.
+         *
+         * Sin `orderId` no se puede cancelar, y colocar el nuevo encima dejaria
+         * dos ordenes de cierre sobre la misma posicion. Se descarta la casilla:
+         * de las dos salidas posibles, dejarla como esta es la que no toca
+         * dinero.
+         */
+        if (anterior !== null && (anterior.orderId ?? '') === '') {
+          descartes.push({
+            cuentaId,
+            etiqueta: cuenta.etiqueta,
+            lado: objetivo.lado,
+            motivo: 'tp-anterior-sin-identificador',
+            mensaje:
+              'La posición ya tiene un Take Profit puesto y Bitget no informa su identificador, ' +
+              'así que no se puede quitar para sustituirlo. Quítelo en Bitget y vuelva a intentarlo.'
+          });
+          continue;
+        }
+
         entradas.push({
           cuentaId,
           etiqueta: cuenta.etiqueta,
@@ -1127,19 +1244,13 @@ export class MotorLotes {
           precioDisparo: calculo.disparo.precioDisparo,
           precioEntrada: posicion.openPriceAvg ?? '',
           apalancamiento,
-          movimientoPorcentaje: calculo.disparo.movimientoPorcentaje
+          movimientoPorcentaje: calculo.disparo.movimientoPorcentaje,
+          precioDisparoAnterior: anterior?.triggerPrice ?? null,
+          orderIdAnterior: anterior?.orderId ?? null,
+          /* `pos_profit` por defecto: cancelar con el tipo equivocado no falla, no quita. */
+          planTypeAnterior: anterior === null ? null : (anterior.planType ?? 'pos_profit')
         });
 
-        /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
-        trazaApertura('1·planificar-take-profit', {
-          cuentaId,
-          lado: objetivo.lado,
-          porcentajePedido: peticion.porcentaje,
-          precioEntrada: posicion.openPriceAvg,
-          apalancamientoPosicion: posicion.leverage,
-          apalancamientoUsado: apalancamiento,
-          precioDisparo: calculo.disparo.precioDisparo
-        });
         indice += 1;
       }
     }
@@ -1266,29 +1377,41 @@ export class MotorLotes {
   /* ---------------- planificacion de agregar margen ---------------- */
 
   /**
-   * Calcula cuanto margen se anade a cada posicion. **No envia nada.**
+   * Calcula cuanto margen se mueve en cada posicion. **No envia nada.**
    *
    * Es la funcion mas delicada de las cinco y por eso comprueba mas cosas antes
    * de enviar. El cliente lo dijo sin rodeos: de todo lo que puede salir mal, el
-   * margen es lo critico. Aqui eso se traduce en tres puertas:
+   * margen es lo critico. Aqui eso se traduce en cuatro puertas:
    *
-   *  1. Que exista la posicion. Anadir margen a lo que no existe no es un fallo
+   *  1. Que exista la posicion. Mover margen en lo que no existe no es un fallo
    *     que haya que arreglar: es que no habia nada.
    *  2. Que la posicion este en **margen aislado**. Bitget lo exige, y decirlo
    *     aqui evita una peticion y un mensaje incomprensible.
-   *  3. Que la cuenta tenga saldo. Es dinero nuevo saliendo del disponible, y
-   *     enterarse a mitad de un lote de cien es enterarse tarde.
+   *  3. Al agregar, que la cuenta tenga saldo. Es dinero nuevo saliendo del
+   *     disponible, y enterarse a mitad de un lote de cien es enterarse tarde.
+   *  4. Al quitar, que quede margen que quitar. Retirar todo el margen de una
+   *     posicion abierta no es una retirada: es pedir su liquidacion.
+   *
+   * --------------------------------------------------------------------------
+   * El signo lo pone aqui `direccion`, no el operador
+   * --------------------------------------------------------------------------
+   * `peticion.cantidad` es siempre positiva -es la cifra tecleada- y `direccion`
+   * dice hacia donde va. Lo que llega a `set-margin` con signo es
+   * `EntradaMargen.cantidad`, calculada aqui. Asi un `-` de mas en un campo no
+   * puede convertir en silencio un aporte de margen en una retirada, que es
+   * exactamente el error que acerca una liquidacion sin que nadie lo vea.
    */
   async planificarMargen(peticion: PeticionMargen): Promise<PlanMargen> {
     if (peticion.objetivos.length === 0) {
       throw new ErrorPlan('sin-objetivos', 'No hay ninguna casilla seleccionada.');
     }
 
+    const quita = peticion.direccion === 'quitar';
     const cantidad = new Decimal(peticion.cantidad || '0');
     if (!cantidad.isFinite() || cantidad.lessThanOrEqualTo(0)) {
       throw new ErrorPlan(
         'cantidad-invalida',
-        'El margen a agregar debe ser un número mayor que cero.'
+        `El margen a ${quita ? 'quitar' : 'agregar'} debe ser un número mayor que cero.`
       );
     }
 
@@ -1350,7 +1473,7 @@ export class MotorLotes {
             etiqueta: cuenta.etiqueta,
             lado: objetivo.lado,
             motivo: 'sin-posicion',
-            mensaje: `No hay ninguna posición ${objetivo.lado} abierta a la que agregarle margen.`
+            mensaje: `No hay ninguna posición ${objetivo.lado} abierta a la que ${quita ? 'quitarle' : 'agregarle'} margen.`
           });
           continue;
         }
@@ -1365,65 +1488,74 @@ export class MotorLotes {
              * El mensaje dice **por que** no se puede, no solo que no se puede.
              * Lo explico el cliente el 25/08/2026 y es la diferencia entre un
              * error del panel y una propiedad del exchange: en cruzado no hay
-             * margen por posicion que agregar, porque lo toma del saldo de la
-             * cuenta segun lo va necesitando.
+             * margen por posicion que mover, porque lo toma del saldo de la
+             * cuenta segun lo va necesitando. Vale igual en los dos sentidos: lo
+             * que no existe por posicion no se agrega ni se retira.
              */
             mensaje:
-              'La posición está en margen CRUZADO, donde no se agrega margen por posición: ' +
+              'La posición está en margen CRUZADO, donde no hay margen por posición: ' +
               'Bitget lo toma del saldo total de la cuenta según lo necesita. ' +
-              'Para poder agregarlo, la posición tiene que estar en margen AISLADO.'
+              `Para poder ${quita ? 'retirarlo' : 'agregarlo'}, la posición tiene que estar en margen AISLADO.`
           });
           continue;
         }
-
-        if (disponible.lessThan(cantidad)) {
-          descartes.push({
-            cuentaId,
-            etiqueta: cuenta.etiqueta,
-            lado: objetivo.lado,
-            motivo: 'margen-insuficiente',
-            mensaje: `Saldo insuficiente: quedan ${disponible.toFixed()} y hacen falta ${cantidad.toFixed()}.`
-          });
-          continue;
-        }
-        disponible = disponible.minus(cantidad);
 
         const actual = new Decimal(posicion.marginSize ?? '0');
+
+        /*
+         * Al quitar no se mira el saldo -el dinero vuelve al disponible- sino el
+         * margen que hay puesto: dejar la posicion en cero no es retirar margen,
+         * es pedir su liquidacion. Se exige que quede algo, y cuanto puede
+         * quedar de verdad lo decide Bitget con el margen de mantenimiento: si
+         * la cifra es demasiado alta, lo rechaza al enviar con su propio motivo.
+         */
+        if (quita) {
+          if (cantidad.greaterThanOrEqualTo(actual)) {
+            descartes.push({
+              cuentaId,
+              etiqueta: cuenta.etiqueta,
+              lado: objetivo.lado,
+              motivo: 'margen-no-disponible',
+              mensaje:
+                `La posición tiene ${actual.toFixed()} de margen y se pedía retirar ${cantidad.toFixed()}: ` +
+                'quitarlo entero dejaría la posición sin margen y Bitget la liquidaría. Para eso, ciérrela.'
+            });
+            continue;
+          }
+        } else {
+          if (disponible.lessThan(cantidad)) {
+            descartes.push({
+              cuentaId,
+              etiqueta: cuenta.etiqueta,
+              lado: objetivo.lado,
+              motivo: 'margen-insuficiente',
+              mensaje: `Saldo insuficiente: quedan ${disponible.toFixed()} y hacen falta ${cantidad.toFixed()}.`
+            });
+            continue;
+          }
+          disponible = disponible.minus(cantidad);
+        }
+
         entradas.push({
           cuentaId,
           etiqueta: cuenta.etiqueta,
           lado: objetivo.lado,
           clientOid: clientOidDe(id, indice, objetivo.lado),
-          cantidad: cantidad.toFixed(),
+          /* El unico sitio con signo: `set-margin` retira con `amount` negativo. */
+          cantidad: quita ? cantidad.negated().toFixed() : cantidad.toFixed(),
           margenActual: actual.toFixed(),
-          margenResultante: actual.plus(cantidad).toFixed()
+          margenResultante: (quita ? actual.minus(cantidad) : actual.plus(cantidad)).toFixed()
         });
         indice += 1;
       }
     }
-
-    /*
-     * DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts
-     *
-     * `set-margin` es la unica peticion del panel sin `clientOid`, asi que dos
-     * planes de margen sobre la misma posicion la dejan con el doble del que se
-     * aprobo y nada lo impide. Contarlos es la unica forma de verlo.
-     */
-    trazaApertura('1·plan-margen', {
-      planId: id,
-      simbolo: peticion.simbolo,
-      cantidadPorCasilla: cantidad.toFixed(),
-      entradas: entradas.length,
-      totalComprometido: cantidad.times(entradas.length).toFixed(),
-      descartes: descartes.length,
-      motivos: descartes.map((d) => d.motivo).join(',') || '—'
-    });
 
     return {
       id,
       mercado: peticion.mercado,
       simbolo: peticion.simbolo,
       cantidad: cantidad.toFixed(),
+      direccion: peticion.direccion,
       totalComprometido: cantidad.times(entradas.length).toFixed(),
       entradas,
       descartes,
@@ -1515,17 +1647,6 @@ export class MotorLotes {
   async ejecutar(plan: PlanApertura, soloEstos?: readonly string[]): Promise<Lote> {
     return this.correrLote(plan, 'abrir', soloEstos, {
       enviar: async (cuenta, entrada) => {
-        /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
-        trazaApertura('2·enviar-apertura', {
-          cuentaId: cuenta.cuentaId,
-          lado: entrada.lado,
-          modoMargenPedido: entrada.modoMargen,
-          modoMargenSimbolo: entrada.modoMargenActual,
-          size: entrada.size,
-          precioLimite: plan.precioLimite,
-          clientOid: entrada.clientOid
-        });
-
         /*
          * El modo de margen se fija **antes** de abrir, y solo si de verdad
          * difiere.
@@ -1544,13 +1665,6 @@ export class MotorLotes {
          * el fallo del 25/08/2026.
          */
         if (entrada.modoMargenActual !== entrada.modoMargen) {
-          /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
-          trazaApertura('2·cambiar-modo-margen', {
-            cuentaId: cuenta.cuentaId,
-            simbolo: plan.simbolo,
-            de: entrada.modoMargenActual,
-            a: entrada.modoMargen
-          });
           await this.asegurarModoMargen(cuenta, plan.mercado, plan.simbolo, entrada.modoMargen);
         }
 
@@ -1663,25 +1777,38 @@ export class MotorLotes {
   }
 
   /**
-   * Coloca los Take Profit de un plan ya aprobado.
+   * Coloca los Take Profit de un plan ya aprobado. **Sustituye el anterior.**
    *
-   * Reintentar es seguro por partida doble: el `clientOid` impide que un
-   * reenvio deje dos Take Profit sobre la misma posicion, y lo indeterminado se
-   * resuelve mirando **los planes que Bitget tiene puestos**, que es la verdad
-   * de fondo y no depende de que respuesta llegara.
+   * --------------------------------------------------------------------------
+   * Quitar y poner, en ese orden
+   * --------------------------------------------------------------------------
+   * `place-tpsl-order` no reemplaza: cada llamada crea su plan. Sobre una
+   * posicion que ya tiene Take Profit, colocar sin mas dejaria dos ordenes de
+   * cierre. Por eso, cuando el plan trae `orderIdAnterior`, se cancela ese
+   * primero y solo despues se coloca el nuevo.
+   *
+   * El orden importa y no es reversible: colocar primero dejaria dos puestos a
+   * la vez durante el hueco entre las dos peticiones, y si la cancelacion
+   * fallara se quedarian los dos. Cancelar primero deja el hueco contrario -unos
+   * milisegundos sin proteccion- que es el que se puede reintentar sin duplicar
+   * nada.
+   *
+   * Reintentar sigue siendo seguro: el `clientOid` impide que un reenvio deje
+   * dos Take Profit del mismo plan, cancelar un plan ya cancelado no hace nada,
+   * y lo indeterminado se resuelve mirando **los planes que Bitget tiene
+   * puestos**, que es la verdad de fondo y no depende de que respuesta llegara.
    */
   async ejecutarTakeProfit(plan: PlanTakeProfit, soloEstos?: readonly string[]): Promise<Lote> {
     return this.correrLote(plan, 'take-profit', soloEstos, {
       enviar: async (cuenta, entrada) => {
-        /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
-        trazaApertura('2·enviar-take-profit', {
-          cuentaId: cuenta.cuentaId,
-          lado: entrada.lado,
-          precioDisparo: entrada.precioDisparo,
-          precioEntrada: entrada.precioEntrada,
-          apalancamiento: entrada.apalancamiento,
-          clientOid: entrada.clientOid
-        });
+        if (entrada.orderIdAnterior !== null) {
+          await cancelarPlan(this.cliente, cuenta.credencial, {
+            mercado: plan.mercado,
+            simbolo: plan.simbolo,
+            orderId: entrada.orderIdAnterior,
+            planType: entrada.planTypeAnterior ?? 'pos_profit'
+          });
+        }
 
         const r = await colocarTakeProfit(this.cliente, cuenta.credencial, {
           mercado: plan.mercado,
@@ -1690,7 +1817,33 @@ export class MotorLotes {
           precioDisparo: entrada.precioDisparo,
           clientOid: entrada.clientOid
         });
-        return { ordenId: r.datos.orderId ?? null, mensaje: null };
+
+        return {
+          ordenId: r.datos.orderId ?? null,
+          mensaje:
+            entrada.precioDisparoAnterior === null
+              ? null
+              : `Take Profit ${entrada.precioDisparoAnterior} → ${entrada.precioDisparo}`
+        };
+      },
+
+      /*
+       * Antes de **reenviar** tras un fallo transitorio: ¿ya quedo puesto?
+       *
+       * Un reenvio del mismo `clientOid` no duplicaria el Take Profit -Bitget lo
+       * rechaza-, pero volveria a cancelar: y lo que cancelaria es el que acaba
+       * de entrar, dejando la posicion sin ninguno. Se mira antes.
+       */
+      yaHecha: async (cuenta, entrada) => {
+        const planes = await planesPendientes(this.cliente, cuenta.credencial, plan.mercado);
+        const puesto = planes.find((p) => p.clientOid === entrada.clientOid);
+        if (puesto === undefined) return null;
+
+        return {
+          ordenId: puesto.orderId ?? null,
+          mensaje:
+            'Bitget rechazó el envío como transitorio, pero el Take Profit ya constaba puesto: no se reenvió.'
+        };
       },
 
       resolver: async (cuenta, entrada) => {
@@ -1709,7 +1862,10 @@ export class MotorLotes {
           estado: 'fallo',
           ordenId: null,
           mensaje:
-            'Se cortó la conexión al enviar y el Take Profit no aparece en Bitget: la posición sigue sin él. Se puede reintentar.'
+            entrada.orderIdAnterior === null
+              ? 'Se cortó la conexión al enviar y el Take Profit no aparece en Bitget: la posición sigue sin él. Se puede reintentar.'
+              : 'Se cortó la conexión al enviar y el Take Profit no aparece en Bitget. El anterior pudo quedar quitado, ' +
+                'así que la posición puede estar SIN Take Profit: compruébelo antes de reintentar.'
         };
       }
     });
@@ -1798,34 +1954,25 @@ export class MotorLotes {
   }
 
   /**
-   * Agrega el margen de un plan aprobado.
+   * Mueve el margen de un plan aprobado: lo agrega o lo retira.
    *
    * --------------------------------------------------------------------------
    * La unica de las cinco sin identificador propio
    * --------------------------------------------------------------------------
    * `set-margin` no acepta `clientOid`, asi que aqui **no existe** la red de
    * seguridad que en las otras cuatro impide que un reenvio se ejecute dos
-   * veces. Anadir margen dos veces no es catastrofico -aleja la liquidacion-
-   * pero compromete el doble de dinero del que el operador aprobo, y eso no
-   * puede pasar en silencio.
+   * veces. Repetir un aporte no es catastrofico -aleja la liquidacion- pero
+   * compromete el doble de dinero del que el operador aprobo; repetir una
+   * retirada si lo es, porque acerca la liquidacion el doble de lo aprobado. Ni
+   * lo uno ni lo otro puede pasar en silencio.
    *
    * De ahi que lo indeterminado se resuelva **releyendo el margen de la
    * posicion** y comparandolo con el que deberia haber quedado. Es la unica
-   * forma de saberlo sin arriesgarse a duplicar.
+   * forma de saberlo sin arriesgarse a repetir.
    */
   async ejecutarMargen(plan: PlanMargen, soloEstos?: readonly string[]): Promise<Lote> {
-    return this.correrLote(plan, 'agregar-margen', soloEstos, {
+    return this.correrLote(plan, plan.direccion === 'quitar' ? 'quitar-margen' : 'agregar-margen', soloEstos, {
       enviar: async (cuenta, entrada) => {
-        /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
-        trazaApertura('2·enviar-margen', {
-          planId: plan.id,
-          cuentaId: cuenta.cuentaId,
-          lado: entrada.lado,
-          cantidad: entrada.cantidad,
-          margenActual: entrada.margenActual,
-          margenResultante: entrada.margenResultante
-        });
-
         await ajustarMargen(this.cliente, cuenta.credencial, {
           simbolo: plan.simbolo,
           productType: plan.mercado.productType,
@@ -1841,8 +1988,8 @@ export class MotorLotes {
        *
        * Es la red que `set-margin` no trae de fabrica. Un 429 o un `45001` se
        * clasifican como transitorios y casi siempre significan «no se hizo»,
-       * pero «casi siempre» no basta cuando repetirse compromete el doble del
-       * margen que el operador aprobo y nada lo rechaza. Ver `Maniobra.yaHecha`.
+       * pero «casi siempre» no basta cuando repetirse mueve el doble del margen
+       * que el operador aprobo y nada lo rechaza. Ver `Maniobra.yaHecha`.
        */
       yaHecha: async (cuenta, entrada) => {
         if (!(await this.margenYaAplicado(cuenta, plan, entrada))) return null;
@@ -1855,18 +2002,19 @@ export class MotorLotes {
       },
 
       resolver: async (cuenta, entrada) => {
+        const verbo = plan.direccion === 'quitar' ? 'retirado' : 'agregado';
         if (await this.margenYaAplicado(cuenta, plan, entrada)) {
           return {
             estado: 'exito',
             ordenId: null,
-            mensaje: 'Se cortó la conexión al enviar, pero el margen sí quedó agregado.'
+            mensaje: `Se cortó la conexión al enviar, pero el margen sí quedó ${verbo}.`
           };
         }
 
         return {
           estado: 'fallo',
           ordenId: null,
-          mensaje: 'Se cortó la conexión al enviar y el margen no consta agregado. Se puede reintentar.'
+          mensaje: `Se cortó la conexión al enviar y el margen no consta ${verbo}. Se puede reintentar.`
         };
       }
     });
@@ -1876,8 +2024,13 @@ export class MotorLotes {
    * ¿La posicion tiene ya el margen que deberia tener tras el envio?
    *
    * Se compara contra el margen **esperado** y no contra el anterior: entre
-   * medias el precio puede haber movido el margen unos centimos, asi que se
-   * acepta el tamano esperado o mayor.
+   * medias el precio puede haber movido el margen unos centimos, asi que no se
+   * exige el valor exacto sino haber llegado al menos hasta el.
+   *
+   * Y por eso la comparacion mira hacia donde iba el envio: al agregar, «ya
+   * esta» es tener el esperado **o mas**; al retirar, tenerlo **o menos**. Con
+   * un solo sentido, una retirada correcta se leeria como no hecha y se
+   * reenviaria, retirando el doble de lo aprobado.
    *
    * Lo usan las dos comprobaciones de `ejecutarMargen` -la de antes de reenviar
    * y la de lo indeterminado- porque la pregunta es exactamente la misma, y
@@ -1891,17 +2044,9 @@ export class MotorLotes {
     const r = await obtenerPosiciones(this.cliente, cuenta.credencial, plan.mercado);
     const posicion = buscarPosicion(r.datos, plan.simbolo, entrada.lado);
     const ahora = new Decimal(posicion?.marginSize ?? '0');
-
-    /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
-    trazaApertura('2·comprobar-margen', {
-      cuentaId: cuenta.cuentaId,
-      lado: entrada.lado,
-      margenEnBitget: ahora.toFixed(),
-      margenEsperado: entrada.margenResultante,
-      yaAplicado: ahora.greaterThanOrEqualTo(entrada.margenResultante)
-    });
-
-    return ahora.greaterThanOrEqualTo(entrada.margenResultante);
+    return plan.direccion === 'quitar'
+      ? ahora.lessThanOrEqualTo(entrada.margenResultante)
+      : ahora.greaterThanOrEqualTo(entrada.margenResultante);
   }
 
   /**

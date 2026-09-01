@@ -39,6 +39,21 @@ que confirma que la API Key sirve, así que el panel lo aprovecha. Se actualiza 
 la credencial se comprueba —al reconectar o al pulsar *Probar*—; el refresco continuo,
 cada 2 a 5 segundos, es del Centro de Monitoreo (Fase 6).
 
+> **Ampliado el 29 de agosto de 2026, a petición del cliente.** Lo de arriba describe la Fase 3
+> tal como se entregó, y tenía una consecuencia incómoda: mover dinero entre cuentas desde la web
+> de Bitget no cambiaba nada en el panel hasta que alguien pulsaba *Probar* en esa fila. Ahora el
+> saldo lo refresca solo el barrido REST, junto con las posiciones, cada 45 segundos por cuenta.
+>
+> **Y sin esperar esos 45 segundos cuando el propio panel es la causa.** Al terminar un lote, las
+> cuentas que tocó adelantan su relectura y se leen en el siguiente segundo, de modo que el saldo
+> del informe es el de después de abrir y no el de antes. Pasa por la misma cola, con el mismo tope
+> de concurrencia: cien cuentas adelantadas no son cien peticiones de golpe.
+>
+> No hizo falta la Fase 6, y conviene dejarlo escrito porque parecía que sí: el socket se suscribe
+> a `positions` y `orders-algo`, **no** al canal `account`, que es por donde Bitget empuja el
+> saldo. Era trabajo del barrido, que ya pasaba por cada cuenta con su credencial en la mano.
+> Detalle en `src/main/execution/barrido-posiciones.ts`.
+
 ---
 
 ## 2. Antes de empezar la demostración
@@ -80,7 +95,10 @@ contra Bitget de verdad.
 - [ ] **A5.** Pulsar **Probar**. Vuelve a preguntar a Bitget y confirma en el momento.
 - [ ] **A6.** Registrar **la misma subcuenta otra vez**, con otra API Key. *Debe verse:*
       **no se duplica la fila** — se entiende como rotar la clave, no como una cuenta nueva.
-- [ ] **A7.** Pulsar **Eliminar**. La fila desaparece y su credencial se borra del almacén.
+- [ ] **A7.** Pulsar **Eliminar**. *Debe verse:* una confirmación que pide la **contraseña de
+      paso** —la misma de abrir y cerrar—. Con una clave equivocada **no se borra nada** y
+      quedan dos intentos; al tercero la baja se cancela. Con la correcta, la fila desaparece y
+      su credencial se borra del almacén.
 - [ ] **A8.** Volver a registrarla y **Volver al panel**. *Debe verse:* la subcuenta en la
       matriz, con su número de casilla y su saldo.
 

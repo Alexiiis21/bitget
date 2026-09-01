@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ClienteBitget } from '@main/bitget/rest/client';
+import { CUENTAS_MADRE_MAX, NOMBRES_CUENTA_MADRE } from '@shared/constants';
 import { Sesion } from '@main/ipc/sesion';
 import {
   iniciarExchangeSimulado,
@@ -21,6 +22,8 @@ import {
 } from '../mock-exchange/servidor';
 
 const MAESTRA = 'contrasena-de-prueba';
+/** La contrasena de paso, la misma que exigen abrir, cerrar y dar de baja. */
+const PASO = 'bg1';
 
 const ALTA = {
   etiqueta: 'Sub-01',
@@ -79,15 +82,17 @@ let cliente: ClienteBitget;
 let sesion: Sesion;
 let rutaVault: string;
 let rutaCuentas: string;
+let rutaActivos: string;
 
 beforeEach(async () => {
   carpeta = await mkdtemp(join(tmpdir(), 'pcb-sesion-'));
   rutaVault = join(carpeta, 'vault.enc');
   rutaCuentas = join(carpeta, 'cuentas.json');
+  rutaActivos = join(carpeta, 'activos.json');
 
   exchange = await iniciarExchangeSimulado();
   cliente = new ClienteBitget({ host: exchange.url });
-  sesion = new Sesion({ vault: rutaVault, cuentas: rutaCuentas }, cliente);
+  sesion = new Sesion({ vault: rutaVault, cuentas: rutaCuentas, activos: rutaActivos }, cliente);
 });
 
 afterEach(async () => {
@@ -190,17 +195,28 @@ describe('alta de una subcuenta', () => {
     expect(sesion.listar()).toEqual([]);
   });
 
-  /* Lista blanca de permisos: un codigo desconocido podria ser retiro. */
-  it('no guarda nada si la key trae un permiso que no reconocemos', async () => {
+  /*
+   * Hasta el 29/08/2026 esto no se guardaba: un codigo de permiso desconocido
+   * podia ser el de retiro, asi que se rechazaba. El cliente pidio admitir el
+   * retiro, y con el cae el rechazo de lo desconocido -su unica razon de ser-.
+   * Ver la cabecera de src/main/bitget/verificacion.ts.
+   *
+   * Lo que la prueba defiende ahora es lo que queda en pie: la key entra, pero
+   * el alta **devuelve el codigo nombrado** para que la pantalla lo cante.
+   */
+  it('guarda la key con un permiso que no reconocemos, avisando de cual es', async () => {
     await sesion.crear(MAESTRA);
     exchange.responder({ cuerpo: infoCuenta(otroUid(), ['coow', 'cpow', 'wdow']) });
+    exchange.responder({ cuerpo: cuentaSimbolo() });
 
     const r = await sesion.agregar(ALTA);
 
-    expect(r.ok).toBe(false);
-    expect(r.veredicto).toBe('rechazada');
-    expect(r.motivo).toContain('wdow');
-    expect(sesion.listar()).toEqual([]);
+    expect(r.ok).toBe(true);
+    expect(r.veredicto).toBe('valida');
+    expect(sesion.listar()).toHaveLength(1);
+
+    const aviso = r.advertencias.find((a) => a.codigo === 'permiso-desconocido');
+    expect(aviso?.mensaje).toContain('wdow');
   });
 
   /*
@@ -225,20 +241,54 @@ describe('alta de una subcuenta', () => {
    * peticiones del cupo para acabar diciendo que no, y dejaria la credencial ya
    * cifrada en memoria sin cuenta a la que pertenecer.
    */
-  it('rechaza la sexta cuenta principal sin preguntar a Bitget', async () => {
+  it('rechaza una cuenta principal de mas sin preguntar a Bitget', async () => {
     await sesion.crear(MAESTRA);
-    for (const nombre of ['A', 'B', 'C', 'D', 'E']) {
+    for (const nombre of NOMBRES_CUENTA_MADRE) {
       verificacionCorrecta(exchange);
       await sesion.agregar({ ...ALTA, grupoNombre: nombre });
     }
     const peticionesAntes = exchange.peticiones.length;
 
-    const r = await sesion.agregar({ ...ALTA, grupoNombre: 'F' });
+    /* La que vendria despues de la O. */
+    const r = await sesion.agregar({ ...ALTA, grupoNombre: 'P' });
 
     expect(r.ok).toBe(false);
-    expect(r.motivo).toContain('5 cuentas principales');
+    expect(r.motivo).toContain(`${CUENTAS_MADRE_MAX} cuentas principales`);
     expect(exchange.peticiones).toHaveLength(peticionesAntes);
-    expect(sesion.cuentasPanel()).toHaveLength(5);
+    expect(sesion.cuentasPanel()).toHaveLength(CUENTAS_MADRE_MAX);
+  });
+
+  /*
+   * La casilla la elige el operador en el formulario -de 1 a 20- y la subcuenta
+   * va exactamente ahi. Antes la repartia el panel, asi que organizar la rejilla
+   * obligaba a dar de alta en el orden exacto en que se querian ver.
+   */
+  it('la subcuenta va a la casilla que pidio el operador', async () => {
+    await sesion.crear(MAESTRA);
+    verificacionCorrecta(exchange);
+
+    await sesion.agregar({ ...ALTA, casilla: 7 });
+
+    expect(sesion.cuentasPanel()[0]?.subcuentas[0]?.slot).toBe(7);
+  });
+
+  /*
+   * Y una casilla ocupada se rechaza **antes** de salir a la red: gastar dos
+   * peticiones del cupo para acabar diciendo que no es justo lo que
+   * `comprobarCabida` existe para evitar.
+   */
+  it('una casilla ocupada se rechaza sin preguntar a Bitget', async () => {
+    await sesion.crear(MAESTRA);
+    verificacionCorrecta(exchange);
+    await sesion.agregar({ ...ALTA, casilla: 7 });
+    const peticionesAntes = exchange.peticiones.length;
+
+    const r = await sesion.agregar({ ...ALTA, etiqueta: 'Sub-08', casilla: 7 });
+
+    expect(r.ok).toBe(false);
+    expect(r.motivo).toContain('ya la ocupa «Sub-01»');
+    expect(exchange.peticiones).toHaveLength(peticionesAntes);
+    expect(sesion.listar()).toHaveLength(1);
   });
 
   it('traslada las advertencias sin bloquear el alta', async () => {
@@ -330,17 +380,67 @@ describe('secretos', () => {
 describe('baja y prueba', () => {
   it('la baja retira a la vez la cuenta y su credencial', async () => {
     await sesion.crear(MAESTRA);
+    await sesion.fijarPaso(PASO);
     verificacionCorrecta(exchange);
     const alta = await sesion.agregar(ALTA);
     const id = alta.cuenta?.id ?? '';
 
-    expect(await sesion.eliminar(id)).toBe(true);
+    expect(await sesion.eliminar(id, PASO)).toBe('borrada');
     expect(sesion.listar()).toEqual([]);
 
     /* Y no reaparece al reabrir el almacen. */
     sesion.cerrar();
     await sesion.abrir(MAESTRA);
     expect(sesion.listar()).toEqual([]);
+  });
+
+  /*
+   * ==========================================================================
+   * La baja exige la contrasena de paso, la misma de abrir y cerrar
+   * ==========================================================================
+   * Lo pidio el cliente el 31/08/2026. Lo que se comprueba aqui no es el
+   * diálogo -eso es la pantalla- sino que el proceso principal **no borra nada**
+   * sin la clave: es el unico freno que un fallo del renderer no se puede
+   * saltar, y lo que la baja borra -la credencial cifrada- no se recupera desde
+   * el panel.
+   */
+  it('sin la contrasena de paso correcta no se borra nada', async () => {
+    await sesion.crear(MAESTRA);
+    await sesion.fijarPaso(PASO);
+    verificacionCorrecta(exchange);
+    const alta = await sesion.agregar(ALTA);
+    const id = alta.cuenta?.id ?? '';
+
+    expect(await sesion.eliminar(id, 'otra-cosa')).toBe('paso-incorrecto');
+
+    /* Sigue registrada, y sigue estandolo al reabrir el almacen. */
+    expect(sesion.listar()).toHaveLength(1);
+    sesion.cerrar();
+    await sesion.abrir(MAESTRA);
+    expect(sesion.listar()).toHaveLength(1);
+  });
+
+  /*
+   * Sin contrasena de paso configurada la respuesta es «no», nunca «adelante».
+   * Es la misma puerta que la de operar: un panel sin clave de paso no tiene
+   * ningun freno que ofrecer, y dejar pasar «porque no hay nada que comprobar»
+   * convertiria el freno en un adorno. Ver `Vault.comprobarPaso`.
+   */
+  it('sin contrasena de paso configurada, la baja no pasa', async () => {
+    await sesion.crear(MAESTRA);
+    verificacionCorrecta(exchange);
+    const alta = await sesion.agregar(ALTA);
+
+    expect(await sesion.eliminar(alta.cuenta?.id ?? '', PASO)).toBe('paso-incorrecto');
+    expect(sesion.listar()).toHaveLength(1);
+  });
+
+  /* Una ficha que ya no esta se distingue de una clave equivocada: no hay nada que reintentar. */
+  it('la baja de una cuenta que ya no esta lo dice, y no como clave incorrecta', async () => {
+    await sesion.crear(MAESTRA);
+    await sesion.fijarPaso(PASO);
+
+    expect(await sesion.eliminar('cta_que_no_existe', PASO)).toBe('no-estaba');
   });
 
   it('probar una credencial que sigue siendo valida la deja conectada', async () => {
@@ -407,6 +507,56 @@ describe('proyeccion de la matriz', () => {
     expect(sesion.cuentasPanel()[0]?.subcuentas[0]?.saldo).toBe('500');
   });
 
+  /*
+   * El punto 10 del cliente, en una prueba.
+   *
+   * Hasta el 29/08/2026 el saldo de la matriz solo cambiaba al verificar la
+   * credencial: el operador movia dinero entre cuentas desde la web de Bitget y
+   * el panel seguia enseñando el de antes hasta que pulsaba «Probar» en esa
+   * fila. Ahora el barrido lo trae solo, y `registrarSaldo` es la puerta por la
+   * que entra. Lo que se fija es que esa puerta llega hasta la pantalla **sin
+   * pasar por `verificar`**, que es lo unico que el cliente pidio.
+   */
+  it('un saldo del barrido cambia la matriz sin pasar por Probar', async () => {
+    await sesion.crear(MAESTRA);
+    verificacionCorrecta(exchange);
+    const alta = await sesion.agregar(ALTA);
+    expect(sesion.cuentasPanel()[0]?.subcuentas[0]?.saldo).toBe('500');
+
+    const peticionesAntes = exchange.peticiones.length;
+    sesion.registrarSaldo(alta.cuenta?.id ?? '', '1250.75');
+
+    expect(sesion.cuentasPanel()[0]?.subcuentas[0]?.saldo).toBe('1250.75');
+    /* No sale ninguna peticion: el barrido ya la hizo, esto solo la anota. */
+    expect(exchange.peticiones).toHaveLength(peticionesAntes);
+  });
+
+  it('un saldo del barrido avisa a la pantalla, y solo cuando cambia', async () => {
+    await sesion.crear(MAESTRA);
+    verificacionCorrecta(exchange);
+    const alta = await sesion.agregar(ALTA);
+    const id = alta.cuenta?.id ?? '';
+
+    let avisos = 0;
+    sesion.alCambiar(() => {
+      avisos += 1;
+    });
+
+    sesion.registrarSaldo(id, '1250.75');
+    expect(avisos).toBe(1);
+
+    /*
+     * El mismo saldo dos veces no es una novedad. Sin este corte, trescientas
+     * cuentas con el saldo quieto despertarian la publicacion a cada vuelta del
+     * barrido para reenviar una matriz identica.
+     */
+    sesion.registrarSaldo(id, '1250.75');
+    expect(avisos).toBe(1);
+
+    sesion.registrarSaldo(id, '1300');
+    expect(avisos).toBe(2);
+  });
+
   it('con el panel bloqueado devuelve una lista vacia, no un error', async () => {
     expect(sesion.cuentasPanel()).toEqual([]);
   });
@@ -432,6 +582,7 @@ describe('aviso de cambios', () => {
    */
   it('avisa al dar de alta, al verificar y al dar de baja', async () => {
     await sesion.crear(MAESTRA);
+    await sesion.fijarPaso(PASO);
     let avisos = 0;
     const dejar = sesion.alCambiar(() => {
       avisos += 1;
@@ -447,7 +598,7 @@ describe('aviso de cambios', () => {
     expect(avisos).toBeGreaterThan(trasAlta);
 
     const trasVerificar = avisos;
-    await sesion.eliminar(alta.cuenta?.id ?? '');
+    await sesion.eliminar(alta.cuenta?.id ?? '', PASO);
     expect(avisos).toBeGreaterThan(trasVerificar);
 
     dejar();
@@ -651,6 +802,112 @@ describe('planificar y ejecutar una apertura', () => {
   });
 
   /*
+   * El aviso que hace que el informe enseñe el saldo de **despues** de abrir.
+   *
+   * La sesion no releee nada por su cuenta: dice que cuentas acaba de tocar, y
+   * el barrido -cableado en index.ts- les adelanta la lectura. Sin esto, la
+   * matriz seguiria con el saldo de antes de la apertura hasta 45 segundos,
+   * justo mientras el operador comprueba en el informe que salio bien.
+   */
+  it('avisa de las cuentas que toco, una sola vez y al terminar', async () => {
+    const cuentaId = await conUnaCuenta();
+
+    const avisos: readonly string[][] = [];
+    sesion.alTocarCuentas((ids) => {
+      (avisos as string[][]).push([...ids]);
+    });
+
+    const plan = await sesion.planificarApertura({
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId, lado: 'long' }],
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated',
+    });
+    await sesion.ejecutarApertura(plan.id);
+
+    /* Un aviso por lote, no uno por cada paso del progreso. */
+    expect(avisos).toEqual([[cuentaId]]);
+  });
+
+  it('deja de avisar cuando el oyente se da de baja', async () => {
+    const cuentaId = await conUnaCuenta();
+
+    let avisos = 0;
+    const baja = sesion.alTocarCuentas(() => {
+      avisos += 1;
+    });
+    baja();
+
+    const plan = await sesion.planificarApertura({
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId, lado: 'long' }],
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated',
+    });
+    await sesion.ejecutarApertura(plan.id);
+
+    expect(avisos).toBe(0);
+  });
+
+  /*
+   * ========================================================================
+   * Un plan impedido no sale, y esta es la comprobacion que lo garantiza.
+   * ========================================================================
+   * La pantalla ya lo enseña bloqueado y no deja llegar a la contraseña, pero
+   * el renderer no puede ser el unico freno de nada que mueva dinero: si esta
+   * puerta no existiera, bastaria un fallo de la pagina -o un `id` reenviado a
+   * mano- para abrir un lote que el operador nunca pudo confirmar.
+   *
+   * La cuenta de las pruebas tiene 500 de disponible: 400 de margen inicial
+   * caben, 400 mas 200 de adicional no.
+   */
+  it('un plan impedido por saldo no se ejecuta, y no sale ninguna orden', async () => {
+    const cuentaId = await conUnaCuenta();
+
+    const plan = await sesion.planificarApertura({
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId, lado: 'long' }],
+      margenInicial: '400',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated',
+      margenAdicional: '200'
+    });
+
+    expect(plan.impedimento?.codigo).toBe('saldo-margen-adicional');
+
+    const enviadasAntes = exchange.peticiones.filter((p) => p.url.includes('place-order')).length;
+    await expect(sesion.ejecutarApertura(plan.id)).rejects.toThrow(/No se abre ninguna posición/);
+
+    expect(exchange.peticiones.filter((p) => p.url.includes('place-order'))).toHaveLength(
+      enviadasAntes
+    );
+  });
+
+  /* Ni por la puerta de atras: el impedimento es del lote, no de las casillas. */
+  it('tampoco se ejecuta reintentando solo unas casillas', async () => {
+    const cuentaId = await conUnaCuenta();
+
+    const plan = await sesion.planificarApertura({
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId, lado: 'long' }],
+      margenInicial: '400',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated',
+      margenAdicional: '200'
+    });
+
+    await expect(
+      sesion.ejecutarApertura(plan.id, [{ cuentaId, lado: 'long' }])
+    ).rejects.toThrow(/No se abre ninguna posición/);
+  });
+
+  /*
    * El renderer manda el `id`, nunca el contenido. Si pudiera mandar el plan
    * entero, una pantalla comprometida podria cambiar la cantidad entre lo que
    * el operador aprueba y lo que sale hacia Bitget.
@@ -663,7 +920,7 @@ describe('planificar y ejecutar una apertura', () => {
   it('un plan caducado no se ejecuta: el precio ya no es el de ahora', async () => {
     const cuentaId = await conUnaCuenta();
     let reloj = Date.now();
-    const otra = new Sesion({ vault: rutaVault, cuentas: rutaCuentas }, cliente, {
+    const otra = new Sesion({ vault: rutaVault, cuentas: rutaCuentas, activos: rutaActivos }, cliente, {
       ahora: () => reloj
     });
     await otra.abrir(MAESTRA);
@@ -853,6 +1110,187 @@ describe('planificar y ejecutar un cierre', () => {
   it('con el panel bloqueado no se planifica un cierre', async () => {
     await expect(
       sesion.planificarCierre({ simbolo: SIMBOLO, objetivos: [{ cuentaId: 'x', lado: 'long' }] })
+    ).rejects.toThrow('bloqueado');
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Ajustar una posicion ya abierta
+ * ---------------------------------------------------------------------------
+ * Los cuatro canales -poner y quitar Take Profit, agregar y quitar margen-
+ * estuvieron retirados entre el 26/08/2026 y el 01/09/2026. Se quitaron porque
+ * el Take Profit y el margen adicional viajan **tambien** dentro de la apertura,
+ * y con las dos vias abiertas el mismo importe se podia enviar dos veces sobre
+ * la misma posicion.
+ *
+ * Lo que se prueba aqui es la `Sesion`, que es el objeto detras de cada canal:
+ * el recorrido entero de las dos fases, con vault y credenciales de verdad. Lo
+ * que impide la repeticion -que el Take Profit sustituya el anterior, que el
+ * margen se planifique contra lo que Bitget dice que hay- se prueba en el motor.
+ */
+describe('ajustar una posicion ya abierta', () => {
+  /** Posicion aislada: es el unico modo en el que Bitget mueve margen por posicion. */
+  const posicionAislada = {
+    symbol: SIMBOLO,
+    holdSide: 'long',
+    total: '0.0157',
+    available: '0.0157',
+    marginCoin: 'SUSDT',
+    marginMode: 'isolated',
+    openPriceAvg: '63000',
+    liquidationPrice: '57000.1',
+    leverage: '10',
+    marginSize: '100'
+  };
+
+  /** Enruta lo que necesitan los dos ajustes; `planes` es lo que ya hay puesto. */
+  function enrutarAjuste(planes: unknown[] = []): void {
+    exchange.responderCon((p) => {
+      if (p.url.startsWith('/api/v2/mix/market/contracts')) return { cuerpo: sobreOk([CONTRATO]) };
+      if (p.url.startsWith('/api/v2/mix/position/all-position')) {
+        return { cuerpo: sobreOk([posicionAislada]) };
+      }
+      if (p.url.startsWith('/api/v2/mix/order/orders-plan-pending')) {
+        return { cuerpo: sobreOk({ entrustedList: planes }) };
+      }
+      if (p.url.startsWith('/api/v2/mix/order/place-tpsl-order')) {
+        const cuerpo = JSON.parse(p.cuerpo) as Record<string, unknown>;
+        return { cuerpo: sobreOk({ orderId: 'plan_nuevo', clientOid: cuerpo['clientOid'] }) };
+      }
+      if (p.url.startsWith('/api/v2/mix/order/cancel-plan-order')) {
+        return { cuerpo: sobreOk({ successList: [{ orderId: 'plan_viejo' }], failureList: [] }) };
+      }
+      if (p.url.startsWith('/api/v2/mix/account/set-margin')) return { cuerpo: sobreOk({}) };
+      return null;
+    });
+  }
+
+  /** Sesion abierta, una subcuenta de alta y el exchange listo para el ajuste. */
+  async function conPosicionAbierta(planes: unknown[] = []): Promise<string> {
+    await sesion.crear(MAESTRA);
+    verificacionCorrecta(exchange);
+    const alta = await sesion.agregar(ALTA);
+    enrutarAjuste(planes);
+    return alta.cuenta?.id ?? '';
+  }
+
+  it('poner Take Profit calcula el precio y no coloca nada al planificar', async () => {
+    const cuentaId = await conPosicionAbierta();
+
+    const plan = await sesion.planificarTakeProfit({
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId, lado: 'long' }],
+      porcentaje: '35'
+    });
+
+    /* 63.000 x (1 + 0,35/10) = 65.205 */
+    expect(plan.entradas[0]?.precioDisparo).toBe('65205');
+    expect(exchange.peticiones.filter((p) => p.url.includes('place-tpsl'))).toHaveLength(0);
+  });
+
+  it('ejecuta el Take Profit por su identificador y quita el anterior', async () => {
+    const cuentaId = await conPosicionAbierta([
+      {
+        orderId: 'plan_viejo',
+        clientOid: 'oid_viejo',
+        symbol: SIMBOLO,
+        planType: 'pos_profit',
+        triggerPrice: '64000',
+        posSide: 'long'
+      }
+    ]);
+
+    const plan = await sesion.planificarTakeProfit({
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId, lado: 'long' }],
+      porcentaje: '35'
+    });
+    const lote = await sesion.ejecutarTakeProfit(plan.id);
+
+    expect(lote.accion).toBe('take-profit');
+    expect(lote.jobs[0]?.estado).toBe('exito');
+    expect(exchange.peticiones.filter((p) => p.url.includes('cancel-plan-order'))).toHaveLength(1);
+  });
+
+  it('agregar margen enseña el resultante y no envia nada al planificar', async () => {
+    const cuentaId = await conPosicionAbierta();
+
+    const plan = await sesion.planificarMargen({
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId, lado: 'long' }],
+      cantidad: '25',
+      direccion: 'agregar'
+    });
+
+    expect(plan.entradas[0]?.margenActual).toBe('100');
+    expect(plan.entradas[0]?.margenResultante).toBe('125');
+    expect(exchange.peticiones.filter((p) => p.url.includes('set-margin'))).toHaveLength(0);
+  });
+
+  it('quitar margen envia el importe en negativo', async () => {
+    const cuentaId = await conPosicionAbierta();
+
+    const plan = await sesion.planificarMargen({
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId, lado: 'long' }],
+      cantidad: '25',
+      direccion: 'quitar'
+    });
+    const lote = await sesion.ejecutarMargen(plan.id);
+
+    expect(lote.accion).toBe('quitar-margen');
+    expect(lote.jobs[0]?.estado).toBe('exito');
+    const envio = exchange.peticiones.find((p) => p.url.includes('set-margin'));
+    expect(JSON.parse(envio?.cuerpo ?? '{}')).toMatchObject({ amount: '-25', holdSide: 'long' });
+  });
+
+  it('un plan de ajuste que no existe no se ejecuta', async () => {
+    await sesion.crear(MAESTRA);
+
+    await expect(sesion.ejecutarTakeProfit('plan-inventado')).rejects.toThrow(/ya no existe/);
+    await expect(sesion.ejecutarMargen('plan-inventado')).rejects.toThrow(/ya no existe/);
+  });
+
+  /* Un plan sin sesion no se puede ejecutar: se tira con las credenciales. */
+  it('bloquear el panel tira los planes de ajuste', async () => {
+    const cuentaId = await conPosicionAbierta();
+
+    const tp = await sesion.planificarTakeProfit({
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId, lado: 'long' }],
+      porcentaje: '35'
+    });
+    const mg = await sesion.planificarMargen({
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId, lado: 'long' }],
+      cantidad: '25',
+      direccion: 'agregar'
+    });
+
+    sesion.cerrar();
+    await sesion.abrir(MAESTRA);
+
+    expect(sesion.planTakeProfit(tp.id)).toBeUndefined();
+    expect(sesion.planMargen(mg.id)).toBeUndefined();
+  });
+
+  it('con el panel bloqueado no se planifica ningun ajuste', async () => {
+    await expect(
+      sesion.planificarTakeProfit({
+        simbolo: SIMBOLO,
+        objetivos: [{ cuentaId: 'x', lado: 'long' }],
+        porcentaje: '35'
+      })
+    ).rejects.toThrow('bloqueado');
+
+    await expect(
+      sesion.planificarMargen({
+        simbolo: SIMBOLO,
+        objetivos: [{ cuentaId: 'x', lado: 'long' }],
+        cantidad: '25',
+        direccion: 'quitar'
+      })
     ).rejects.toThrow('bloqueado');
   });
 });

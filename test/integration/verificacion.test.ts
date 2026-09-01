@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ClienteBitget } from '@main/bitget/rest/client';
-import { verificarCredencial } from '@main/bitget/verificacion';
+import { nivelDePermiso, verificarCredencial } from '@main/bitget/verificacion';
 import {
   iniciarExchangeSimulado,
   sobreError,
@@ -119,27 +119,26 @@ describe('los UID que detecta el panel', () => {
 
 describe('permisos', () => {
   /*
-   * El caso que protege el dinero del cliente. Un codigo de permiso que no
-   * esta en el catalogo no se deja pasar, aunque no sepamos que significa:
-   * podria ser retiro. Ver la cabecera de verificacion.ts.
+   * Este caso rechazaba hasta el 29/08/2026, cuando el cliente pidio admitir
+   * las claves con permiso de retiro. Al caer el rechazo por retiro cae tambien
+   * el de lo desconocido, que existia solo por si un codigo sin catalogar fuera
+   * el de retiro. Ver la cabecera de verificacion.ts.
+   *
+   * La prueba se queda -invertida- porque el que importa no es el veredicto,
+   * sino que el codigo salga **nombrado** en una advertencia. Aceptar en
+   * silencio seria lo unico peor que rechazar.
    */
-  it('rechaza una key con un permiso que no reconoce', async () => {
+  it('acepta una key con un permiso que no reconoce, pero lo dice', async () => {
     exchange.responder({ cuerpo: infoCuenta(['coow', 'cpow', 'wdow']) });
+    exchange.responder({ cuerpo: cuentaSimbolo() });
 
     const r = await verificarCredencial(cliente, CREDENCIAL);
 
-    expect(r.veredicto).toBe('rechazada');
+    expect(r.veredicto).toBe('valida');
     expect(r.permisosDesconocidos).toEqual(['wdow']);
-    expect(r.motivo).toContain('wdow');
-  });
 
-  it('no llega a consultar la cuenta si ya rechazo los permisos', async () => {
-    exchange.responder({ cuerpo: infoCuenta(['permiso-raro']) });
-
-    await verificarCredencial(cliente, CREDENCIAL);
-
-    /* Una sola peticion: se corta en el paso 2, no gasta cuota en el 3. */
-    expect(exchange.peticiones).toHaveLength(1);
+    const aviso = r.advertencias.find((a) => a.codigo === 'permiso-desconocido');
+    expect(aviso?.mensaje).toContain('wdow');
   });
 
   it('rechaza una key sin ningun permiso', async () => {
@@ -149,6 +148,69 @@ describe('permisos', () => {
 
     expect(r.veredicto).toBe('rechazada');
     expect(r.motivo).toContain('ningun permiso');
+  });
+
+  /*
+   * Los permisos reales de la clave de la cuenta madre, leidos el 29/08/2026
+   * con `node scripts/ver-permisos.mjs --env MADRE`.
+   *
+   * Se fija aqui porque es la clave que usara la funcion de traspasos: si
+   * manana deja de pasar la verificacion, esta prueba dice si fue porque le
+   * anadieron un permiso -y hay que catalogarlo- o por otra cosa.
+   */
+  it('acepta la clave de la cuenta madre tal como esta hoy, sin advertir de permisos', async () => {
+    exchange.responder({ cuerpo: infoCuenta(['coow', 'cpow', 'chow']) });
+    exchange.responder({ cuerpo: cuentaSimbolo() });
+
+    const r = await verificarCredencial(cliente, CREDENCIAL);
+
+    expect(r.veredicto).toBe('valida');
+    expect(r.permisosDesconocidos).toEqual([]);
+    expect(r.advertencias.map((a) => a.codigo)).not.toContain('permiso-traspaso');
+  });
+});
+
+describe('niveles de permiso', () => {
+  /*
+   * El catalogo dice de cada codigo que puede hacer con el dinero, y la
+   * politica se decide sobre eso -ver la cabecera de verificacion.ts-. Todo lo
+   * catalogado hoy es de operar: ninguna clave del panel mueve saldo todavia.
+   */
+  it('los cuatro codigos catalogados son de operacion, ninguno mueve dinero', () => {
+    for (const codigo of ['coow', 'cpow', 'ttow', 'chow']) {
+      expect(nivelDePermiso(codigo)).toBe('operacion');
+    }
+  });
+
+  it('un codigo sin catalogar no tiene nivel', () => {
+    expect(nivelDePermiso('wdow')).toBeNull();
+  });
+});
+
+/*
+ * ==========================================================================
+ * El precio del cambio de politica, escrito como prueba.
+ * ==========================================================================
+ * Estas dos fijan que ya **no** hay rechazo por permisos. Si alguna se pusiera
+ * en rojo sin que nadie lo hubiera pedido, es que se restauro el fallo cerrado
+ * -`ACEPTAR_DESCONOCIDOS` o `NIVELES_ACEPTADOS` en verificacion.ts- y hay que
+ * decidir a proposito cual de las dos cosas se quiere.
+ */
+describe('politica de permisos vigente', () => {
+  it('un permiso desconocido ya no corta antes de consultar la cuenta', async () => {
+    exchange.responder({ cuerpo: infoCuenta(['permiso-raro']) });
+    exchange.responder({ cuerpo: cuentaSimbolo() });
+
+    await verificarCredencial(cliente, CREDENCIAL);
+
+    /* Dos peticiones: el paso 2 ya no corta, se llega a leer la cuenta. */
+    expect(exchange.peticiones).toHaveLength(2);
+  });
+
+  it('ningun codigo catalogado queda vetado por la politica de hoy', () => {
+    for (const codigo of ['coow', 'cpow', 'ttow', 'chow']) {
+      expect(nivelDePermiso(codigo)).not.toBeNull();
+    }
   });
 });
 

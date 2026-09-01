@@ -8,7 +8,7 @@
  *
  * Ver docs/02-arquitectura.html y docs/03-modelo-de-datos.md.
  */
-import type { Decimal, EstadoConexion, FilaMonitor, Lado, Lote } from './types';
+import type { Decimal, EstadoConexion, Lado, Lote, PosicionMonitor } from './types';
 
 /* ---------- estado del sistema ---------- */
 
@@ -98,7 +98,24 @@ export interface FilaCuenta {
 /** Datos del formulario de alta. Es el unico payload con secretos, y va en un solo sentido. */
 export interface AltaCuenta {
   etiqueta: string;
+  /** Cuenta principal, de la `A` a la `O`. La lista es fija: `NOMBRES_CUENTA_MADRE`. */
   grupoNombre: string;
+  /**
+   * Casilla de esa cuenta principal, de 1 a `SUBCUENTAS_POR_GRUPO`.
+   *
+   * La elige el operador en el formulario desde el 28/08/2026. Antes se
+   * asignaba sola -la primera libre-, y no habia forma de decir «esta subcuenta
+   * va en la 7», que es como el operador tiene organizada su rejilla y lo que
+   * tiene memorizado al operar.
+   *
+   * Opcional en el tipo y **obligatoria en el canal**: el esquema de
+   * `cuentas:agregar` la exige, asi que del panel no puede salir un alta sin
+   * ella. Lo que puede omitirla es quien llama a `Sesion.agregar` por dentro
+   * -la importacion masiva de subcuentas-, y entonces vuelve el reparto
+   * automatico. Sin esa puerta, importar cien subcuentas obligaria a inventar
+   * una casilla para cada una.
+   */
+  casilla?: number;
   apiKey: string;
   secretKey: string;
   passphrase: string;
@@ -108,6 +125,21 @@ export interface AvisoCredencial {
   codigo: string;
   mensaje: string;
 }
+
+/**
+ * Desenlace de una baja de credencial.
+ *
+ * --------------------------------------------------------------------------
+ * Por que no es un `boolean`
+ * --------------------------------------------------------------------------
+ * Desde el 31/08/2026 la baja exige la contrasena de paso -la misma de abrir y
+ * cerrar-, y entonces «no se borro» tiene dos motivos que la pantalla tiene que
+ * distinguir: la clave estaba mal -y el operador puede volver a intentarlo- o
+ * esa ficha ya no estaba en el registro -y no hay nada que reintentar-. Un
+ * `false` para los dos casos obligaria a adivinar cual fue, y adivinar aqui es
+ * decirle a alguien que su subcuenta sigue dada de alta cuando no lo esta.
+ */
+export type ResultadoBaja = 'borrada' | 'paso-incorrecto' | 'no-estaba';
 
 /**
  * Desenlace de un alta.
@@ -285,6 +317,14 @@ export interface AvisoPlanIpc {
   mensaje: string;
 }
 
+/** Lo que impide enviar un plan entero. Ver `ImpedimentoPlan` en el motor. */
+export interface ImpedimentoPlanIpc {
+  codigo: string;
+  mensaje: string;
+  /** Cuantas casillas lo provocan. Las nombra la lista de descartes. */
+  casillas: number;
+}
+
 /**
  * El plan que se ensena al operador antes de confirmar.
  *
@@ -330,6 +370,15 @@ export interface PlanAperturaIpc {
   entradas: EntradaPlanIpc[];
   descartes: DescartePlanIpc[];
   avisos: AvisoPlanIpc[];
+  /**
+   * Lo que impide enviar el lote entero, o `null`.
+   *
+   * No es un descarte -esos son por casilla- ni un aviso -esos no frenan-. Es
+   * la puerta cerrada: mientras venga con valor, la confirmacion enseña el
+   * motivo y no deja llegar a la contraseña. Quien lo hace cumplir de verdad es
+   * el proceso principal, que rechaza el plan al ejecutarlo.
+   */
+  impedimento: ImpedimentoPlanIpc | null;
   /** Suma del margen real de todas las entradas. Es lo que se compromete. */
   margenTotal: string;
   creadoEn: string;
@@ -396,6 +445,98 @@ export interface ActivoIpc {
   operable: boolean;
 }
 
+/* ---------- ajustes sobre una posicion ya abierta ---------- */
+
+/**
+ * Poner Take Profit sobre lo que ya esta abierto.
+ *
+ * Distinto del que viaja en `PeticionAperturaIpc`: aquel sale **con** la orden y
+ * este se aplica **despues**, sobre una posicion que ya existe. Son dos campos
+ * distintos en la pantalla por eso mismo -ver `PlanKind`-, y este siempre
+ * sustituye lo que hubiera puesto en vez de anadirse a ello.
+ */
+export interface PeticionTakeProfitIpc {
+  simbolo: string;
+  objetivos: { cuentaId: string; lado: Lado }[];
+  /** Ganancia sobre el margen inicial, en porcentaje. P. ej. `35`. */
+  porcentaje: string;
+}
+
+export interface EntradaTakeProfitIpc {
+  cuentaId: string;
+  etiqueta: string;
+  lado: Lado;
+  /** Precio al que Bitget cerrara la posicion. Es lo que se envia. */
+  precioDisparo: string;
+  precioEntrada: string;
+  apalancamiento: number;
+  /** Cuanto tiene que moverse el precio, en %. El resto lo pone el apalancamiento. */
+  movimientoPorcentaje: string;
+  /**
+   * El Take Profit que la posicion tiene puesto ahora, o `null` si no tiene.
+   *
+   * Viaja para que la confirmacion pueda decir «0,00263 → 0,00271» en vez de
+   * solo el destino: poner Take Profit sobre una posicion que ya lo tiene
+   * **sustituye** el anterior, y sustituir algo sin enseñar que se sustituye es
+   * lo mismo que hacerlo a escondidas.
+   */
+  precioDisparoAnterior: string | null;
+}
+
+/**
+ * El plan de Take Profit que se ensena antes de confirmar.
+ *
+ * Es el segundo freno del pliego: el operador no aprueba «35%», aprueba los
+ * precios concretos a los que va a quedar cada posicion.
+ */
+export interface PlanTakeProfitIpc {
+  id: string;
+  mercado: ClaveMercadoIpc;
+  simbolo: string;
+  porcentaje: string;
+  entradas: EntradaTakeProfitIpc[];
+  descartes: DescartePlanIpc[];
+  creadoEn: string;
+}
+
+/** Hacia donde va el margen. Lo elige el operador con el boton, no con un signo. */
+export type DireccionMargenIpc = 'agregar' | 'quitar';
+
+export interface PeticionMargenIpc {
+  simbolo: string;
+  objetivos: { cuentaId: string; lado: Lado }[];
+  /** Margen a mover en cada casilla, en moneda de margen. **Siempre positivo.** */
+  cantidad: string;
+  direccion: DireccionMargenIpc;
+}
+
+export interface EntradaMargenIpc {
+  cuentaId: string;
+  etiqueta: string;
+  lado: Lado;
+  /** La cifra tecleada, sin signo. El sentido lo da `direccion` del plan. */
+  cantidad: string;
+  /** Margen que la posicion tiene ahora, leido de Bitget al planificar. */
+  margenActual: string;
+  /** El que tendra si el envio sale bien. Es lo que el operador aprueba. */
+  margenResultante: string;
+}
+
+export interface PlanMargenIpc {
+  id: string;
+  mercado: ClaveMercadoIpc;
+  /** Moneda de `cantidad`, `margenActual`, `margenResultante` y el total. Ver `PlanAperturaIpc`. */
+  monedaMargen: string;
+  simbolo: string;
+  cantidad: string;
+  direccion: DireccionMargenIpc;
+  /** Suma de lo que se mueve, sin signo: sale del saldo, o vuelve a el. */
+  totalComprometido: string;
+  entradas: EntradaMargenIpc[];
+  descartes: DescartePlanIpc[];
+  creadoEn: string;
+}
+
 /* ---------- quitar el take profit ---------- */
 
 export interface PeticionQuitarTpIpc {
@@ -458,6 +599,15 @@ export interface PlanApalancamientoIpc {
 export interface PeticionesIpc {
   'sistema:info': () => Promise<InfoSistema>;
   'sistema:estado': () => Promise<EstadoApp>;
+  /**
+   * Cambia el numero visible de este panel y lo guarda en `instancia.json`.
+   *
+   * Existe desde el 28/08/2026. Antes el campo de la cabecera se dejaba
+   * teclear, el cambio se veia en pantalla y al reiniciar volvia el anterior:
+   * no habia canal que lo persistiera, y un rotulo que no recuerda hace creer
+   * al operador que esta en un panel que no es.
+   */
+  'sistema:numero-panel': (numero: number) => Promise<void>;
   'vault:estado': () => Promise<EstadoVault>;
   'vault:crear': (contrasena: string) => Promise<ResultadoVault>;
   'vault:abrir': (contrasena: string) => Promise<ResultadoVault>;
@@ -466,12 +616,38 @@ export interface PeticionesIpc {
   'vault:comprobar': (contrasena: string) => Promise<boolean>;
   'cuentas:listar': () => Promise<FilaCuenta[]>;
   'cuentas:agregar': (alta: AltaCuenta) => Promise<ResultadoAlta>;
-  'cuentas:eliminar': (cuentaId: string) => Promise<boolean>;
+  /**
+   * Baja de una subcuenta. **Exige la contrasena de paso**, como abrir y cerrar.
+   *
+   * La clave viaja con la peticion y la comprueba el proceso principal, no la
+   * pantalla: un freno que solo vive en el renderer es un freno que un fallo de
+   * la pagina se salta, y lo que esta baja borra -la credencial cifrada- no se
+   * recupera desde el panel. Ver `Sesion.eliminar`.
+   */
+  'cuentas:eliminar': (cuentaId: string, contrasenaPaso: string) => Promise<ResultadoBaja>;
   'cuentas:verificar': (cuentaId: string) => Promise<ResultadoPrueba>;
   /** La matriz de seleccion: cuentas principales, casillas y saldo. */
   'panel:cuentas': () => Promise<CuentaPanel[]>;
-  /** Los activos que el panel deja operar en el mercado activo. */
-  'mercado:activos': () => Promise<ActivoIpc[]>;
+  /**
+   * Las ocho casillas del selector, en su orden y con sus huecos.
+   *
+   * `null` es una casilla vacia. No se compactan: el operador las edita por su
+   * numero, y una lista sin huecos las renumeraria al vaciar una.
+   */
+  'mercado:ranuras': () => Promise<(ActivoIpc | null)[]>;
+  /**
+   * Todo lo que el mercado ofrece. **Solo para el buscador.**
+   *
+   * Nada de esta lista se puede operar mientras no ocupe una de las ocho
+   * casillas: quien decide eso es `mercado:ranuras`, y el proceso principal
+   * comprueba el simbolo contra este mismo catalogo antes de guardarlo.
+   */
+  'mercado:catalogo': () => Promise<ActivoIpc[]>;
+  /** Pone un activo en una casilla, o la vacia con `null`. Devuelve las ocho. */
+  'mercado:fijar-ranura': (
+    indice: number,
+    simbolo: string | null
+  ) => Promise<(ActivoIpc | null)[]>;
   /** Precio de marca de cada activo, el mismo con el que se dimensiona. */
   'mercado:precios': () => Promise<Record<string, string>>;
   /** ¿Hay contrasena de paso configurada? */
@@ -498,15 +674,31 @@ export interface PeticionesIpc {
     soloEstos?: { cuentaId: string; lado: Lado }[]
   ) => Promise<Lote>;
   /*
-   * No hay `tp:planificar` ni `margen:planificar`, y es deliberado.
+   * Los cuatro canales de ajuste sobre una posicion ya abierta.
    *
-   * El Take Profit y el margen adicional viajan dentro de `apertura:planificar`
-   * y solo ahi. Tuvieron canal propio hasta el 26/08/2026; mientras lo tuvieron,
-   * la misma cantidad se podia enviar dos veces sobre la misma posicion -una con
-   * la apertura y otra por el canal suelto-, y `set-margin` no lleva
-   * identificador que lo impida. Quitar el boton no bastaba: mientras el canal
-   * exista, un fallo de la pantalla puede llamarlo. Ver `PlanKind`.
+   * Estuvieron retirados entre el 26/08/2026 y el 01/09/2026: mientras
+   * existieron la primera vez, la misma cantidad se podia enviar dos veces sobre
+   * la misma posicion -una con la apertura, que ya la lleva dentro, y otra por
+   * el canal suelto-, y `set-margin` no lleva identificador que lo impida.
+   *
+   * Vuelven porque el cliente necesita corregir lo que ya esta abierto, y con lo
+   * que faltaba entonces: el Take Profit **sustituye** el que hubiera en vez de
+   * anadirse, el margen enseña `actual → resultante` leido de Bitget antes de
+   * confirmar, y en la pantalla los importes de la apertura y los del ajuste son
+   * campos distintos. Ver `PlanKind` y `Sesion.planificarMargen`.
    */
+  /** Calcula a que precio queda el Take Profit de cada posicion. No coloca nada. */
+  'tp:planificar': (peticion: PeticionTakeProfitIpc) => Promise<PlanTakeProfitIpc>;
+  'tp:ejecutar': (
+    planId: string,
+    soloEstos?: { cuentaId: string; lado: Lado }[]
+  ) => Promise<Lote>;
+  /** Calcula como queda el margen de cada posicion. No mueve nada. */
+  'margen:planificar': (peticion: PeticionMargenIpc) => Promise<PlanMargenIpc>;
+  'margen:ejecutar': (
+    planId: string,
+    soloEstos?: { cuentaId: string; lado: Lado }[]
+  ) => Promise<Lote>;
   /** Averigua que Take Profit hay puesto en cada casilla. No quita nada. */
   'tp:planificar-quitar': (peticion: PeticionQuitarTpIpc) => Promise<PlanQuitarTpIpc>;
   'tp:ejecutar-quitar': (
@@ -520,7 +712,13 @@ export interface PeticionesIpc {
     planId: string,
     soloEstos?: { cuentaId: string; lado: Lado }[]
   ) => Promise<Lote>;
-  'monitor:instantanea': () => Promise<FilaMonitor[]>;
+  /**
+   * Las posiciones vivas ahora mismo, para pintar el monitor al desbloquear.
+   *
+   * El evento `monitor:posiciones` mantiene la pantalla al dia despues; esto
+   * solo evita el hueco entre que se abre el panel y llega el primer empujon.
+   */
+  'monitor:instantanea': () => Promise<PosicionMonitor[]>;
 }
 
 export type CanalPeticion = keyof PeticionesIpc;
@@ -528,8 +726,16 @@ export type CanalPeticion = keyof PeticionesIpc;
 /* ---------- avisos del proceso principal (push) ---------- */
 
 export interface EventosIpc {
-  /** Proyeccion del monitor, coalescida a PUBLICACION_COALESCIDA_MS. */
-  'monitor:filas': FilaMonitor[];
+  /**
+   * Todas las posiciones vivas, coalescidas a PUBLICACION_COALESCIDA_MS.
+   *
+   * Se envia el conjunto completo y no las diferencias, por lo mismo que
+   * `panel:cuentas`: son unos cientos de puntas como mucho, y mantener
+   * sincronizados dos modelos que pueden separarse en silencio cuesta mas que
+   * recalcularlo. Una posicion que desaparece de la lista es una posicion
+   * cerrada, y su fila desaparece sin mensaje.
+   */
+  'monitor:posiciones': PosicionMonitor[];
   /**
    * La matriz entera cada vez que cambia algo suyo: una cuenta que reconecta,
    * un saldo nuevo, un alta o una baja.
@@ -550,6 +756,7 @@ export type CanalEvento = keyof EventosIpc;
 export interface ApiPcb {
   sistemaInfo(): Promise<InfoSistema>;
   sistemaEstado(): Promise<EstadoApp>;
+  sistemaFijarNumeroPanel(numero: number): Promise<void>;
   vaultEstado(): Promise<EstadoVault>;
   vaultCrear(contrasena: string): Promise<ResultadoVault>;
   vaultAbrir(contrasena: string): Promise<ResultadoVault>;
@@ -557,10 +764,12 @@ export interface ApiPcb {
   vaultComprobar(contrasena: string): Promise<boolean>;
   cuentasListar(): Promise<FilaCuenta[]>;
   cuentasAgregar(alta: AltaCuenta): Promise<ResultadoAlta>;
-  cuentasEliminar(cuentaId: string): Promise<boolean>;
+  cuentasEliminar(cuentaId: string, contrasenaPaso: string): Promise<ResultadoBaja>;
   cuentasVerificar(cuentaId: string): Promise<ResultadoPrueba>;
   panelCuentas(): Promise<CuentaPanel[]>;
-  mercadoActivos(): Promise<ActivoIpc[]>;
+  mercadoRanuras(): Promise<(ActivoIpc | null)[]>;
+  mercadoCatalogo(): Promise<ActivoIpc[]>;
+  mercadoFijarRanura(indice: number, simbolo: string | null): Promise<(ActivoIpc | null)[]>;
   mercadoPrecios(): Promise<Record<string, string>>;
   pasoHay(): Promise<boolean>;
   pasoComprobar(contrasena: string): Promise<boolean>;
@@ -569,14 +778,18 @@ export interface ApiPcb {
   aperturaEjecutar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
   cierrePlanificar(peticion: PeticionCierreIpc): Promise<PlanCierreIpc>;
   cierreEjecutar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
+  tpPlanificar(peticion: PeticionTakeProfitIpc): Promise<PlanTakeProfitIpc>;
+  tpEjecutar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
   tpPlanificarQuitar(peticion: PeticionQuitarTpIpc): Promise<PlanQuitarTpIpc>;
   tpEjecutarQuitar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
+  margenPlanificar(peticion: PeticionMargenIpc): Promise<PlanMargenIpc>;
+  margenEjecutar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
   apalancamientoPlanificar(peticion: PeticionApalancamientoIpc): Promise<PlanApalancamientoIpc>;
   apalancamientoEjecutar(
     planId: string,
     soloEstos?: { cuentaId: string; lado: Lado }[]
   ): Promise<Lote>;
-  monitorInstantanea(): Promise<FilaMonitor[]>;
+  monitorInstantanea(): Promise<PosicionMonitor[]>;
   /** Devuelve la funcion para cancelar la suscripcion. */
   suscribir<C extends CanalEvento>(canal: C, cb: (dato: EventosIpc[C]) => void): () => void;
 }

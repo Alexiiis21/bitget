@@ -24,6 +24,7 @@ import {
   MotorLotes,
   resumirLote,
   type CuentaEjecutable,
+  type DireccionMargen,
   type FuenteCuentas,
   type ObjetivoApertura
 } from '@main/execution/motor-lotes';
@@ -156,12 +157,16 @@ function enrutar(opciones: {
   });
 }
 
-const margen = (cuantas: number, cantidad = '50') => ({
+const margen = (cuantas: number, cantidad = '50', direccion: DireccionMargen = 'agregar') => ({
   mercado: MERCADO_SIMULADO,
   simbolo: SIMBOLO,
   objetivos: cuentas.objetivos(cuantas),
-  cantidad
+  cantidad,
+  direccion
 });
+
+/** Lo mismo, pero retirando. Se lee mejor que un tercer argumento en cada llamada. */
+const retirada = (cuantas: number, cantidad = '50') => margen(cuantas, cantidad, 'quitar');
 
 beforeEach(async () => {
   exchange = await iniciarExchangeSimulado();
@@ -243,7 +248,8 @@ describe('agregar margen · las tres puertas antes de enviar', () => {
         { cuentaId: 'cta_001', lado: 'long' },
         { cuentaId: 'cta_001', lado: 'short' }
       ],
-      cantidad: '50'
+      cantidad: '50',
+      direccion: 'agregar'
     });
 
     expect(plan.entradas).toHaveLength(1);
@@ -341,6 +347,135 @@ describe('agregar margen · lo indeterminado se resuelve releyendo el margen', (
 
     expect(lote.jobs[0]?.estado).toBe('fallo');
     expect(lote.jobs[0]?.mensaje).toContain('no consta agregado');
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Quitar margen
+ * ---------------------------------------------------------------------------
+ * El mismo endpoint con `amount` negativo, y por eso el mismo codigo. Lo que
+ * cambia es todo lo demas: no se mira el saldo -el dinero vuelve al disponible-
+ * sino el margen que hay puesto, y la comprobacion de «ya se aplico» va al
+ * reves. Con un solo sentido, una retirada correcta se leeria como no hecha y
+ * se reenviaria, retirando el doble de lo aprobado.
+ *
+ * El signo lo pone `direccion` y nunca lo tecleado: ver `PeticionMargen`.
+ */
+describe('quitar margen · la retirada tiene sus propias puertas', () => {
+  it('planifica hacia abajo y no envia nada', async () => {
+    enrutar({});
+
+    const plan = await motor.planificarMargen(retirada(2, '30'));
+
+    expect(plan.direccion).toBe('quitar');
+    expect(plan.entradas[0]?.margenActual).toBe('100');
+    expect(plan.entradas[0]?.margenResultante).toBe('70');
+    /* La cifra del plan va sin signo; el signo solo vive en la entrada. */
+    expect(plan.cantidad).toBe('30');
+    expect(plan.entradas[0]?.cantidad).toBe('-30');
+    expect(exchange.peticiones.filter((p) => p.url.includes('set-margin'))).toHaveLength(0);
+  });
+
+  /* Quitar todo el margen de una posicion abierta es pedir su liquidacion. */
+  it('no deja retirar todo el margen: eso es cerrar, no ajustar', async () => {
+    enrutar({});
+
+    const plan = await motor.planificarMargen(retirada(2, '100'));
+
+    expect(plan.entradas).toHaveLength(0);
+    expect(plan.descartes[0]?.motivo).toBe('margen-no-disponible');
+    expect(plan.descartes[0]?.mensaje).toContain('ciérrela');
+  });
+
+  /* Retirar devuelve dinero al saldo, asi que el disponible no es una puerta. */
+  it('sin saldo disponible se puede retirar igual', async () => {
+    enrutar({});
+    cuentas.fijarSaldo('cta_001', '0');
+
+    const plan = await motor.planificarMargen(retirada(1, '30'));
+
+    expect(plan.entradas).toHaveLength(1);
+    expect(plan.descartes).toHaveLength(0);
+  });
+
+  it('en cruzado tampoco hay margen por posicion que retirar', async () => {
+    enrutar({ posicionesDe: () => [posicion('long', '100', 'crossed')] });
+
+    const plan = await motor.planificarMargen(retirada(1, '30'));
+
+    expect(plan.entradas).toHaveLength(0);
+    expect(plan.descartes[0]?.motivo).toBe('margen-cruzado');
+    expect(plan.descartes[0]?.mensaje).toContain('retirarlo');
+  });
+
+  it('envia el importe en negativo y se anuncia como quitar-margen', async () => {
+    const cuerpos: Record<string, unknown>[] = [];
+    enrutar({
+      alAjustar: (c) => {
+        cuerpos.push(c);
+        return { cuerpo: sobreOk({}) };
+      }
+    });
+
+    const plan = await motor.planificarMargen(retirada(1, '30'));
+    const lote = await motor.ejecutarMargen(plan);
+
+    expect(lote.accion).toBe('quitar-margen');
+    expect(resumirLote(lote).exito).toBe(1);
+    expect(cuerpos[0]).toMatchObject({ amount: '-30', holdSide: 'long' });
+  });
+
+  /*
+   * La comprobacion invertida, que es lo que impide retirar el doble.
+   *
+   * Con el criterio de agregar -«tiene el esperado o mas»- una posicion que ya
+   * bajo a 70 se leeria como «todavia no», y el reintento la dejaria en 40.
+   */
+  it('si el margen ya bajo, se da por hecho y no se reenvia', async () => {
+    let aplicado = false;
+    exchange.responderCon((p) => {
+      if (p.url.startsWith('/api/v2/mix/position/all-position')) {
+        return { cuerpo: sobreOk([posicion('long', aplicado ? '70' : '100')]) };
+      }
+      if (p.url.startsWith('/api/v2/mix/account/set-margin')) {
+        aplicado = true;
+        return { estado: 502, cuerpo: 'corte' };
+      }
+      return null;
+    });
+
+    const plan = await motor.planificarMargen(retirada(1, '30'));
+    const lote = await motor.ejecutarMargen(plan);
+
+    expect(lote.jobs[0]?.estado).toBe('exito');
+    expect(lote.jobs[0]?.mensaje).toContain('sí quedó retirado');
+    expect(exchange.peticiones.filter((p) => p.url.includes('set-margin'))).toHaveLength(1);
+  });
+
+  it('si el margen sigue igual, se marca fallo reintentable', async () => {
+    exchange.responderCon((p) => {
+      if (p.url.startsWith('/api/v2/mix/position/all-position')) {
+        return { cuerpo: sobreOk([posicion('long', '100')]) };
+      }
+      if (p.url.startsWith('/api/v2/mix/account/set-margin')) {
+        return { estado: 502, cuerpo: 'corte' };
+      }
+      return null;
+    });
+
+    const plan = await motor.planificarMargen(retirada(1, '30'));
+    const lote = await motor.ejecutarMargen(plan);
+
+    expect(lote.jobs[0]?.estado).toBe('fallo');
+    expect(lote.jobs[0]?.mensaje).toContain('no consta retirado');
+  });
+
+  it('una cantidad de cero o negativa no llega a planificarse', async () => {
+    enrutar({});
+
+    await expect(motor.planificarMargen(retirada(1, '0'))).rejects.toThrow('mayor que cero');
+    await expect(motor.planificarMargen(retirada(1, '-5'))).rejects.toThrow('mayor que cero');
   });
 });
 

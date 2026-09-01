@@ -30,7 +30,9 @@ import type {
   BatchTarget,
   ClosedPosition,
   CloseRequest,
+  DeleteOutcome,
   LeverageRequest,
+  MarginRequest,
   OpenRequest,
   PlanDiscard,
   PlanEntry,
@@ -39,6 +41,7 @@ import type {
   PositionSnapshot,
   Side,
   SystemInfo,
+  TpRequest,
   UnlockResult,
   ValidationResult
 } from '@shared/domain/panel-view';
@@ -47,13 +50,45 @@ import type { PanelService, Unsubscribe } from '@shared/ports/panel-service';
 import { prohibidoEnStaging } from '@shared/entorno';
 import { CASILLAS_POR_CUENTA, HISTORIAL_MAXIMO } from '@/lib/tokens';
 
-/* Topes verificados contra el catálogo real de Bitget el 18/08/2026. */
-const ASSETS: Asset[] = [
+/**
+ * El catálogo del mercado, para el buscador. Topes verificados el 18/08/2026.
+ *
+ * En el panel real son los 754 contratos que devuelve Bitget; aquí bastan unos
+ * cuantos para que el buscador tenga algo que filtrar y para que se vea el caso
+ * que importa: elegir un activo que **no** está en las ocho casillas.
+ */
+const CATALOGO: Asset[] = [
   { id: 'BTC', symbol: 'BTCUSDT', label: 'BTC/USDT', priceDecimals: 1, maxLeverage: 150, minLeverage: 1, tradable: true },
   { id: 'ETH', symbol: 'ETHUSDT', label: 'ETH/USDT', priceDecimals: 2, maxLeverage: 150, minLeverage: 1, tradable: true },
   { id: 'SOL', symbol: 'SOLUSDT', label: 'SOL/USDT', priceDecimals: 3, maxLeverage: 100, minLeverage: 1, tradable: true },
   { id: 'PEPE', symbol: 'PEPEUSDT', label: 'PEPE/USDT', priceDecimals: 8, maxLeverage: 75, minLeverage: 1, tradable: true },
-  { id: 'PAXG', symbol: 'PAXGUSDT', label: 'PAXG/USDT', priceDecimals: 2, maxLeverage: 50, minLeverage: 1, tradable: true }
+  { id: 'PAXG', symbol: 'PAXGUSDT', label: 'PAXG/USDT', priceDecimals: 2, maxLeverage: 50, minLeverage: 1, tradable: true },
+  { id: 'ADA', symbol: 'ADAUSDT', label: 'ADA/USDT', priceDecimals: 4, maxLeverage: 75, minLeverage: 1, tradable: true },
+  { id: 'AVAX', symbol: 'AVAXUSDT', label: 'AVAX/USDT', priceDecimals: 3, maxLeverage: 75, minLeverage: 1, tradable: true },
+  { id: 'BNB', symbol: 'BNBUSDT', label: 'BNB/USDT', priceDecimals: 2, maxLeverage: 100, minLeverage: 1, tradable: true },
+  { id: 'DOGE', symbol: 'DOGEUSDT', label: 'DOGE/USDT', priceDecimals: 5, maxLeverage: 75, minLeverage: 1, tradable: true },
+  { id: 'LINK', symbol: 'LINKUSDT', label: 'LINK/USDT', priceDecimals: 3, maxLeverage: 75, minLeverage: 1, tradable: true },
+  { id: 'SUI', symbol: 'SUIUSDT', label: 'SUI/USDT', priceDecimals: 4, maxLeverage: 75, minLeverage: 1, tradable: true },
+  { id: 'TRX', symbol: 'TRXUSDT', label: 'TRX/USDT', priceDecimals: 5, maxLeverage: 50, minLeverage: 1, tradable: true },
+  { id: 'WIF', symbol: 'WIFUSDT', label: 'WIF/USDT', priceDecimals: 4, maxLeverage: 50, minLeverage: 1, tradable: false },
+  { id: 'XRP', symbol: 'XRPUSDT', label: 'XRP/USDT', priceDecimals: 4, maxLeverage: 125, minLeverage: 1, tradable: true }
+];
+
+/**
+ * Las ocho casillas de partida de la demostración.
+ *
+ * Cinco llenas y tres vacías a propósito: los dos estados que la pantalla tiene
+ * que saber dibujar. En el panel real salen de `activos.json`.
+ */
+const RANURAS_INICIALES: (string | null)[] = [
+  'BTCUSDT',
+  'ETHUSDT',
+  'SOLUSDT',
+  'PEPEUSDT',
+  'PAXGUSDT',
+  null,
+  null,
+  null
 ];
 
 const PRECIO_BASE: Record<string, number> = {
@@ -61,7 +96,16 @@ const PRECIO_BASE: Record<string, number> = {
   ETH: 3624.8,
   SOL: 168.42,
   PEPE: 0.00001238,
-  PAXG: 3486.5
+  PAXG: 3486.5,
+  ADA: 0.8642,
+  AVAX: 41.28,
+  BNB: 712.4,
+  DOGE: 0.3184,
+  LINK: 22.71,
+  SUI: 4.128,
+  TRX: 0.2842,
+  WIF: 1.842,
+  XRP: 2.4128
 };
 
 const MOTIVOS_ERROR = [
@@ -112,6 +156,8 @@ export class MockPanelService implements PanelService {
   private readonly historial = new Map<string, ClosedPosition[]>();
   private readonly apiKeys = new Map<string, ApiKeyRow>();
   private readonly precios: Record<string, number> = { ...PRECIO_BASE };
+  /** Qué símbolo hay en cada una de las ocho casillas. El operador las edita. */
+  private readonly ranuras: (string | null)[] = [...RANURAS_INICIALES];
 
   private panelNumero = 1;
   private pasoActual = 'bg1';
@@ -131,9 +177,15 @@ export class MockPanelService implements PanelService {
   /* ---------------- generación de datos ---------------- */
 
   private generarCuentas(): Account[] {
+    /*
+     * Se llaman «A» y «B» a secas desde el 28/08/2026, como en el panel real:
+     * las cuentas principales son las quince del abecedario -de la A a la O- y
+     * el formulario de alta las ofrece por ese nombre. Antes eran «Cuenta
+     * principal - A», que ya no coincide con nada.
+     */
     const nombres = [
-      { id: 'a1', nombre: 'Cuenta principal - A', semilla: 11 },
-      { id: 'a2', nombre: 'Cuenta principal - B', semilla: 29 }
+      { id: 'a1', nombre: 'A', semilla: 11 },
+      { id: 'a2', nombre: 'B', semilla: 29 }
     ];
 
     return nombres.map(({ id, nombre, semilla }) => {
@@ -299,9 +351,58 @@ export class MockPanelService implements PanelService {
 
   /* ---------------- activos ---------------- */
 
-  async listAssets(): Promise<Asset[]> {
+  async listAssetSlots(): Promise<(Asset | null)[]> {
     await latencia(60, 60);
-    return ASSETS;
+    return this.ranurasResueltas();
+  }
+
+  async listAssetCatalog(): Promise<Asset[]> {
+    await latencia(80, 80);
+    return CATALOGO;
+  }
+
+  /**
+   * Pone un activo en una casilla, con las mismas dos negativas que el backend.
+   *
+   * Se repiten aquí y no se dan por buenas porque la demostración existe para
+   * revisar la pantalla: si el mock aceptara lo que el proceso principal
+   * rechaza, el aviso de «ya está en la casilla 3» no se vería hasta operar
+   * contra Bitget de verdad.
+   */
+  async setAssetSlot(index: number, symbol: string | null): Promise<(Asset | null)[]> {
+    await latencia(90, 90);
+
+    if (index < 0 || index >= this.ranuras.length) {
+      throw new Error(`La casilla ${index + 1} no existe: el panel tiene ${this.ranuras.length}.`);
+    }
+
+    if (symbol !== null) {
+      const activo = CATALOGO.find((a) => a.symbol === symbol);
+      if (activo === undefined) {
+        throw new Error(`Bitget no ofrece ${symbol} en este mercado. No se cambió ninguna casilla.`);
+      }
+      const ocupada = this.ranuras.findIndex((s, i) => s === symbol && i !== index);
+      if (ocupada !== -1) {
+        throw new Error(
+          `${activo.label} ya está en la casilla ${ocupada + 1}. ` +
+            'Vacíe esa casilla primero si quiere moverlo.'
+        );
+      }
+    }
+
+    this.ranuras[index] = symbol;
+    this.publicarPrecios();
+    return this.ranurasResueltas();
+  }
+
+  /** Los símbolos guardados, traducidos a activos. `null` es casilla vacía. */
+  private ranurasResueltas(): (Asset | null)[] {
+    return this.ranuras.map((s) => (s === null ? null : (CATALOGO.find((a) => a.symbol === s) ?? null)));
+  }
+
+  /** Los activos que hay ahora en las casillas, sin los huecos. */
+  private activosEnRanuras(): Asset[] {
+    return this.ranurasResueltas().filter((a): a is Asset => a !== null);
   }
 
   subscribeAssetPrices(cb: (precios: Readonly<Record<string, Decimal>>) => void): Unsubscribe {
@@ -310,7 +411,7 @@ export class MockPanelService implements PanelService {
 
     if (this.temporizadorPrecios === undefined) {
       this.temporizadorPrecios = setInterval(() => {
-        for (const activo of ASSETS) {
+        for (const activo of this.activosEnRanuras()) {
           const base = PRECIO_BASE[activo.id] ?? 1;
           const deriva = (Math.random() - 0.5) * base * 0.0015;
           this.precios[activo.id] = (this.precios[activo.id] ?? base) + deriva;
@@ -330,7 +431,7 @@ export class MockPanelService implements PanelService {
 
   private publicarPrecios(): void {
     const instantanea: Record<string, Decimal> = {};
-    for (const activo of ASSETS) {
+    for (const activo of this.activosEnRanuras()) {
       instantanea[activo.id] = dec(this.precios[activo.id] ?? PRECIO_BASE[activo.id] ?? 0, activo.priceDecimals);
     }
     for (const cb of this.oyentesPrecios) cb(instantanea);
@@ -491,7 +592,14 @@ export class MockPanelService implements PanelService {
       const salida = this.precios[posicion.assetId] ?? Number.parseFloat(posicion.entryPrice);
       const entrada = Number.parseFloat(posicion.entryPrice);
       const dir = objetivo.side === 'long' ? 1 : -1;
-      const pnl = dir * (salida - entrada) * (Number.parseFloat(posicion.initialMarginAccum) / entrada) * 10;
+      /*
+       * En la demostración el margen inicial nunca falta: todas las posiciones
+       * las abre este mismo servicio. El respaldo está porque el tipo admite
+       * `null` —una posición ya abierta al arrancar el panel real no lo tiene— y
+       * un P&L calculado sobre un margen desconocido sería un número inventado.
+       */
+      const margenInicial = posicion.initialMarginAccum ?? '0';
+      const pnl = dir * (salida - entrada) * (Number.parseFloat(margenInicial) / entrada) * 10;
 
       const lista = this.historial.get(objetivo.subAccountId) ?? [];
       lista.unshift({
@@ -500,7 +608,7 @@ export class MockPanelService implements PanelService {
         side: objetivo.side,
         entryPrice: posicion.entryPrice,
         exitPrice: dec(salida, 6),
-        initialMargin: posicion.initialMarginAccum,
+        initialMargin: margenInicial,
         pnl: dec(pnl, 2),
         closedBy: 'manual',
         closedAt: new Date().toISOString()
@@ -543,6 +651,50 @@ export class MockPanelService implements PanelService {
 
     this.publicarPosiciones();
     return { label: etiqueta, ok, skipped: omitidas, failures: fails, undetermined: [] };
+  }
+
+  /** Sustituye el Take Profit de la posición, como hace el proceso principal. */
+  private async ponerTp(req: TpRequest): Promise<BatchResult> {
+    return this.aplicarSobrePosicion('Poner Take Profit', req.targets, (p) => {
+      const dir = p.side === 'long' ? 1 : -1;
+      const entrada = Number.parseFloat(p.entryPrice);
+      const objetivo = entrada * (1 + (dir * Number.parseFloat(req.percent)) / 100 / p.leverage);
+      return {
+        ...p,
+        takeProfitPrice: dec(objetivo, 6),
+        actions: { ...p.actions, tp: true, tpDisplay: `${req.percent}%` }
+      };
+    });
+  }
+
+  /**
+   * Mueve el margen adicional en los dos sentidos, sin bajar de cero.
+   *
+   * El tope no es cosmético: el distintivo MGA dice cuánto margen adicional
+   * lleva la posición, y un número negativo ahí sería un dato imposible. Es la
+   * misma regla que aplica el almacén del proceso principal.
+   */
+  private async moverMargen(req: MarginRequest): Promise<BatchResult> {
+    const quita = req.direction === 'quitar';
+    return this.aplicarSobrePosicion(
+      quita ? 'Quitar margen' : 'Agregar margen',
+      req.targets,
+      (p) => {
+        const antes = Number.parseFloat(p.actions.mgDisplay || '0');
+        const paso = Number.parseFloat(req.amount);
+        const ahora = Math.max(0, quita ? antes - paso : antes + paso);
+        return {
+          ...p,
+          /* Retirar margen no quita el aviso crítico: lo justifica. */
+          marginCritical: quita ? p.marginCritical : false,
+          actions: {
+            ...p.actions,
+            mg: ahora > 0,
+            mgDisplay: ahora > 0 ? dec(ahora, 2) : ''
+          }
+        };
+      }
+    );
   }
 
   private async fijarApalancamiento(req: LeverageRequest): Promise<BatchResult> {
@@ -589,7 +741,8 @@ export class MockPanelService implements PanelService {
     }
 
     this.planes.set(id, ejecutar);
-    return { kind, id, title, summary, reference: null, entries, discards };
+    /* La demostración no modela saldos, así que nada puede quedar impedido. */
+    return { kind, id, title, summary, reference: null, entries, discards, blocker: null };
   }
 
   private nombreDe(subAccountId: string): string {
@@ -642,6 +795,30 @@ export class MockPanelService implements PanelService {
     );
   }
 
+  async planTakeProfit(req: TpRequest): Promise<BatchPlan> {
+    await latencia(180, 220);
+    return this.planificar(
+      'tp',
+      'Poner Take Profit',
+      `${req.percent}% de ganancia sobre el margen inicial de cada posición`,
+      req.targets,
+      (t) => {
+        const posicion = this.posicionDe(t);
+        if (!posicion) return null;
+        const dir = t.side === 'long' ? 1 : -1;
+        const entrada = Number.parseFloat(posicion.entryPrice);
+        const objetivo =
+          entrada * (1 + (dir * Number.parseFloat(req.percent)) / 100 / posicion.leverage);
+        const destino = `${dec(objetivo, 6)} · entrada ${posicion.entryPrice} · ${posicion.leverage}x`;
+        /* Como el real: si ya hay uno puesto, se enseña que este lo sustituye. */
+        return posicion.takeProfitPrice === null
+          ? `TP a ${destino}`
+          : `TP ${posicion.takeProfitPrice} → ${destino} (sustituye el puesto)`;
+      },
+      (solo) => this.ponerTp({ ...req, targets: solo ?? req.targets })
+    );
+  }
+
   async planRemoveTakeProfit(req: CloseRequest): Promise<BatchPlan> {
     await latencia(180, 220);
     return this.planificar(
@@ -659,6 +836,26 @@ export class MockPanelService implements PanelService {
           takeProfitPrice: null,
           actions: { ...posicion.actions, tp: false, tpDisplay: '' }
         }))
+    );
+  }
+
+  async planMargin(req: MarginRequest): Promise<BatchPlan> {
+    await latencia(180, 220);
+    const quita = req.direction === 'quitar';
+    return this.planificar(
+      quita ? 'margin-remove' : 'margin-add',
+      quita ? 'Quitar margen' : 'Agregar margen',
+      `${req.amount} por casilla · ${quita ? 'vuelve al saldo' : 'sale del saldo'}`,
+      req.targets,
+      (t) => {
+        const posicion = this.posicionDe(t);
+        if (!posicion) return null;
+        const antes = Number.parseFloat(posicion.actions.mgDisplay || '0');
+        const paso = Number.parseFloat(req.amount);
+        const ahora = Math.max(0, quita ? antes - paso : antes + paso);
+        return `margen ${dec(antes, 2)} → ${dec(ahora, 2)}`;
+      },
+      (solo) => this.moverMargen({ ...req, targets: solo ?? req.targets })
     );
   }
 
@@ -700,6 +897,29 @@ export class MockPanelService implements PanelService {
       return { ok: false, verdict: 'invalida', reason: 'Bitget no aceptó la credencial.', warnings: [], latencyMs: 180, uid: null, parentUid: null };
     }
 
+    /*
+     * La casilla ocupada se rechaza igual que en el proceso principal. Se repite
+     * aquí y no se da por buena porque la demostración existe para revisar la
+     * pantalla: si el mock aceptara lo que el backend rechaza, este aviso no se
+     * vería hasta estar operando contra Bitget de verdad.
+     */
+    const ocupante = this.cuentas
+      .find((c) => c.name === input.accountName)
+      ?.subAccounts.find((s) => s.slot === input.slot);
+    if (ocupante !== undefined) {
+      return {
+        ok: false,
+        verdict: null,
+        reason:
+          `La casilla ${input.slot} de la cuenta «${input.accountName}» ya la ocupa ` +
+          `«${ocupante.label}». Elija otra casilla, o dé de baja esa subcuenta primero.`,
+        warnings: [],
+        latencyMs: 120,
+        uid: null,
+        parentUid: null
+      };
+    }
+
     const id = `demo-${Date.now()}`;
     /* Como en la API real: el UID lo dice el exchange, no el formulario. */
     const uid = `5476143${String(this.apiKeys.size).padStart(3, '0')}`;
@@ -738,9 +958,18 @@ export class MockPanelService implements PanelService {
     return { ok: true, verdict: 'valida', reason: null, warnings: [], latencyMs: 140, uid: fila.uid, parentUid: fila.parentUid };
   }
 
-  async deleteApiKey(id: string): Promise<void> {
+  /*
+   * La baja pide la contraseña de paso, igual que en el panel de verdad.
+   *
+   * Sin contraseña fijada no se deja pasar —nunca se responde «vale» porque no
+   * haya nada que comprobar—, que es lo mismo que hace `Vault.comprobarPaso`.
+   */
+  async deleteApiKey(id: string, stepPassword: string): Promise<DeleteOutcome> {
     await latencia(100, 100);
+    if (this.pasoActual === '' || stepPassword !== this.pasoActual) return 'paso-incorrecto';
+    if (!this.apiKeys.has(id)) return 'no-estaba';
     this.apiKeys.delete(id);
+    return 'borrada';
   }
 
   async unlockVault(masterPassword: string): Promise<UnlockResult> {

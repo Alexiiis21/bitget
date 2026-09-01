@@ -42,6 +42,24 @@ export const WS_ARRANQUE_POR_SEGUNDO = 5;
 /** Ping de aplicacion. El servidor corta a los 120 s; 20 da seis oportunidades. */
 export const WS_PING_MS = 20_000;
 export const WS_PONG_TIMEOUT_MS = 10_000;
+/**
+ * Solicitudes de conexion que el panel se permite por ventana de 5 minutos.
+ *
+ * 20 % por debajo del techo de `WS_CONEXIONES_POR_5MIN`, como el resto de los
+ * presupuestos propios. Es el que protege del caso peor: un corte de red que
+ * tira los 80 sockets a la vez y los devuelve todos con backoff. Con el margen,
+ * dos oleadas completas caben sin rozar el limite de la IP.
+ */
+export const WS_PRESUPUESTO_CONEXIONES = 240;
+/**
+ * Cada cuanto revisa el pool si hay sockets que abrir, cerrar o reconectar.
+ *
+ * Un segundo es la resolucion con la que se aplica el arranque escalonado de
+ * `WS_ARRANQUE_POR_SEGUNDO`, y el mismo razonamiento que `REINTENTO_TICK_MS`:
+ * por debajo no se nota, y despertar una vez por segundo para recorrer cien
+ * entradas no se nota en el proceso.
+ */
+export const WS_TICK_MS = 1_000;
 
 /* ---------- Ritmos del panel ---------- */
 /** Refresco del monitor. El contrato acota el rango a 2-5 s. */
@@ -52,6 +70,38 @@ export const MONITOR_REFRESCO_MS_DEFECTO = 3_000;
 export const PUBLICACION_COALESCIDA_MS = 250;
 /** Cotejo REST contra el estado en memoria. docs/01 seccion 8. */
 export const RECONCILIACION_MS = 45_000;
+/**
+ * Dispersion del barrido, arriba y abajo del intervalo.
+ *
+ * Sin el, las cien cuentas que se registran al desbloquear vencerian su
+ * relectura siempre juntas y el barrido saldria a rafagas cada 45 segundos en
+ * vez de gotear. Es el mismo motivo del jitter de reconexion, con una
+ * proporcion menor: aqui no hay que evitar una tormenta contra una IP, solo
+ * repartir un trabajo que se repite.
+ */
+export const RECONCILIACION_JITTER = 0.2;
+/**
+ * Resolucion con que se detecta que a una cuenta le toca relectura.
+ *
+ * No es el ritmo del barrido -ese lo fija `RECONCILIACION_MS` por cuenta-, sino
+ * cada cuanto se mira quien vence. Mismo razonamiento que `REINTENTO_TICK_MS`.
+ */
+export const RECONCILIACION_TICK_MS = 1_000;
+/**
+ * Cuentas que se barren a la vez.
+ *
+ * Cien cuentas cada 45 segundos son ~2,2 barridos por segundo, y cada uno gasta
+ * una peticion -dos si la cuenta tiene posiciones-. Con dos en vuelo sobra para
+ * sostener ese ritmo.
+ *
+ * El tope es bajo a proposito, y no por el cupo de peticiones: lo que hay que
+ * proteger es la **concurrencia**. El limitador solo deja `CONCURRENCIA_MAXIMA`
+ * peticiones en vuelo entre todos, y el barrido convive con el supervisor de
+ * reconexion -otras `REINTENTO_CONCURRENCIA`- y con los lotes de apertura, que
+ * son lo unico que el operador esta mirando. Un barrido de fondo no puede
+ * quedarse con un tercio de los huecos mientras salen cien ordenes.
+ */
+export const RECONCILIACION_CONCURRENCIA = 2;
 
 /* ---------- Seguridad ---------- */
 /** scrypt: 2^17 -> ~128 MB y ~0,5 s por derivacion. docs/03 seccion 5. */
@@ -125,4 +175,44 @@ export const MOSAICO_ALTO_MIN = 1080;
 
 /* ---------- Estructura ---------- */
 export const SUBCUENTAS_POR_GRUPO = 20;
-export const CUENTAS_MADRE_MAX = 5;
+/**
+ * Cuentas principales del panel: quince, de la A a la O.
+ *
+ * Eran cinco hasta el 28/08/2026, y no eran una lista: el operador escribia el
+ * nombre a mano en el formulario de alta, asi que «A» y «a » creaban una cuenta
+ * cada una. El cliente lo cerro ese dia -de la A a la O, fijas- y con ello el
+ * panel pasa de 100 subcuentas a 300: quince cuentas principales por las
+ * `SUBCUENTAS_POR_GRUPO` de cada una.
+ *
+ * El techo sigue existiendo por lo mismo que existia con cinco: la matriz se
+ * dibuja entera en pantalla y el presupuesto de sockets -`WS_MAX_CONCURRENTES`-
+ * no da para una conexion viva por subcuenta. Con 300 no todas tendran socket a
+ * la vez; las que tienen posicion abierta si, que es el orden que ya aplica el
+ * pool.
+ */
+export const CUENTAS_MADRE_MAX = 15;
+/**
+ * Como se llama cada cuenta principal: `A`, `B`, ... `O`.
+ *
+ * Se derivan del abecedario y no se escriben a mano para que no puedan
+ * desajustarse de `CUENTAS_MADRE_MAX`: una lista de quince nombres junto a un
+ * tope de quince son dos numeros que hay que acordarse de cambiar a la vez.
+ */
+export const NOMBRES_CUENTA_MADRE: readonly string[] = Array.from(
+  { length: CUENTAS_MADRE_MAX },
+  (_, i) => String.fromCharCode('A'.charCodeAt(0) + i)
+);
+/**
+ * Casillas de activo del selector. Ocho, ni una mas.
+ *
+ * El cliente opera ocho activos y el selector tiene ocho huecos desde el primer
+ * dia. Lo que cambio el 28/08/2026 es que **cual** va en cada hueco lo decide el
+ * operador, con un buscador sobre el catalogo entero de Bitget; lo que no cambio
+ * es el numero, y por el mismo motivo de siempre: un selector con los 754
+ * contratos del exchange convierte una eleccion de un vistazo en una busqueda, y
+ * abre la puerta a operar por error un activo que no es el suyo.
+ *
+ * Buscar es ahora un acto aparte -se abre, se elige, se cierra- y operar sigue
+ * siendo elegir entre ocho.
+ */
+export const RANURAS_ACTIVO = 8;

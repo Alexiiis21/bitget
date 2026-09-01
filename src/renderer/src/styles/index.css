@@ -109,6 +109,24 @@ body[data-theme='dark'] {
   --field-line: #d7e0e8;
 }
 
+/*
+ * Los tres colores de estado de acción: TP · MGA · AP · OE.
+ *
+ * Verde hecho, rojo pendiente, amarillo error. Son los que el operador mira de
+ * un vistazo sobre las 20 casillas de cada cuenta, y el cliente pidió poder
+ * cambiarlos —hay quien no distingue este rojo de este verde—.
+ *
+ * Viven aquí, fuera de los dos bloques de tema, por lo mismo que `--field-*`:
+ * no cambian con claro/oscuro. Estos son los valores de fábrica; la elección
+ * del operador se aplica desde `App.tsx` sobre el `<body>`, que gana a `:root`
+ * por especificidad, y así *Restablecer* es simplemente borrarla.
+ */
+:root {
+  --estado-realizada: #2f9e44;
+  --estado-pendiente: #e03131;
+  --estado-error: #f2b705;
+}
+
 html,
 body,
 #root {
@@ -170,7 +188,12 @@ a {
   background: var(--alert-crit-bg);
 }
 
-.pcb-casilla:hover {
+/*
+ * La fila que el alcance no opera esta deshabilitada: no debe responder al
+ * cursor. Prometer con el borde una marca que no se va a poner es justo lo que
+ * hacia dudar de si la casilla estaba seleccionada o no.
+ */
+.pcb-casilla:hover:not([aria-disabled='true']) {
   border-color: var(--brand-fill);
 }
 

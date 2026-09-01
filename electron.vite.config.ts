@@ -146,6 +146,19 @@ export default defineConfig(({ mode }) => {
         }
       },
       build: {
+        /*
+         * El audio nunca se empotra en base64.
+         *
+         * Vite convierte en `data:` todo asset por debajo de 4 KiB, y la CSP
+         * del index.html no lista `media-src`: cae en `default-src 'self'`,
+         * que no admite `data:`. Un sonido corto y muy comprimido cruzaria ese
+         * umbral y dejaria de sonar **solo en el binario empaquetado** —en
+         * desarrollo Vite sirve los assets como archivos y todo pareceria
+         * correcto—. Devolver `false` fuerza archivo; `undefined` deja el
+         * criterio por defecto para todo lo demas.
+         */
+        assetsInlineLimit: (ruta: string): boolean | undefined =>
+          /\.(mp3|wav|ogg|m4a|aac|flac|opus)$/i.test(ruta) ? false : undefined,
         rollupOptions: { input: { index: resolve('src/renderer/index.html') } }
       }
     }

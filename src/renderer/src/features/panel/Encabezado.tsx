@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react';
+import { useState, type CSSProperties } from 'react';
 import { FUENTE, T } from '@/lib/tokens';
 import { usarPanel } from '@/store/panel';
 
@@ -56,6 +56,7 @@ function DistintivoMercado() {
           : 'Este panel opera contra el mercado simulado de Bitget: las órdenes no mueven dinero real.'
       }
       style={{
+        flex: 'none',
         padding: '3px 9px',
         borderRadius: 6,
         fontSize: 10,
@@ -69,6 +70,117 @@ function DistintivoMercado() {
       }}
     >
       {real ? 'MERCADO REAL' : 'SIMULADO'}
+    </span>
+  );
+}
+
+/**
+ * El número de este panel, editable.
+ *
+ * --------------------------------------------------------------------------
+ * Por qué hace falta un borrador y no basta con el valor del store
+ * --------------------------------------------------------------------------
+ * El campo escribía el número directamente y descartaba todo lo que no fuera un
+ * entero ≥ 1. Parecía razonable y hacía el campo **inservible**: borrar el «1»
+ * para teclear otro deja la caja vacía un instante, y una caja vacía no es un
+ * entero, así que el borrado se descartaba y el dígito volvía a aparecer. No
+ * había forma de cambiarlo salvo seleccionarlo entero y sobrescribirlo de una.
+ *
+ * El borrador es ese estado intermedio: mientras se teclea manda lo escrito, el
+ * store recibe el valor solo cuando es válido, y al salir del campo el borrador
+ * se suelta —si se dejó vacío, vuelve el número que había—. Ningún estado
+ * inválido llega a persistirse.
+ */
+function NumeroPanel() {
+  const numeroPanel = usarPanel((s) => s.numeroPanel);
+  const fijarNumeroPanel = usarPanel((s) => s.fijarNumeroPanel);
+  /** Lo tecleado mientras dura la edición. `null` = manda el store. */
+  const [borrador, fijarBorrador] = useState<string | null>(null);
+
+  const texto = borrador ?? String(numeroPanel);
+
+  return (
+    <span
+      title="Número de este panel. Se guarda en el equipo y se conserva al reiniciar."
+      style={{ flex: 'none', fontSize: 18, fontWeight: 700, color: '#8ccdf5', fontFamily: FUENTE.mono, display: 'flex', alignItems: 'center', gap: 2 }}
+    >
+      <span>#</span>
+      <input
+        className="pcb-campo"
+        value={texto}
+        onChange={(e) => {
+          const limpio = e.target.value.replace(/[^0-9]/g, '').slice(0, 6);
+          fijarBorrador(limpio);
+          const n = Number.parseInt(limpio, 10);
+          if (Number.isFinite(n) && n >= 1 && n !== numeroPanel) void fijarNumeroPanel(n);
+        }}
+        onBlur={() => fijarBorrador(null)}
+        inputMode="numeric"
+        style={{
+          width: `${Math.max(1, texto.length)}ch`,
+          minWidth: 38,
+          padding: '2px 5px',
+          borderRadius: 6,
+          border: '1px solid #ffffff33',
+          background: '#ffffff14',
+          outline: 'none',
+          color: '#8ccdf5',
+          fontFamily: FUENTE.mono,
+          fontSize: 18,
+          fontWeight: 700,
+          textAlign: 'center'
+        }}
+      />
+    </span>
+  );
+}
+
+/**
+ * Precio del activo seleccionado, al lado del distintivo de mercado.
+ *
+ * --------------------------------------------------------------------------
+ * Por qué aquí y no en la barra lateral
+ * --------------------------------------------------------------------------
+ * Estuvo bajo el selector de activo hasta el 28/08/2026. El cliente lo pidió
+ * arriba, y encaja: es el único número de la pantalla que cambia solo y que se
+ * mira **mientras** se hace otra cosa —marcar casillas, escribir el margen—, así
+ * que tenerlo en la barra obligaba a apartar la vista de la matriz. Junto al
+ * distintivo del mercado queda además lo que hay que saber antes de enviar nada:
+ * contra qué mercado se opera y a cuánto está.
+ *
+ * Es el **precio de marca**, el mismo con el que se dimensiona una apertura, no
+ * el último negociado: enseñar uno y calcular con otro haría creer al operador
+ * que el panel calcula mal. El activo va delante porque sin él el número no
+ * dice nada, y el par lleva su propia moneda —`BTC/SUSDT` en el mercado de
+ * pruebas—, así que no hace falta rotularla aparte.
+ */
+function UltimoPrecio() {
+  const activos = usarPanel((s) => s.activos);
+  const activoId = usarPanel((s) => s.activoId);
+  const precios = usarPanel((s) => s.precios);
+  const activo = activos.find((a) => a.id === activoId);
+
+  return (
+    <span
+      title="Precio de marca del activo seleccionado. Es el mismo con el que el panel calcula las cantidades de una apertura."
+      style={{
+        flex: 'none',
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 6,
+        padding: '3px 9px',
+        borderRadius: 6,
+        whiteSpace: 'nowrap',
+        fontFamily: FUENTE.mono,
+        border: '1px solid #ffffff2e',
+        background: '#ffffff14'
+      }}
+    >
+      <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.1em', color: '#8ccdf5' }}>ÚLTIMO</span>
+      <span style={{ fontSize: 11, fontWeight: 600, color: '#95c9ea' }}>{activo?.label ?? '—'}</span>
+      <span style={{ fontSize: 13, fontWeight: 700, color: '#ffffff' }}>
+        {activo === undefined ? '—' : (precios[activo.id] ?? '—')}
+      </span>
     </span>
   );
 }
@@ -95,14 +207,13 @@ function conexionDelPanel(cuentas: { subAccounts: { status: string }[] }[]): {
 }
 
 export function Encabezado() {
-  const numeroPanel = usarPanel((s) => s.numeroPanel);
-  const fijarNumeroPanel = usarPanel((s) => s.fijarNumeroPanel);
   const tema = usarPanel((s) => s.tema);
   const fijarTema = usarPanel((s) => s.fijarTema);
   const apiKeys = usarPanel((s) => s.apiKeys);
   const cuentas = usarPanel((s) => s.cuentas);
   const abrirApis = usarPanel((s) => s.abrirApis);
   const abrirSeguridad = usarPanel((s) => s.abrirSeguridad);
+  const abrirColores = usarPanel((s) => s.abrirColores);
   const bloquear = usarPanel((s) => s.bloquear);
 
   const conectadas = apiKeys.filter((a) => a.status === 'ok').length;
@@ -110,41 +221,25 @@ export function Encabezado() {
 
   return (
     <div style={barra}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.14em', color: '#8ccdf5', fontFamily: FUENTE.mono }}>
+      {/*
+        * El nombre del panel es lo único que puede encogerse.
+        *
+        * Con el precio al lado del distintivo de mercado, el grupo izquierdo
+        * pasa a competir por el ancho con los botones de la derecha en las
+        * ventanas más estrechas que admite el diseño. Los datos —número,
+        * mercado, precio— no se recortan: se recorta el rótulo, que es el único
+        * que el operador ya se sabe.
+        */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, minWidth: 0 }}>
+        <span style={{ flex: 'none', fontSize: 11, fontWeight: 700, letterSpacing: '.14em', color: '#8ccdf5', fontFamily: FUENTE.mono }}>
           PCB
         </span>
-        <span style={{ fontSize: 15, fontWeight: 600, whiteSpace: 'nowrap' }}>Panel de Control Bitget</span>
-        <span
-          title="Número de este panel · editable"
-          style={{ fontSize: 18, fontWeight: 700, color: '#8ccdf5', fontFamily: FUENTE.mono, display: 'flex', alignItems: 'center', gap: 2 }}
-        >
-          <span>#</span>
-          <input
-            className="pcb-campo"
-            value={numeroPanel}
-            onChange={(e) => {
-              const n = Number.parseInt(e.target.value.replace(/[^0-9]/g, '').slice(0, 6), 10);
-              if (Number.isFinite(n) && n >= 1) void fijarNumeroPanel(n);
-            }}
-            inputMode="numeric"
-            style={{
-              width: `${Math.max(1, String(numeroPanel).length)}ch`,
-              minWidth: 38,
-              padding: '2px 5px',
-              borderRadius: 6,
-              border: '1px solid #ffffff33',
-              background: '#ffffff14',
-              outline: 'none',
-              color: '#8ccdf5',
-              fontFamily: FUENTE.mono,
-              fontSize: 18,
-              fontWeight: 700,
-              textAlign: 'center'
-            }}
-          />
+        <span style={{ minWidth: 0, fontSize: 15, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          Panel de Control Bitget
         </span>
+        <NumeroPanel />
         <DistintivoMercado />
+        <UltimoPrecio />
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -212,6 +307,11 @@ export function Encabezado() {
 
         <button type="button" className="pcb-boton-barra" onClick={abrirSeguridad} title="Configurar la contraseña de paso" style={botonBarra}>
           Seguridad
+        </button>
+
+        {/* Junto al interruptor de tema y a Seguridad, que es donde ya viven los ajustes. */}
+        <button type="button" className="pcb-boton-barra" onClick={abrirColores} title="Cambiar los colores de estado de la matriz" style={botonBarra}>
+          Colores
         </button>
 
         <button type="button" className="pcb-boton-salir" onClick={bloquear} title="Cerrar sesión y bloquear el panel" style={{ ...botonBarra, fontWeight: 600 }}>

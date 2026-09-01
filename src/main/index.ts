@@ -3,12 +3,17 @@ import { app, BrowserWindow, shell } from 'electron';
 import {
   MOSAICO_ALTO_MIN,
   MOSAICO_ANCHO_MIN,
-  PUBLICACION_COALESCIDA_MS
+  PUBLICACION_COALESCIDA_MS,
+  WS_TICK_MS
 } from '@shared/constants';
 import { entorno, esStaging, mercadoCompilado } from '@shared/entorno';
+import { MERCADOS } from './bitget/mercado';
 import { ClienteBitget } from './bitget/rest/client';
+import { PoolSockets } from './bitget/ws/pool';
+import { BarridoPosiciones } from './execution/barrido-posiciones';
 import { SupervisorReconexion } from './execution/supervisor-reconexion';
 import { registrarIpc } from './ipc/handlers';
+import { habilitarMenuContextual } from './menu-contextual';
 import { Sesion } from './ipc/sesion';
 import { cargarInstancia } from './storage/instancia';
 import { fijarCarpetaDeEntorno, rutas } from './storage/paths';
@@ -24,6 +29,8 @@ let ventana: BrowserWindow | null = null;
 let sesion: Sesion | null = null;
 let cliente: ClienteBitget | null = null;
 let supervisor: SupervisorReconexion | null = null;
+let barrido: BarridoPosiciones | null = null;
+let pool: PoolSockets | null = null;
 
 function crearVentana(): void {
   ventana = new BrowserWindow({
@@ -54,6 +61,13 @@ function crearVentana(): void {
   });
 
   ventana.on('ready-to-show', () => ventana?.show());
+
+  /*
+   * Cortar, copiar y pegar con el boton derecho. Una ventana de Electron no
+   * trae ese menu de serie, y sin el la unica forma de pegar una API Key de 64
+   * caracteres es Ctrl+V. Ver `menu-contextual.ts`.
+   */
+  habilitarMenuContextual(ventana);
 
   /* Ningun enlace abre una ventana de Electron: siempre el navegador del sistema. */
   ventana.webContents.setWindowOpenHandler(({ url }) => {
@@ -115,6 +129,28 @@ function publicarCambios(sesion: Sesion): void {
     if (ventana === null || ventana.isDestroyed()) return;
     ventana.webContents.send('lote:progreso', lote);
   });
+
+  /*
+   * Las posiciones van por su propio canal y con su propia agrupacion, no
+   * dentro de la de la matriz.
+   *
+   * Comparten el ritmo -250 ms- y no el temporizador a proposito: son dos
+   * fuentes que cambian a ritmos muy distintos. Un socket de posiciones puede
+   * empujar decenas de eventos por segundo mientras la matriz lleva minutos
+   * quieta, y con un temporizador comun cada uno de esos empujones obligaria a
+   * recalcular y reenviar tambien las cien filas de la matriz, que no han
+   * cambiado. Separados, cada canal solo despierta por lo suyo.
+   */
+  let pendientePosiciones: ReturnType<typeof setTimeout> | null = null;
+
+  sesion.alCambiarPosiciones(() => {
+    if (pendientePosiciones !== null) return;
+    pendientePosiciones = setTimeout(() => {
+      pendientePosiciones = null;
+      if (ventana === null || ventana.isDestroyed()) return;
+      ventana.webContents.send('monitor:posiciones', sesion.posicionesMonitor());
+    }, PUBLICACION_COALESCIDA_MS);
+  });
 }
 
 /* ---------------- ciclo de vida ---------------- */
@@ -162,7 +198,11 @@ if (!app.requestSingleInstanceLock()) {
     }
 
     cliente = new ClienteBitget();
-    sesion = new Sesion({ vault: r.vault, cuentas: r.cuentas }, cliente, { mercado });
+    sesion = new Sesion(
+      { vault: r.vault, cuentas: r.cuentas, activos: r.activos },
+      cliente,
+      { mercado }
+    );
 
     /*
      * El reintento automatico de las cuentas caidas. Late desde el arranque y
@@ -179,7 +219,49 @@ if (!app.requestSingleInstanceLock()) {
     });
     supervisor.iniciar();
 
-    registrarIpc(sesion, instancia, mercado);
+    /*
+     * El barrido de posiciones, que es lo que llena el Centro de Monitoreo.
+     *
+     * Late desde el arranque igual que el supervisor y por el mismo motivo: con
+     * el panel bloqueado cada ciclo comprueba `operativa()` y no hace nada, y en
+     * cuanto se abre el vault empieza a leer sin que nadie tenga que arrancarlo.
+     */
+    barrido = new BarridoPosiciones(cliente, MERCADOS[mercado], sesion.almacenPosiciones, sesion);
+    barrido.iniciar();
+
+    /*
+     * Un lote que termina adelanta la relectura de las cuentas que tocó.
+     *
+     * Es lo que hace que el saldo y las posiciones del informe sean los de
+     * después de abrir y no los de antes. Sin esto habría que esperar el turno
+     * normal de cada cuenta -hasta 45 segundos- con el operador delante del
+     * informe comprobando que salió bien.
+     *
+     * Se cablea aquí, como el resto de los avisos de la sesión: ella dice qué
+     * cuentas tocó y el barrido decide cuándo leerlas.
+     */
+    const barridoVivo = barrido;
+    sesion.alTocarCuentas((cuentaIds) => barridoVivo.adelantar(cuentaIds));
+
+    /*
+     * Y el pool de sockets, que es lo que convierte «cada 45 segundos» en «al
+     * instante» para las cuentas que tienen algo abierto. Las que no caben en
+     * el presupuesto de 80 se quedan con el barrido y el panel lo dice: pierden
+     * inmediatez, no informacion.
+     */
+    pool = new PoolSockets(MERCADOS[mercado], sesion.almacenPosiciones, sesion);
+    pool.iniciar();
+
+    /*
+     * El recuento de sockets vivos para la barra superior. Va por sondeo y no
+     * por aviso porque no hay ningun instante concreto que publicar: lo que
+     * interesa es cuanto queda del presupuesto, y eso cambia solo cuando el
+     * pool revisa. `informarSockets` no anuncia nada si el numero no cambio.
+     */
+    const pulso = setInterval(() => sesion?.informarSockets(pool?.vivos.length ?? 0), WS_TICK_MS);
+    pulso.unref();
+
+    registrarIpc(sesion, instancia, mercado, r.instancia);
     publicarCambios(sesion);
     crearVentana();
 
@@ -194,8 +276,10 @@ if (!app.requestSingleInstanceLock()) {
    * contener las claves de cien cuentas.
    */
   app.on('window-all-closed', () => {
-    /* Primero el latido: que no arranque un reintento sobre un vault que se esta cerrando. */
+    /* Primero los latidos: que no arranque una lectura sobre un vault que se esta cerrando. */
     supervisor?.detener();
+    barrido?.detener();
+    pool?.detener();
     sesion?.cerrar();
     void cliente?.cerrar();
     app.quit();

@@ -14,10 +14,14 @@
  * inventar datos. Ver el reporte de brechas al final del encargo.
  *
  * Cinco adiciones sobre la interfaz que se pidió, cada una justificada:
- *  - `listAssets` / `subscribeAssetPrices`: el selector de activos necesita
- *    un catálogo y un precio en vivo que no estaban en la interfaz original.
+ *  - `listAssetSlots` / `listAssetCatalog` / `setAssetSlot` /
+ *    `subscribeAssetPrices`: el selector de activos necesita un catálogo y un
+ *    precio en vivo que no estaban en la interfaz original, y desde el
+ *    28/08/2026 también una forma de editar sus ocho casillas.
  *  - `getSystemInfo` / `setPanelNumber`: el número de panel pasa a ser
  *    editable por el operador en el diseño v2 (antes era fijo por instancia).
+ *    Estuvo declarado aquí y sin respaldo hasta el 28/08/2026 —lanzaba
+ *    `NotImplemented`—; ahora lo persiste el canal `sistema:numero-panel`.
  *  - `setStepPassword`: `verifyStepPassword` sin una forma de fijarla no
  *    sirve para el diálogo de Seguridad.
  *  - `verifyMasterPassword`: comprobar la maestra sin abrir el almacén es
@@ -35,10 +39,13 @@ import type {
   BatchTarget,
   ClosedPosition,
   CloseRequest,
+  DeleteOutcome,
   LeverageRequest,
+  MarginRequest,
   OpenRequest,
   PositionSnapshot,
   SystemInfo,
+  TpRequest,
   UnlockResult,
   ValidationResult
 } from '../domain/panel-view';
@@ -49,10 +56,41 @@ export type Unsubscribe = () => void;
 export interface PanelService {
   /* ---- sistema ---- */
   getSystemInfo(): Promise<SystemInfo>;
+  /**
+   * Cambia el número visible del panel y lo persiste.
+   *
+   * Se guarda en `instancia.json`, en la carpeta de datos del equipo, junto al
+   * resto de la identidad de esta instalación. Devuelve cuando está escrito: si
+   * la promesa falla, el número no quedó guardado.
+   */
   setPanelNumber(numeroPanel: number): Promise<void>;
 
   /* ---- activos ---- */
-  listAssets(): Promise<Asset[]>;
+  /**
+   * Las ocho casillas del selector, en su orden y con sus huecos.
+   *
+   * `null` es una casilla vacía, y es un estado normal: el mercado de pruebas
+   * solo ofrece tres contratos. No se compactan porque el operador las edita
+   * por su número, y una lista sin huecos las renumeraría al vaciar una.
+   */
+  listAssetSlots(): Promise<(Asset | null)[]>;
+  /**
+   * Todo lo que el mercado ofrece. **Solo para el buscador.**
+   *
+   * Son los 754 contratos del exchange y nada de aquí se puede operar mientras
+   * no ocupe una de las ocho casillas. Elegir y operar son dos actos distintos
+   * desde el 28/08/2026, y esta separación es lo que mantiene el selector con
+   * el mismo tamaño de siempre.
+   */
+  listAssetCatalog(): Promise<Asset[]>;
+  /**
+   * Pone un activo en una casilla, o la vacía con `null`. Devuelve las ocho.
+   *
+   * El proceso principal comprueba el símbolo contra el catálogo del exchange y
+   * rechaza el que no exista o el que ya ocupe otra casilla —dos casillas con el
+   * mismo activo serían dos botones llamados igual—.
+   */
+  setAssetSlot(index: number, symbol: string | null): Promise<(Asset | null)[]>;
   subscribeAssetPrices(cb: (prices: Readonly<Record<string, Decimal>>) => void): Unsubscribe;
 
   /* ---- lectura ---- */
@@ -73,21 +111,26 @@ export interface PanelService {
   /* ---- escritura, en dos fases ---- */
 
   /**
-   * Las cuatro operaciones se planifican antes de enviarse, y ninguna de estas
+   * Las seis operaciones se planifican antes de enviarse, y ninguna de estas
    * llamadas envia nada a Bitget.
    *
    * Planificar cuesta consultas -precio, saldo, posiciones- y devuelve lo que
    * de verdad va a pasar en cada casilla. Es lo que el operador aprueba. Si
    * cancela, no ha salido ni una orden.
    *
-   * **No hay `planTakeProfit` ni `planMargin`.** Los dos existieron y se
-   * retiraron el 26/08/2026: el Take Profit y el margen adicional viajan dentro
-   * de `planOpen`, y tener ademas su propia entrada permitia enviarlos otra vez
-   * sobre una posicion que ya los llevaba. Ver `PlanKind`.
+   * `planTakeProfit` y `planMargin` actuan sobre posiciones **ya abiertas**, y
+   * no son lo mismo que el Take Profit y el margen adicional que viajan dentro
+   * de `planOpen`. Estuvieron retirados entre el 26/08/2026 y el 01/09/2026,
+   * cuando tenerlos duplicados era poder enviar el mismo importe dos veces; ver
+   * `PlanKind` para lo que cambio al devolverlos.
    */
   planOpen(req: OpenRequest): Promise<BatchPlan>;
   planClose(req: CloseRequest): Promise<BatchPlan>;
+  /** Pone -o sustituye- el Take Profit de las posiciones seleccionadas. */
+  planTakeProfit(req: TpRequest): Promise<BatchPlan>;
   planRemoveTakeProfit(req: CloseRequest): Promise<BatchPlan>;
+  /** Agrega o retira margen de las posiciones seleccionadas, segun `req.direction`. */
+  planMargin(req: MarginRequest): Promise<BatchPlan>;
   planLeverage(req: LeverageRequest): Promise<BatchPlan>;
 
   /**
@@ -106,7 +149,15 @@ export interface PanelService {
   listApiKeys(): Promise<ApiKeyRow[]>;
   registerApiKey(input: ApiKeyInput): Promise<ValidationResult>;
   testApiKey(id: string): Promise<ValidationResult>;
-  deleteApiKey(id: string): Promise<void>;
+  /**
+   * Da de baja una credencial. **Exige la contraseña de paso**, la de operar.
+   *
+   * Quien decide si la clave vale es el proceso principal, no la pantalla: aquí
+   * solo se le pasa lo tecleado y se lee el desenlace. Por eso no hay un
+   * `verifyStepPassword` previo en el camino de la baja —comprobar en un sitio y
+   * borrar en otro deja una rendija entre las dos llamadas—.
+   */
+  deleteApiKey(id: string, stepPassword: string): Promise<DeleteOutcome>;
   unlockVault(masterPassword: string): Promise<UnlockResult>;
   /** Confirma la maestra sin dar acceso: para acciones sensibles con la sesión ya abierta. */
   verifyMasterPassword(masterPassword: string): Promise<boolean>;

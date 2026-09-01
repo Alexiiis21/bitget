@@ -33,11 +33,12 @@ import { credencialReal, hayCredenciales } from './credenciales-reales';
 
 const MAESTRA = 'contrasena-de-auditoria-2026';
 const ETIQUETA = 'Sub-Auditoria';
-const GRUPO = 'Cuenta principal';
+const GRUPO = 'A';
 
 let carpeta: string;
 let rutaVault: string;
 let rutaCuentas: string;
+let rutaActivos: string;
 let cliente: ClienteBitget;
 let sesion: Sesion;
 
@@ -46,12 +47,13 @@ beforeAll(async () => {
   carpeta = await mkdtemp(join(tmpdir(), 'pcb-staging-'));
   rutaVault = join(carpeta, 'vault.enc');
   rutaCuentas = join(carpeta, 'cuentas.json');
+  rutaActivos = join(carpeta, 'activos.json');
 
   /* Sin `host`: en staging el cliente solo acepta api.bitget.com. */
   cliente = new ClienteBitget();
   await cliente.sincronizarReloj();
 
-  sesion = new Sesion({ vault: rutaVault, cuentas: rutaCuentas }, cliente);
+  sesion = new Sesion({ vault: rutaVault, cuentas: rutaCuentas, activos: rutaActivos }, cliente);
 });
 
 afterAll(async () => {
@@ -116,7 +118,7 @@ describe.skipIf(!hayCredenciales)('panel completo contra Bitget real', () => {
     expect(sesion.listar()).toEqual([]);
 
     /* Una sesion nueva sobre los mismos archivos: como reabrir el programa. */
-    const otra = new Sesion({ vault: rutaVault, cuentas: rutaCuentas }, cliente);
+    const otra = new Sesion({ vault: rutaVault, cuentas: rutaCuentas, activos: rutaActivos }, cliente);
     const abierto = await otra.abrir(MAESTRA);
     expect(abierto.ok).toBe(true);
 

@@ -13,25 +13,35 @@
 import { app, ipcMain } from 'electron';
 import Decimal from 'decimal.js';
 import { z } from 'zod';
-import { PLAN_VIGENCIA_MS } from '@shared/constants';
+import {
+  CUENTAS_MADRE_MAX,
+  NOMBRES_CUENTA_MADRE,
+  PLAN_VIGENCIA_MS,
+  RANURAS_ACTIVO,
+  SUBCUENTAS_POR_GRUPO
+} from '@shared/constants';
 import type {
   EstadoApp,
   InfoSistema,
   PlanAperturaIpc,
   PlanApalancamientoIpc,
   PlanCierreIpc,
-  PlanQuitarTpIpc
+  PlanMargenIpc,
+  PlanQuitarTpIpc,
+  PlanTakeProfitIpc
 } from '@shared/ipc-contract';
-import type { FilaMonitor } from '@shared/types';
+import type { PosicionMonitor } from '@shared/types';
 import { UNIDAD_OPERACION } from '../domain/dimension-orden';
 import type {
   PlanApalancamiento,
   PlanApertura,
   PlanCierre,
-  PlanQuitarTakeProfit
+  PlanMargen,
+  PlanQuitarTakeProfit,
+  PlanTakeProfit
 } from '../execution/motor-lotes';
 import { carpetaDatos, esPortable } from '../storage/paths';
-import type { Instancia } from '../storage/instancia';
+import { fijarNumeroPanel, type Instancia } from '../storage/instancia';
 import type { Sesion } from './sesion';
 
 /**
@@ -107,6 +117,14 @@ const aVista = (plan: PlanApertura): PlanAperturaIpc => ({
     codigo: a.codigo,
     mensaje: a.mensaje
   })),
+  impedimento:
+    plan.impedimento === null
+      ? null
+      : {
+          codigo: plan.impedimento.codigo,
+          mensaje: plan.impedimento.mensaje,
+          casillas: plan.impedimento.casillas
+        },
   margenTotal: importe(
     plan.entradas.reduce((total, e) => total.plus(e.margenReal), new Decimal(0)).toFixed()
   ),
@@ -177,7 +195,60 @@ const descartesDe = (plan: { descartes: PlanApertura['descartes'] }) =>
     mensaje: d.mensaje
   }));
 
-const aVistaApalancamiento =(plan: PlanApalancamiento): PlanApalancamientoIpc => ({
+/**
+ * El plan de Take Profit, con los precios concretos que el operador aprueba.
+ *
+ * `precioDisparoAnterior` viaja porque este plan **sustituye** lo que hubiera
+ * puesto: sin el, la confirmacion diria «TP a 0,00271» sin decir que con eso se
+ * quita el de 0,00263 que la posicion ya tenia.
+ */
+const aVistaTp = (plan: PlanTakeProfit): PlanTakeProfitIpc => ({
+  id: plan.id,
+  mercado: plan.mercado.clave,
+  simbolo: plan.simbolo,
+  porcentaje: plan.porcentaje,
+  entradas: plan.entradas.map((e) => ({
+    cuentaId: e.cuentaId,
+    etiqueta: e.etiqueta,
+    lado: e.lado,
+    precioDisparo: e.precioDisparo,
+    precioEntrada: e.precioEntrada,
+    apalancamiento: e.apalancamiento,
+    movimientoPorcentaje: e.movimientoPorcentaje,
+    precioDisparoAnterior: e.precioDisparoAnterior
+  })),
+  descartes: descartesDe(plan),
+  creadoEn: plan.creadoEn
+});
+
+/**
+ * El plan de margen, con lo que tiene cada posicion y lo que tendra.
+ *
+ * `cantidad` sale sin signo y `direccion` dice hacia donde va: la pantalla pone
+ * el verbo -«agrega» o «retira»-, no interpreta un menos. Ver `PlanMargen`.
+ */
+const aVistaMargen = (plan: PlanMargen): PlanMargenIpc => ({
+  id: plan.id,
+  mercado: plan.mercado.clave,
+  monedaMargen: plan.mercado.marginCoin,
+  simbolo: plan.simbolo,
+  cantidad: plan.cantidad,
+  direccion: plan.direccion,
+  totalComprometido: importe(plan.totalComprometido),
+  entradas: plan.entradas.map((e) => ({
+    cuentaId: e.cuentaId,
+    etiqueta: e.etiqueta,
+    lado: e.lado,
+    /* Sin signo tambien por casilla: el sentido ya lo lleva el plan. */
+    cantidad: plan.cantidad,
+    margenActual: importe(e.margenActual),
+    margenResultante: importe(e.margenResultante)
+  })),
+  descartes: descartesDe(plan),
+  creadoEn: plan.creadoEn
+});
+
+const aVistaApalancamiento = (plan: PlanApalancamiento): PlanApalancamientoIpc => ({
   id: plan.id,
   mercado: plan.mercado.clave,
   simbolo: plan.simbolo,
@@ -195,9 +266,25 @@ const aVistaApalancamiento =(plan: PlanApalancamiento): PlanApalancamientoIpc =>
 
 const esquemaContrasena = z.string().min(1).max(1024);
 
+/**
+ * El alta de una subcuenta, con la cuenta principal y la casilla acotadas.
+ *
+ * Las dos dejaron de ser texto libre el 28/08/2026. La cuenta principal es una
+ * de las quince del panel -de la `A` a la `O`- y no un nombre que se teclea: con
+ * el campo abierto, «A» y «a » creaban dos cuentas principales distintas y el
+ * tope de quince se gastaba en duplicados. La casilla es un numero de 1 a 20 y
+ * se comprueba aqui porque es un indice que llega de fuera.
+ *
+ * `RegistroCuentas` sigue aceptando cualquier nombre a proposito: los registros
+ * de antes de esa fecha traen los que se escribieron entonces y tienen que
+ * seguir cargando. Lo que se cierra es la puerta por la que entran los nuevos.
+ */
 const esquemaAlta = z.object({
   etiqueta: z.string().min(1).max(64),
-  grupoNombre: z.string().min(1).max(64),
+  grupoNombre: z.string().refine((n) => NOMBRES_CUENTA_MADRE.includes(n), {
+    message: `La cuenta principal debe ser una de las ${CUENTAS_MADRE_MAX}: de la A a la ${NOMBRES_CUENTA_MADRE.at(-1) ?? 'O'}.`
+  }),
+  casilla: z.number().int().min(1).max(SUBCUENTAS_POR_GRUPO),
   apiKey: z.string().min(1).max(256),
   secretKey: z.string().min(1).max(256),
   passphrase: z.string().min(1).max(256)
@@ -209,6 +296,17 @@ const esquemaObjetivo = z.object({
   cuentaId: z.string().min(1).max(128),
   lado: z.enum(['long', 'short'])
 });
+
+/**
+ * Que casilla de activo se edita, y con que.
+ *
+ * El indice se acota aqui y no solo en la sesion porque es un indice de array
+ * que llega de fuera. `null` es vaciar la casilla, que es una operacion legitima
+ * y no un valor ausente; el simbolo se comprueba despues contra el catalogo del
+ * exchange, que es lo unico que puede decir si existe.
+ */
+const esquemaRanura = z.number().int().min(0).max(RANURAS_ACTIVO - 1);
+const esquemaSimboloRanura = z.string().min(1).max(32).nullable();
 
 /**
  * Lo que la pantalla puede pedir de una apertura.
@@ -245,13 +343,54 @@ const esquemaCierre = z.object({
   objetivos: z.array(esquemaObjetivo).min(1).max(500)
 });
 
+/* El Take Profit lleva porcentaje; el precio lo calcula el proceso principal. */
+const esquemaTp = z.object({
+  simbolo: z.string().min(1).max(32),
+  objetivos: z.array(esquemaObjetivo).min(1).max(500),
+  porcentaje: z.string().min(1).max(16)
+});
+
+/**
+ * El ajuste de margen, con la direccion aparte de la cifra.
+ *
+ * `cantidad` no acepta el signo: el esquema exige un decimal positivo y quien
+ * decide si suma o resta es `direccion`, que solo tiene dos valores. Asi un
+ * payload mal formado no puede convertir en silencio un aporte en una retirada
+ * -que es la que acerca la liquidacion-, ni siquiera si la pantalla falla.
+ */
+const esquemaMargen = z.object({
+  simbolo: z.string().min(1).max(32),
+  objetivos: z.array(esquemaObjetivo).min(1).max(500),
+  cantidad: z
+    .string()
+    .min(1)
+    .max(32)
+    .regex(/^\d+(\.\d+)?$/, 'El margen debe ser un número positivo, sin signo.'),
+  direccion: z.enum(['agregar', 'quitar'])
+});
+
 const esquemaApalancamiento = z.object({
   simbolo: z.string().min(1).max(32),
   objetivos: z.array(esquemaObjetivo).min(1).max(500),
   apalancamiento: z.number().positive().max(200)
 });
 
-export function registrarIpc(sesion: Sesion, instancia: Instancia, mercado: 'real' | 'simulado'): void {
+/**
+ * Cuanto puede valer el numero de panel.
+ *
+ * Es un rotulo, no un indice: no hay tabla que dimensione ni archivo que se
+ * nombre con el. El tope de seis cifras es el del campo de la cabecera, y esta
+ * aqui para que no entre por IPC algo que la pantalla no deja teclear.
+ */
+const esquemaNumeroPanel = z.number().int().min(1).max(999_999);
+
+export function registrarIpc(
+  sesion: Sesion,
+  instancia: Instancia,
+  mercado: 'real' | 'simulado',
+  /** `instancia.json`: donde se guarda el numero cuando el operador lo cambia. */
+  rutaInstancia: string
+): void {
   ipcMain.handle(
     'sistema:info',
     (): InfoSistema => ({
@@ -269,6 +408,10 @@ export function registrarIpc(sesion: Sesion, instancia: Instancia, mercado: 'rea
 
   ipcMain.handle('sistema:estado', (): Promise<EstadoApp> => sesion.estadoApp());
 
+  ipcMain.handle('sistema:numero-panel', (_e, numero: unknown) =>
+    fijarNumeroPanel(rutaInstancia, instancia, esquemaNumeroPanel.parse(numero))
+  );
+
   ipcMain.handle('vault:estado', () => sesion.estadoVault());
   ipcMain.handle('vault:crear', (_e, contrasena: unknown) =>
     sesion.crear(esquemaContrasena.parse(contrasena))
@@ -285,8 +428,16 @@ export function registrarIpc(sesion: Sesion, instancia: Instancia, mercado: 'rea
 
   ipcMain.handle('cuentas:listar', () => sesion.listar());
   ipcMain.handle('cuentas:agregar', (_e, alta: unknown) => sesion.agregar(esquemaAlta.parse(alta)));
-  ipcMain.handle('cuentas:eliminar', (_e, cuentaId: unknown) =>
-    sesion.eliminar(esquemaId.parse(cuentaId))
+  /*
+   * La baja lleva la contrasena de paso, y no es opcional en el canal.
+   *
+   * `esquemaContrasena` exige al menos un caracter, asi que una llamada sin
+   * clave -o con la cadena vacia- ni siquiera llega a `Sesion.eliminar`: revienta
+   * aqui, que es donde se acota todo lo que entra de fuera. La comprobacion de si
+   * **es** la correcta la hace la sesion, que es quien tiene el almacen abierto.
+   */
+  ipcMain.handle('cuentas:eliminar', (_e, cuentaId: unknown, contrasenaPaso: unknown) =>
+    sesion.eliminar(esquemaId.parse(cuentaId), esquemaContrasena.parse(contrasenaPaso))
   );
   ipcMain.handle('cuentas:verificar', (_e, cuentaId: unknown) =>
     sesion.verificar(esquemaId.parse(cuentaId))
@@ -294,7 +445,19 @@ export function registrarIpc(sesion: Sesion, instancia: Instancia, mercado: 'rea
 
   ipcMain.handle('panel:cuentas', () => sesion.cuentasPanel());
 
-  ipcMain.handle('mercado:activos', () => sesion.activos());
+  /*
+   * Las ocho casillas del selector, y el catalogo con el que se editan.
+   *
+   * `mercado:activos` -la lista fija de ocho- se retiro el 28/08/2026: ahora las
+   * casillas se pueden cambiar, asi que lo que la pantalla necesita es la lista
+   * **con sus huecos** y en su orden. Un canal que sigue existiendo se puede
+   * seguir llamando, y este devolveria una foto sin las casillas vacias.
+   */
+  ipcMain.handle('mercado:ranuras', () => sesion.ranuras());
+  ipcMain.handle('mercado:catalogo', () => sesion.catalogo());
+  ipcMain.handle('mercado:fijar-ranura', (_e, indice: unknown, simbolo: unknown) =>
+    sesion.fijarRanura(esquemaRanura.parse(indice), esquemaSimboloRanura.parse(simbolo))
+  );
   ipcMain.handle('mercado:precios', () => sesion.precios());
 
   ipcMain.handle('paso:hay', () => sesion.hayPaso());
@@ -333,14 +496,20 @@ export function registrarIpc(sesion: Sesion, instancia: Instancia, mercado: 'rea
     )
   );
 
-  /*
-   * No hay `tp:planificar` ni `margen:planificar`.
-   *
-   * Los dos existieron hasta el 26/08/2026 y se retiraron enteros -canal,
-   * esquema y metodo de la sesion-, no solo su boton: el Take Profit y el
-   * margen adicional viajan dentro de `apertura:planificar`, y un canal que
-   * sigue existiendo se puede seguir llamando. Ver `PeticionesIpc`.
-   */
+  ipcMain.handle('tp:planificar', async (_e, peticion: unknown) => {
+    const plan = await sesion.planificarTakeProfit(esquemaTp.parse(peticion));
+    return aVistaTp(plan);
+  });
+
+  ipcMain.handle('tp:ejecutar', (_e, planId: unknown, soloEstos: unknown) =>
+    sesion.ejecutarTakeProfit(
+      esquemaId.parse(planId),
+      soloEstos === undefined || soloEstos === null
+        ? undefined
+        : z.array(esquemaObjetivo).parse(soloEstos)
+    )
+  );
+
   ipcMain.handle('tp:planificar-quitar', async (_e, peticion: unknown) => {
     const plan = await sesion.planificarQuitarTakeProfit(esquemaCierre.parse(peticion));
     return aVistaQuitarTp(plan);
@@ -348,6 +517,20 @@ export function registrarIpc(sesion: Sesion, instancia: Instancia, mercado: 'rea
 
   ipcMain.handle('tp:ejecutar-quitar', (_e, planId: unknown, soloEstos: unknown) =>
     sesion.ejecutarQuitarTakeProfit(
+      esquemaId.parse(planId),
+      soloEstos === undefined || soloEstos === null
+        ? undefined
+        : z.array(esquemaObjetivo).parse(soloEstos)
+    )
+  );
+
+  ipcMain.handle('margen:planificar', async (_e, peticion: unknown) => {
+    const plan = await sesion.planificarMargen(esquemaMargen.parse(peticion));
+    return aVistaMargen(plan);
+  });
+
+  ipcMain.handle('margen:ejecutar', (_e, planId: unknown, soloEstos: unknown) =>
+    sesion.ejecutarMargen(
       esquemaId.parse(planId),
       soloEstos === undefined || soloEstos === null
         ? undefined
@@ -369,6 +552,9 @@ export function registrarIpc(sesion: Sesion, instancia: Instancia, mercado: 'rea
     )
   );
 
-  /* Las posiciones llegan por WebSocket en la Fase 6. docs/00-entrega-fase-1. */
-  ipcMain.handle('monitor:instantanea', (): FilaMonitor[] => []);
+  /*
+   * La foto inicial del monitor. Lo que la mantiene al dia despues es el evento
+   * `monitor:posiciones`, que publica index.ts.
+   */
+  ipcMain.handle('monitor:instantanea', (): PosicionMonitor[] => sesion.posicionesMonitor());
 }

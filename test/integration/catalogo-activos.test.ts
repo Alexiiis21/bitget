@@ -14,8 +14,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ClienteBitget } from '@main/bitget/rest/client';
 import { LimitadorPeticiones } from '@main/execution/rate-limiter';
-import { MERCADO_REAL, MERCADO_SIMULADO } from '@main/bitget/mercado';
-import { catalogoActivos, preciosDe } from '@main/bitget/catalogo-activos';
+import { MERCADO_REAL, MERCADO_SIMULADO, type Mercado } from '@main/bitget/mercado';
+import {
+  activosDeRanuras,
+  catalogoCompleto,
+  preciosDe,
+  type ActivoOperable
+} from '@main/bitget/catalogo-activos';
 import { iniciarExchangeSimulado, sobreOk, type ExchangeSimulado } from '../mock-exchange/servidor';
 
 /** Un contrato con los campos que el catalogo mira. */
@@ -39,6 +44,17 @@ const contrato = (symbol: string, baseCoin: string, extra: Record<string, unknow
 
 let exchange: ExchangeSimulado;
 let cliente: ClienteBitget;
+
+/**
+ * Las casillas de fabrica del mercado, sin los huecos.
+ *
+ * `activosDeRanuras` conserva la posicion -una casilla vacia sale `null`- porque
+ * el operador las edita por su numero. Casi todo lo que se prueba aqui es la
+ * traduccion de contrato a activo, que no depende de los huecos, asi que se
+ * compactan una vez y no en cada prueba.
+ */
+const llenas = async (mercado: Mercado): Promise<ActivoOperable[]> =>
+  (await activosDeRanuras(cliente, mercado)).filter((a): a is ActivoOperable => a !== null);
 
 /**
  * Los ocho del mercado real, con sus topes verdaderos.
@@ -82,20 +98,21 @@ describe('que activos se ofrecen', () => {
   it('solo los ocho del panel, y en su orden', async () => {
     exchange.responderCon(() => ({ cuerpo: sobreOk(CONTRATOS_REALES) }));
 
-    const activos = await catalogoActivos(cliente, MERCADO_REAL);
+    const activos = await llenas(MERCADO_REAL);
 
     expect(activos.map((a) => a.id)).toEqual(ORDEN_PANEL);
   });
 
   /*
-   * El cliente lo dijo expresamente: opera una lista corta y cerrada. Un
-   * selector con los 754 contratos de Bitget convertiria una eleccion de un
-   * vistazo en una busqueda, y abriria la puerta a operar por error otro activo.
+   * El selector sigue siendo una lista corta y cerrada aunque desde el
+   * 28/08/2026 el operador pueda cambiar que hay en cada casilla: lo que Bitget
+   * ofrece y no esta en las ocho, no se puede elegir ni operar. Un selector con
+   * los 754 contratos convertiria una eleccion de un vistazo en una busqueda.
    */
   it('un activo que Bitget ofrece pero el panel no opera no aparece', async () => {
     exchange.responderCon(() => ({ cuerpo: sobreOk(CONTRATOS_REALES) }));
 
-    const activos = await catalogoActivos(cliente, MERCADO_REAL);
+    const activos = await llenas(MERCADO_REAL);
 
     expect(activos.some((a) => a.id === 'ADA')).toBe(false);
   });
@@ -109,9 +126,70 @@ describe('que activos se ofrecen', () => {
       cuerpo: sobreOk(CONTRATOS_REALES.filter((c) => (c as { symbol: string }).symbol !== 'PEPEUSDT'))
     }));
 
-    const activos = await catalogoActivos(cliente, MERCADO_REAL);
+    const activos = await llenas(MERCADO_REAL);
 
     expect(activos.map((a) => a.id)).toEqual(ORDEN_PANEL.filter((id) => id !== 'PEPE'));
+  });
+});
+
+/**
+ * Las ocho casillas editables, y el buscador que las llena.
+ *
+ * Lo que el cliente pidio el 28/08/2026: cambiar que activo hay en cada casilla
+ * sin poder anadir una novena. Aqui se prueba la mitad que resuelve simbolos
+ * contra el exchange; que se guarden en disco y que no se repitan lo prueba
+ * `test/unit/ranuras-activos.test.ts` y `sesion.test.ts`.
+ */
+describe('las ocho casillas del selector', () => {
+  it('conserva la posicion: una casilla vacia no corre a las de atras', async () => {
+    exchange.responderCon(() => ({ cuerpo: sobreOk(CONTRATOS_REALES) }));
+
+    const ranuras = await activosDeRanuras(cliente, MERCADO_REAL, [
+      'DOGEUSDT',
+      null,
+      'BTCUSDT',
+      null
+    ]);
+
+    expect(ranuras.map((a) => a?.id ?? null)).toEqual(['DOGE', null, 'BTC', null]);
+  });
+
+  /*
+   * Una casilla guardada cuyo contrato Bitget ya no ofrece se enseña vacia. El
+   * simbolo sigue en disco -nadie lo borro-, pero no hay nada que operar, y
+   * pintarlo como activo prometeria una operacion que falla al planificar.
+   */
+  it('una casilla con un simbolo que el exchange ya no ofrece sale vacia', async () => {
+    exchange.responderCon(() => ({ cuerpo: sobreOk(CONTRATOS_REALES) }));
+
+    const ranuras = await activosDeRanuras(cliente, MERCADO_REAL, ['BTCUSDT', 'LUNAUSDT']);
+
+    expect(ranuras.map((a) => a?.id ?? null)).toEqual(['BTC', null]);
+  });
+
+  /*
+   * El buscador si ve el catalogo entero -es para eso-, y ordenado por nombre:
+   * el orden en que Bitget devuelve los contratos no significa nada para quien
+   * busca. Nada de aqui se puede operar hasta que ocupa una de las ocho.
+   */
+  it('el buscador ve todo el mercado, ordenado por nombre', async () => {
+    exchange.responderCon(() => ({ cuerpo: sobreOk(CONTRATOS_REALES) }));
+
+    const catalogo = await catalogoCompleto(cliente, MERCADO_REAL);
+
+    expect(catalogo.map((a) => a.id)).toEqual([
+      'ADA',
+      'BTC',
+      'DOGE',
+      'ETH',
+      'PAXG',
+      'PEPE',
+      'SOL',
+      'SUI',
+      'XRP'
+    ]);
+    /* El que el panel no opera esta en el buscador, que es de donde se elige. */
+    expect(catalogo.some((a) => a.id === 'ADA')).toBe(true);
   });
 });
 
@@ -120,7 +198,7 @@ describe('los limites que condicionan el formulario', () => {
   it('cada activo trae su propio tope de apalancamiento', async () => {
     exchange.responderCon(() => ({ cuerpo: sobreOk(CONTRATOS_REALES) }));
 
-    const activos = await catalogoActivos(cliente, MERCADO_REAL);
+    const activos = await llenas(MERCADO_REAL);
     const topes = Object.fromEntries(activos.map((a) => [a.id, a.apalancamientoMax]));
 
     expect(topes).toEqual({
@@ -138,7 +216,7 @@ describe('los limites que condicionan el formulario', () => {
   it('los decimales del precio salen del contrato, no de una tabla', async () => {
     exchange.responderCon(() => ({ cuerpo: sobreOk(CONTRATOS_REALES) }));
 
-    const activos = await catalogoActivos(cliente, MERCADO_REAL);
+    const activos = await llenas(MERCADO_REAL);
 
     expect(activos.find((a) => a.id === 'PEPE')?.decimalesPrecio).toBe(10);
     expect(activos.find((a) => a.id === 'BTC')?.decimalesPrecio).toBe(1);
@@ -150,7 +228,7 @@ describe('los limites que condicionan el formulario', () => {
       cuerpo: sobreOk([contrato('BTCUSDT', 'BTC', { symbolStatus: 'maintain' })])
     }));
 
-    const activos = await catalogoActivos(cliente, MERCADO_REAL);
+    const activos = await llenas(MERCADO_REAL);
 
     expect(activos[0]?.operable).toBe(false);
   });
@@ -171,7 +249,7 @@ describe('mercado simulado', () => {
       ])
     }));
 
-    const activos = await catalogoActivos(cliente, MERCADO_SIMULADO);
+    const activos = await llenas(MERCADO_SIMULADO);
 
     expect(activos.map((a) => a.id)).toEqual(['BTC', 'ETH', 'XRP']);
     expect(activos[0]?.simbolo).toBe('SBTCSUSDT');
@@ -184,7 +262,7 @@ describe('mercado simulado', () => {
       cuerpo: sobreOk([contrato('SBTCSUSDT', 'SBTC', { maxLever: '125' })])
     }));
 
-    const activos = await catalogoActivos(cliente, MERCADO_SIMULADO);
+    const activos = await llenas(MERCADO_SIMULADO);
 
     expect(activos[0]?.apalancamientoMax).toBe(125);
   });
@@ -209,7 +287,7 @@ describe('precios', () => {
       };
     });
 
-    const activos = await catalogoActivos(cliente, MERCADO_REAL);
+    const activos = await llenas(MERCADO_REAL);
     const precios = await preciosDe(cliente, MERCADO_REAL, activos);
 
     expect(precios).toEqual({ BTC: '102450.5', ETH: '3624.8' });
@@ -229,7 +307,7 @@ describe('precios', () => {
       return { cuerpo: sobreOk([{ symbol: simbolo, lastPr: '1', markPrice: '102450.5' }]) };
     });
 
-    const activos = await catalogoActivos(cliente, MERCADO_REAL);
+    const activos = await llenas(MERCADO_REAL);
     const precios = await preciosDe(cliente, MERCADO_REAL, activos);
 
     expect(precios['BTC']).toBe('102450.5');

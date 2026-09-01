@@ -66,6 +66,8 @@ export const rutas = () => {
     vault: join(base, 'vault.enc'),
     vaultBak: join(base, 'vault.enc.bak'),
     cuentas: join(base, 'cuentas.json'),
+    /** Que activo hay en cada una de las ocho casillas del selector, por mercado. */
+    activos: join(base, 'activos.json'),
     ordenesPendientes: join(base, 'ordenes', 'pendientes.jsonl'),
     cacheSimbolos: join(base, 'cache', 'simbolos.json'),
     logs: join(base, 'logs')

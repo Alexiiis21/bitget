@@ -1,4 +1,5 @@
 import { useId, useState, type CSSProperties } from 'react';
+import { NOMBRES_CUENTA_MADRE, SUBCUENTAS_POR_GRUPO } from '@shared/constants';
 import { BOTON_PRIMARIO, DISTINTIVO_API, FUENTE, T } from '@/lib/tokens';
 import { usarPanel } from '@/store/panel';
 import { EsqueletoFilas, EstadoVacio } from './Esqueleto';
@@ -32,9 +33,15 @@ interface CampoFormulario {
   secreto?: boolean;
 }
 
+/**
+ * Los campos que se teclean. La cuenta principal y la casilla no están aquí.
+ *
+ * Las dos se eligen, no se escriben: son `SelectorDestino`. Dejarlas como texto
+ * libre era lo que permitía que «A» y «a » fueran dos cuentas principales
+ * distintas, y que la casilla la repartiera el panel en vez del operador.
+ */
 const CAMPOS: CampoFormulario[] = [
   { clave: 'subcuenta', rotulo: 'NOMBRE DE LA SUBCUENTA', marcador: 'Sub-12' },
-  { clave: 'cuenta', rotulo: 'CUENTA PRINCIPAL', marcador: 'A' },
   { clave: 'apiKey', rotulo: 'API KEY', marcador: 'bg_xxxxxxxxxxxx' },
   { clave: 'secretKey', rotulo: 'SECRET KEY', marcador: '••••••••••••', secreto: true },
   { clave: 'passphrase', rotulo: 'PASSPHRASE', marcador: '••••••••', secreto: true }
@@ -95,6 +102,76 @@ function CampoSecreto({
 }
 
 /**
+ * Dónde va la subcuenta: cuenta principal y casilla.
+ *
+ * --------------------------------------------------------------------------
+ * Dos desplegables, no dos campos de texto
+ * --------------------------------------------------------------------------
+ * Lo acordado con el cliente el 28/08/2026. La cuenta principal es **fija, de la
+ * A a la O** —quince, `NOMBRES_CUENTA_MADRE`— y no un nombre que se escribe: con
+ * el campo abierto, «A» y «a » creaban dos cuentas principales distintas y el
+ * tope se gastaba en duplicados. La casilla es la de 1 a 20 en la que el
+ * operador quiere que aparezca esa subcuenta, y va exactamente ahí; antes la
+ * repartía el panel —la primera libre— y no había forma de decidirlo.
+ *
+ * Las casillas ya ocupadas se ven, con el nombre de quien las ocupa, y no se
+ * pueden elegir. Enterarse de que la 7 estaba pillada **después** de teclear
+ * tres claves de 64 caracteres es el error que esto evita; el proceso principal
+ * lo rechazaría igual, pero ya con el alta empezada.
+ */
+function SelectorDestino() {
+  const formulario = usarPanel((s) => s.formulario);
+  const escribirFormulario = usarPanel((s) => s.escribirFormulario);
+  const cuentas = usarPanel((s) => s.cuentas);
+
+  const ocupadas = new Map(
+    (cuentas.find((c) => c.name === formulario.cuenta)?.subAccounts ?? []).map((s) => [s.slot, s.label])
+  );
+  const libres = SUBCUENTAS_POR_GRUPO - ocupadas.size;
+
+  return (
+    <div style={{ display: 'flex', gap: 10 }}>
+      <label style={{ ...etiquetaCampo, flex: '1 1 0', minWidth: 0 }}>
+        CUENTA PRINCIPAL
+        <select
+          className="pcb-campo"
+          style={campo}
+          value={formulario.cuenta}
+          onChange={(e) => escribirFormulario('cuenta', e.target.value)}
+        >
+          {NOMBRES_CUENTA_MADRE.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label style={{ ...etiquetaCampo, flex: '1 1 0', minWidth: 0 }}>
+        CASILLA
+        <select
+          className="pcb-campo"
+          style={campo}
+          value={formulario.casilla}
+          onChange={(e) => escribirFormulario('casilla', e.target.value)}
+        >
+          {/* Sin casillas libres no hay nada válido que preseleccionar: se dice. */}
+          {libres === 0 && <option value="">— sin casillas libres —</option>}
+          {Array.from({ length: SUBCUENTAS_POR_GRUPO }, (_, i) => i + 1).map((n) => {
+            const ocupante = ocupadas.get(n);
+            return (
+              <option key={n} value={String(n)} disabled={ocupante !== undefined}>
+                {ocupante === undefined ? n : `${n} · ${ocupante}`}
+              </option>
+            );
+          })}
+        </select>
+      </label>
+    </div>
+  );
+}
+
+/**
  * Una linea de la confirmacion posterior a validar.
  *
  * El visto va al final y no al principio a proposito: lo que confirma no es que
@@ -134,7 +211,7 @@ export function PantallaApis() {
   const guardarApi = usarPanel((s) => s.guardarApi);
   const ultimaValidacion = usarPanel((s) => s.ultimaValidacion);
   const probarApi = usarPanel((s) => s.probarApi);
-  const eliminarApi = usarPanel((s) => s.eliminarApi);
+  const pedirBajaApi = usarPanel((s) => s.pedirBajaApi);
   const carga = usarPanel((s) => s.cargaApis);
   const motivo = usarPanel((s) => s.motivoApis);
   const refrescarApis = usarPanel((s) => s.refrescarApis);
@@ -165,7 +242,20 @@ export function PantallaApis() {
 
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 20, padding: '20px 26px', overflow: 'auto' }}>
         <div style={{ flex: '1 1 620px', minWidth: 0, background: T.superficie, border: `1px solid ${T.bordeFuerte}`, borderRadius: 12, overflow: 'hidden', alignSelf: 'stretch' }}>
-          <div style={{ overflowX: 'auto' }}>
+          {/*
+            * Aquí sí se puede seleccionar texto con el ratón.
+            *
+            * El panel lleva `user-select: none` en el `body` —es una aplicación
+            * de escritorio y arrastrar sobre la matriz no debe pintar de azul
+            * media pantalla—, pero esta tabla es la excepción: el UID de Bitget
+            * y la clave enmascarada son datos que el operador copia para
+            * pegarlos en un correo o en el propio Bitget, y sin selección el
+            * «Copiar» del botón derecho no tendría nada que copiar.
+            *
+            * Lo que se puede copiar de aquí no es secreto: la API Key solo está
+            * enmascarada —`bg••••8b3f`— y el UID no sirve para firmar. RNF-001.
+            */}
+          <div style={{ overflowX: 'auto', userSelect: 'text' }}>
             <div style={{ display: 'grid', minWidth: ANCHO_MINIMO, gridTemplateColumns: REJILLA, gap: 12, padding: '12px 18px', borderBottom: `1px solid ${T.borde}`, fontSize: 11, fontWeight: 600, letterSpacing: '.09em', color: T.texto3 }}>
               <div style={{ whiteSpace: 'nowrap' }}>SUBCUENTA</div>
               <div>CUENTA</div>
@@ -219,7 +309,15 @@ export function PantallaApis() {
                     <button type="button" className="pcb-boton-claro" onClick={() => void probarApi(fila.id)} style={{ ...botonFila, border: `1px solid ${T.bordeFuerte}`, color: T.texto }}>
                       Probar
                     </button>
-                    <button type="button" className="pcb-boton-peligro" onClick={() => void eliminarApi(fila.id)} style={{ ...botonFila, border: '1px solid #f0d6d2', color: T.corto }}>
+                    {/*
+                      * «Eliminar» abre la confirmación; no borra.
+                      *
+                      * Borraba en el acto hasta el 31/08/2026. Ahora la baja pide
+                      * la contraseña de paso —la de abrir y cerrar—, que es lo
+                      * único que separa un clic de más de perder la credencial de
+                      * una subcuenta. Ver `DialogoBajaApi`.
+                      */}
+                    <button type="button" className="pcb-boton-peligro" onClick={() => void pedirBajaApi(fila.id)} title="Pide la contraseña de paso: la baja borra la credencial y no se puede deshacer" style={{ ...botonFila, border: '1px solid #f0d6d2', color: T.corto }}>
                       Eliminar
                     </button>
                   </div>
@@ -234,6 +332,8 @@ export function PantallaApis() {
             <span style={{ fontSize: 14.5, fontWeight: 700, color: T.texto }}>Registrar subcuenta</span>
             <span style={{ fontSize: 12, lineHeight: 1.45, color: T.texto2 }}>Las claves se guardan cifradas en este equipo. Nunca se muestran completas después de guardar.</span>
           </div>
+
+          <SelectorDestino />
 
           {CAMPOS.map((c) =>
             c.secreto === true ? (

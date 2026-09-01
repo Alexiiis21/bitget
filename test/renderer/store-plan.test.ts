@@ -22,7 +22,14 @@
  * haya.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BatchPlan, BatchResult, BatchTarget, OpenRequest } from '@shared/domain/panel-view';
+import type {
+  BatchPlan,
+  BatchResult,
+  BatchTarget,
+  MarginRequest,
+  OpenRequest,
+  TpRequest
+} from '@shared/domain/panel-view';
 
 /* ---------- servicio de mentira, con contador de envios ---------- */
 
@@ -30,9 +37,14 @@ const enviados: { planId: string; only: BatchTarget[] | undefined }[] = [];
 let planificaciones = 0;
 /** La ultima peticion de apertura, para comprobar que viaja lo que se eligio. */
 let ultimaApertura: OpenRequest | null = null;
+/** Lo mismo para los dos ajustes sobre una posicion ya abierta. */
+let ultimoTp: TpRequest | null = null;
+let ultimoMargen: MarginRequest | null = null;
 let resultado: BatchResult;
 let pasoValido = true;
 let planDevuelto: BatchPlan;
+/** Cuando no es `null`, `executePlan` revienta en vez de devolver informe. */
+let falloAlEnviar: Error | null = null;
 
 const plan = (kind: BatchPlan['kind'], entradas: number): BatchPlan => ({
   kind,
@@ -46,15 +58,17 @@ const plan = (kind: BatchPlan['kind'], entradas: number): BatchPlan => ({
     label: `Sub-0${i + 1}`,
     detail: '0.01'
   })),
-  discards: []
+  discards: [],
+  blocker: null
 });
 
 vi.mock('@/services/panel-service', () => ({
   panelService: {
     getSystemInfo: async () => ({ appVersion: '1.0.0', panelNumber: 1, portable: true }),
-    listAssets: async () => [
+    listAssetSlots: async () => [
       { id: 'BTC', symbol: 'BTCUSDT', label: 'BTC/USDT', priceDecimals: 1, maxLeverage: 150, minLeverage: 1, tradable: true },
-      { id: 'PEPE', symbol: 'PEPEUSDT', label: 'PEPE/USDT', priceDecimals: 8, maxLeverage: 75, minLeverage: 1, tradable: true }
+      { id: 'PEPE', symbol: 'PEPEUSDT', label: 'PEPE/USDT', priceDecimals: 8, maxLeverage: 75, minLeverage: 1, tradable: true },
+      null
     ],
     subscribeAssetPrices: () => () => undefined,
     planOpen: async (req: OpenRequest) => {
@@ -66,13 +80,23 @@ vi.mock('@/services/panel-service', () => ({
       planificaciones += 1;
       return planDevuelto;
     },
-    /*
-     * No hay `planTakeProfit` ni `planMargin`, y que falten es parte de lo que
-     * se prueba: si el store volviera a llamarlos, esto reventaria en vez de
-     * pasar en silencio.
-     */
+    planTakeProfit: async (req: TpRequest) => {
+      planificaciones += 1;
+      ultimoTp = req;
+      return planDevuelto;
+    },
     planRemoveTakeProfit: async () => {
       planificaciones += 1;
+      return planDevuelto;
+    },
+    /*
+     * Guarda la peticion entera porque lo que se comprueba de ella no es que se
+     * llame, sino **con que**: la cantidad sin signo y la direccion que
+     * corresponde al boton pulsado.
+     */
+    planMargin: async (req: MarginRequest) => {
+      planificaciones += 1;
+      ultimoMargen = req;
       return planDevuelto;
     },
     planLeverage: async () => {
@@ -81,6 +105,7 @@ vi.mock('@/services/panel-service', () => ({
     },
     executePlan: async (p: BatchPlan, only?: BatchTarget[]) => {
       enviados.push({ planId: p.id, only });
+      if (falloAlEnviar !== null) throw falloAlEnviar;
       return resultado;
     },
     verifyStepPassword: async () => pasoValido
@@ -139,7 +164,7 @@ function prepararSeleccion(): void {
         selShort: [false, false, false]
       }
     },
-    valores: { tp: '35', mgi: '100', mga: '50', ap: '10' }
+    valores: { tp: '35', mgi: '100', mga: '50', ap: '10', tpAjuste: '', mgAjuste: '' }
   });
 }
 
@@ -147,8 +172,11 @@ beforeEach(() => {
   enviados.length = 0;
   planificaciones = 0;
   ultimaApertura = null;
+  ultimoTp = null;
+  ultimoMargen = null;
   usarPanel.setState({ modoMargen: 'isolated' });
   pasoValido = true;
+  falloAlEnviar = null;
   planDevuelto = plan('open', 3);
   resultado = { label: 'Prueba', ok: 3, skipped: 0, failures: [], undetermined: [] };
   usarPanel.setState({ plan: null, batch: null, pinPaso: '', errorPaso: '', intentosPaso: 0, avisos: [] });
@@ -290,6 +318,134 @@ describe('la contraseña de paso, al abrir y al cerrar', () => {
     await usarPanel.getState().confirmarPlan();
 
     expect(enviados).toEqual([{ planId: 'plan_leverage', only: undefined }]);
+  });
+});
+
+/*
+ * ==========================================================================
+ * Un plan impedido no llega a enviarse.
+ * ==========================================================================
+ * Lo pidió el cliente el 29/08/2026: si a alguna casilla no le cabe el margen
+ * adicional, no se abre ninguna, y el motivo sale en la confirmación **antes**
+ * de teclear la contraseña, para que el operador corrija los importes, añada
+ * saldo o desmarque las casillas afectadas.
+ *
+ * El freno que de verdad cuenta está en el proceso principal —él rechaza el
+ * plan al ejecutarlo—; lo que se prueba aquí es que la pantalla no llega
+ * siquiera a pedirlo, que es lo que el cliente ve.
+ */
+describe('un plan impedido', () => {
+  const impedido = (entradas: number) => ({
+    ...plan('open', entradas),
+    blocker: {
+      code: 'saldo-margen-adicional',
+      message: 'No se abre ninguna posición: a 2 casillas no les cabe el margen adicional.',
+      boxes: 2
+    }
+  });
+
+  it('no envía nada aunque se confirme', async () => {
+    planDevuelto = impedido(3);
+
+    await usarPanel.getState().planear('open');
+    usarPanel.getState().escribirPin('bg1');
+    await usarPanel.getState().confirmarPlan();
+
+    expect(enviados).toHaveLength(0);
+    /* El diálogo sigue abierto con el motivo: no se cierra dejando al operador sin saber. */
+    expect(usarPanel.getState().plan).not.toBeNull();
+    expect(usarPanel.getState().errorPaso).toContain('No se abre ninguna posición');
+  });
+
+  /*
+   * Ni siquiera se comprueba la contraseña. Teclearla para que despues se
+   * rechace el envio seria un tramite cuyo unico desenlace posible es un error.
+   */
+  it('no gasta un intento de contraseña de paso', async () => {
+    planDevuelto = impedido(3);
+    pasoValido = false;
+
+    await usarPanel.getState().planear('open');
+    usarPanel.getState().escribirPin('mal');
+    await usarPanel.getState().confirmarPlan();
+
+    expect(usarPanel.getState().intentosPaso).toBe(0);
+  });
+
+  /*
+   * Con cero casillas viables el diálogo normalmente ni se abre —sería una
+   * lista vacía—. Impedido sí se abre: es donde el cliente quiere leer el
+   * motivo y ver, casilla a casilla, cuáles van cortas.
+   */
+  it('se enseña aunque no quede ninguna casilla viable', async () => {
+    planDevuelto = impedido(0);
+
+    await usarPanel.getState().planear('open');
+
+    expect(usarPanel.getState().plan?.blocker?.code).toBe('saldo-margen-adicional');
+  });
+
+  /* Sin impedimento, cero casillas sigue sin abrir diálogo: no ha cambiado nada. */
+  it('sin impedimento, cero casillas sigue sin abrir el diálogo', async () => {
+    planDevuelto = { ...plan('open', 0), discards: [{ subAccountId: 'sub_1', side: 'long', label: 'Sub-01', reason: 'Saldo insuficiente.' }] };
+
+    await usarPanel.getState().planear('open');
+
+    expect(usarPanel.getState().plan).toBeNull();
+    expect(usarPanel.getState().avisos.at(-1)?.cuerpo).toContain('Saldo insuficiente');
+  });
+});
+
+/*
+ * ==========================================================================
+ * La selección se deshace sola tras abrir.
+ * ==========================================================================
+ * Lo pidió el cliente, y evita un error concreto: al terminar la apertura esas
+ * casillas ya tienen posición, así que la siguiente acción caería sobre ellas
+ * si el operador olvida destildarlas. Destildar cuarenta a mano es justamente
+ * lo que nadie hace.
+ */
+describe('desmarcar tras abrir', () => {
+  it('tras abrir, no queda ninguna casilla marcada', async () => {
+    expect(usarPanel.getState().contarSeleccion()).toBe(3);
+
+    await usarPanel.getState().planear('open');
+    usarPanel.getState().escribirPin('bg1');
+    await usarPanel.getState().confirmarPlan();
+
+    expect(enviados).toHaveLength(1);
+    expect(usarPanel.getState().contarSeleccion()).toBe(0);
+  });
+
+  /*
+   * Solo tras abrir. Encadenar dos ajustes sobre la misma selección -poner el
+   * Take Profit y luego el apalancamiento- es un uso legítimo, y desmarcar tras
+   * cada lote lo convertiría en volver a marcar cuarenta casillas.
+   */
+  it('tras las otras operaciones la selección se conserva', async () => {
+    planDevuelto = plan('leverage', 3);
+
+    await usarPanel.getState().planear('leverage');
+    await usarPanel.getState().confirmarPlan();
+
+    expect(enviados).toHaveLength(1);
+    expect(usarPanel.getState().contarSeleccion()).toBe(3);
+  });
+
+  /*
+   * Si el envío revienta -el proceso principal no responde-, la selección se
+   * queda. Es lo único con lo que el operador puede repetir: sin informe no hay
+   * «Reintentar las fallidas» al que agarrarse.
+   */
+  it('si el envío falla, la selección no se toca', async () => {
+    falloAlEnviar = new Error('el panel no responde');
+
+    await usarPanel.getState().planear('open');
+    usarPanel.getState().escribirPin('bg1');
+    await usarPanel.getState().confirmarPlan();
+
+    expect(usarPanel.getState().contarSeleccion()).toBe(3);
+    expect(usarPanel.getState().avisos.at(-1)?.titulo).toContain('No se pudo enviar');
   });
 });
 
@@ -439,7 +595,7 @@ describe('el apalancamiento por defecto', () => {
   it('con valores fijos no se toca lo que el operador escribió', () => {
     usarPanel.setState({
       valoresFijos: true,
-      valores: { tp: '35', mgi: '100', mga: '50', ap: '12' },
+      valores: { tp: '35', mgi: '100', mga: '50', ap: '12', tpAjuste: '', mgAjuste: '' },
       activos: [
         { id: 'PEPE', symbol: 'PEPEUSDT', label: 'PEPE/USDT', priceDecimals: 8, maxLeverage: 75, minLeverage: 1, tradable: true }
       ]
@@ -471,7 +627,7 @@ describe('el modo de margen y el margen adicional', () => {
   });
 
   it('sin margen adicional escrito, no viaja ninguno', async () => {
-    usarPanel.setState({ valores: { tp: '35', mgi: '100', mga: '', ap: '10' } });
+    usarPanel.setState({ valores: { tp: '35', mgi: '100', mga: '', ap: '10', tpAjuste: '', mgAjuste: '' } });
 
     await usarPanel.getState().planear('open');
 
@@ -498,7 +654,7 @@ describe('el modo de margen y el margen adicional', () => {
   it('en cruzado sin margen adicional, la apertura sigue su curso', async () => {
     usarPanel.setState({
       modoMargen: 'crossed',
-      valores: { tp: '35', mgi: '100', mga: '', ap: '10' }
+      valores: { tp: '35', mgi: '100', mga: '', ap: '10', tpAjuste: '', mgAjuste: '' }
     });
 
     await usarPanel.getState().planear('open');
@@ -510,9 +666,7 @@ describe('el modo de margen y el margen adicional', () => {
   /*
    * Y no queda forma de reenviarlos por descuido.
    *
-   * `planear('tp')` y `planear('margin')` ya no compilan -`PlanKind` no los
-   * tiene-, asi que esa mitad la vigila el compilador. La otra mitad es esta:
-   * tras abrir, los tres campos que salieron con la orden se vacian. Si se
+   * Tras abrir, los tres campos que salieron con la orden se vacian. Si se
    * quedaran escritos, la siguiente apertura sobre las mismas casillas
    * repetiria el Take Profit y volveria a comprometer el mismo margen.
    */
@@ -529,6 +683,71 @@ describe('el modo de margen y el margen adicional', () => {
     expect(valores.mga).toBe('');
     /* El apalancamiento no: el operador repite el mismo y no salió con la orden. */
     expect(valores.ap).toBe('10');
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Ajustar una posicion ya abierta
+ * ---------------------------------------------------------------------------
+ * Las tres operaciones volvieron el 01/09/2026, y lo que se prueba aqui es
+ * justamente lo que faltaba la primera vez: que **no lean los campos de la
+ * apertura**. Ese era el mecanismo de la incidencia del 26/08/2026 -el importe
+ * salia con la orden, se quedaba escrito y el boton de al lado lo reenviaba-, y
+ * es un fallo que solo se ve desde el store: mas abajo, las dos peticiones son
+ * identicas.
+ */
+describe('los ajustes sobre lo ya abierto no tocan los campos de la apertura', () => {
+  it('«Poner Take Profit» usa tpAjuste, no el tp que sale al abrir', async () => {
+    planDevuelto = plan('tp', 3);
+    usarPanel.setState((s) => ({ valores: { ...s.valores, tp: '35', tpAjuste: '12' } }));
+
+    await usarPanel.getState().planear('tp');
+
+    expect(ultimoTp?.percent).toBe('12');
+  });
+
+  it('«Agregar» y «Quitar» usan mgAjuste, y la dirección la pone el botón', async () => {
+    planDevuelto = plan('margin-add', 3);
+    usarPanel.setState((s) => ({ valores: { ...s.valores, mga: '50', mgAjuste: '7' } }));
+
+    await usarPanel.getState().planear('margin-add');
+    expect(ultimoMargen).toMatchObject({ amount: '7', direction: 'agregar' });
+
+    planDevuelto = plan('margin-remove', 3);
+    await usarPanel.getState().planear('margin-remove');
+    expect(ultimoMargen).toMatchObject({ amount: '7', direction: 'quitar' });
+  });
+
+  /*
+   * El signo no es un segundo mando.
+   *
+   * Con `-7` escrito y «Agregar» pulsado hay dos ordenes contradictorias, y la
+   * unica respuesta segura es no planificar ninguna: el canal lo rechaza
+   * igualmente, pero aqui se dice en castellano y sin gastar la consulta.
+   */
+  it('un importe con signo no se planifica', async () => {
+    usarPanel.setState((s) => ({ valores: { ...s.valores, mgAjuste: '-7' } }));
+
+    await usarPanel.getState().planear('margin-add');
+
+    expect(planificaciones).toBe(0);
+    expect(enviados).toHaveLength(0);
+    expect(usarPanel.getState().avisos.at(-1)?.cuerpo).toContain('sin signo');
+  });
+
+  /* Tras aplicar un ajuste, su campo se vacia: no se hereda a la siguiente pulsacion. */
+  it('tras mover margen, el campo del ajuste se vacía y el de la apertura no', async () => {
+    planDevuelto = plan('margin-add', 3);
+    usarPanel.setState({ valoresFijos: false });
+    usarPanel.setState((s) => ({ valores: { ...s.valores, mga: '50', mgAjuste: '7' } }));
+
+    await usarPanel.getState().planear('margin-add');
+    await usarPanel.getState().confirmarPlan();
+
+    const { valores } = usarPanel.getState();
+    expect(valores.mgAjuste).toBe('');
+    expect(valores.mga).toBe('50');
   });
 });
 

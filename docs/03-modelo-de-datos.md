@@ -217,7 +217,22 @@ invalida los vaults existentes.
 
 Reglas de manejo:
 
-- **Cualquier permiso no reconocido bloquea el alta.**
+- **Ningún permiso bloquea el alta. Los que mueven dinero se avisan.**
+
+  > **Cambiado el 29 de agosto de 2026, a petición expresa del cliente.** Hasta esa fecha
+  > esta regla decía «cualquier permiso no reconocido bloquea el alta», y era la pieza que
+  > sostenía la cláusula del presupuesto firmado —*«el sistema no solicitará, almacenará ni
+  > utilizará permisos de retiro de fondos»*— y la promesa de la Fase 1: *«quien obtuviera
+  > esas claves no podría sacar un solo dólar de sus cuentas»*.
+  >
+  > **Las dos han dejado de ser ciertas**, y se decidió a sabiendas: la función de traspasos
+  > entre subcuentas necesita una clave de la cuenta principal con permiso de traspaso, y el
+  > cliente pidió además admitir el de retiro.
+  >
+  > Al aceptar el retiro cae también el rechazo de los códigos desconocidos, porque su única
+  > justificación era *«este código podría ser el de retiro»*. Ningún permiso de Bitget es
+  > peor que sacar el dinero, así que seguir rechazando lo desconocido ya no protegía nada y
+  > sí dejaba fuera claves legítimas.
 
   > **Corregido el 28 de julio de 2026, contra la API real.** Esta sección decía
   > *«`retiro: true` bloquea el alta»*, dando por hecho que Bitget declara los permisos
@@ -226,15 +241,15 @@ Reglas de manejo:
   > su significado. Tampoco existe el endpoint que se suponía: `/api/v2/user/api-key-info`
   > y `/api/v2/account/info` devuelven 40404. Los permisos salen de
   > `/api/v2/spot/account/info`, que sí responde con una key de solo futuros.
-  >
-  > Con códigos que no se pueden interpretar, una lista negra **falla abierta**: un código
-  > de retiro ausente de la lista pasaría sin que nadie se entere. Por eso se invierte a
-  > **lista blanca**: solo se aceptan los códigos confirmados como inocuos y cualquier
-  > código desconocido rechaza la credencial. Falla cerrado, que es la misma regla que ya
-  > gobierna la clasificación de errores. Implementado en `src/main/bitget/verificacion.ts`.
 
-  El resultado para el cliente es el mismo que se le prometió —una key con permiso de
-  retiro no entra al sistema— y además cubre los permisos que aún no hemos catalogado.
+  El catálogo de códigos sobrevive al cambio, pero con otro oficio: ya no decide quién entra,
+  sino **qué se le dice al operador**. Cada código declara su nivel —`operacion`, `traspaso`
+  o `retiro`— y todo lo que no sea `operacion`, más cualquier código sin catalogar, genera
+  una advertencia en el momento del alta. La de retiro se queda fija en pantalla hasta que se
+  cierra a mano, en lugar de irse sola a los cuatro segundos como las demás.
+
+  Volver atrás son dos constantes en `src/main/bitget/verificacion.ts`: `NIVELES_ACEPTADOS`
+  y `ACEPTAR_DESCONOCIDOS`.
 - El payload en claro vive en memoria del proceso principal mientras la sesión está
   abierta. Al bloquear, los búferes se sobrescriben con ceros.
 - Hacia el renderer solo viaja `apiKeyEnmascarada` (§8). El valor completo no cruza el

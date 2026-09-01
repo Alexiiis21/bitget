@@ -32,7 +32,7 @@
  * Variables opcionales:
  *   PCB_ARCHIVO   origen (por defecto subcuentas-generadas.json)
  *   PCB_CARPETA   carpeta de datos (por defecto la de staging en APPDATA)
- *   PCB_GRUPO     nombre de la cuenta principal (por defecto "Cuenta principal")
+ *   PCB_GRUPO     cuenta principal donde caen, de la A a la O (por defecto "A")
  */
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -52,7 +52,13 @@ interface SubcuentaGenerada {
 
 const maestra = process.env['PCB_MAESTRA'] ?? '';
 const archivo = process.env['PCB_ARCHIVO'] ?? 'subcuentas-generadas.json';
-const grupo = process.env['PCB_GRUPO'] ?? 'Cuenta principal';
+/*
+ * Las cuentas principales del panel son las quince del abecedario -de la A a la
+ * O- desde el 28/08/2026. El nombre por defecto era «Cuenta principal», que ya
+ * no es ninguna de ellas: las subcuentas importadas caian en un grupo que el
+ * formulario de alta no puede volver a elegir, y gastaba uno de los quince.
+ */
+const grupo = process.env['PCB_GRUPO'] ?? 'A';
 const carpeta =
   process.env['PCB_CARPETA'] ??
   join(process.env['APPDATA'] ?? '', 'Panel de Control Bitget-staging');
@@ -105,7 +111,14 @@ beforeAll(async () => {
   await cliente.sincronizarReloj();
 
   const rutaVault = join(carpeta, 'vault.enc');
-  sesion = new Sesion({ vault: rutaVault, cuentas: join(carpeta, 'cuentas.json') }, cliente);
+  sesion = new Sesion(
+    {
+      vault: rutaVault,
+      cuentas: join(carpeta, 'cuentas.json'),
+      activos: join(carpeta, 'activos.json')
+    },
+    cliente
+  );
 
   const hayVault = await existe(rutaVault);
   const r = hayVault ? await sesion.abrir(maestra) : await sesion.crear(maestra);

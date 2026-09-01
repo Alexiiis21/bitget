@@ -7,31 +7,50 @@
  *   2. ¿Tiene los permisos justos? -> ni de menos, ni de mas
  *   3. ¿La cuenta puede operar la estrategia? -> cobertura y margen aislado
  *
- * Cumple RF-001 («verificar automaticamente que las credenciales sean validas
- * antes de permitir su utilizacion») y la clausula de credenciales del
- * presupuesto: el sistema no utiliza ni acepta permisos de retiro.
+ * Cumple RF-001: «verificar automaticamente que las credenciales sean validas
+ * antes de permitir su utilizacion».
+ *
+ * ==========================================================================
+ * EL PANEL YA NO RECHAZA POR PERMISOS. Decision del cliente, 29/08/2026.
+ * ==========================================================================
+ * Hasta esa fecha, este archivo era la pieza que sostenia la clausula de
+ * credenciales del presupuesto firmado:
+ *
+ *   «El sistema no solicitara, almacenara ni utilizara permisos de retiro de
+ *   fondos.»
+ *
+ * y la promesa de la Fase 1: «quien obtuviera esas claves no podria sacar un
+ * solo dolar de sus cuentas». Eso **ya no es cierto**, y se cambio a peticion
+ * expresa del cliente, sabiendo lo que costaba: la funcion de traspasos entre
+ * subcuentas -docs/cotizacion-traspasos-entre-subcuentas.md- necesita una clave
+ * de la cuenta madre con permiso de traspaso, y el cliente pidio ademas admitir
+ * el de retiro.
+ *
+ * Queda escrito aqui, y no solo en el historial de git, porque quien lea este
+ * archivo dentro de un ano tiene que poder distinguir «esto se relajo por
+ * descuido» de «esto se relajo porque lo pidieron». Para volver atras basta con
+ * `NIVELES_ACEPTADOS` y `ACEPTAR_DESCONOCIDOS`, mas abajo: son las dos lineas
+ * que gobiernan toda la politica.
  *
  * --------------------------------------------------------------------------
- * Sobre el permiso de retiro: por que lista blanca y no lista negra
+ * Por que el catalogo sobrevive al cambio
  * --------------------------------------------------------------------------
- * docs/03 §5 preveia «consultar el permiso y rechazar cualquier key con
- * permiso de retiro habilitado». Al implementarlo aparecio que Bitget declara
- * los permisos como codigos opacos de cuatro letras -una key de solo futuros
- * devuelve `["coow","cpow"]`- y no publica su significado.
+ * Bitget declara los permisos como codigos opacos de cuatro letras -una key de
+ * solo futuros devuelve `["coow","cpow"]`- y no publica su significado. El
+ * catalogo nacio para poder rechazar lo que no se entendia; ahora que no se
+ * rechaza, sigue sirviendo para **decir en voz alta que puede hacer una clave**.
+ * Cada codigo declara su nivel:
  *
- * Con codigos que no se pueden interpretar, una lista negra **falla abierta**:
- * un codigo de retiro que no estuviera en la lista pasaria la verificacion sin
- * que nadie se enterase. Por eso se invierte: solo se aceptan los codigos
- * confirmados como inocuos, y **cualquier codigo desconocido rechaza la
- * credencial**. Falla cerrado.
+ *   `operacion`  opera futuros y lee. No saca un dolar de ningun sitio.
+ *   `traspaso`   mueve saldo entre cuentas propias.
+ *   `retiro`     saca dinero a un destino externo.
  *
- * Es la misma regla que ya gobierna bitget/errors.ts: ante lo desconocido, la
- * respuesta segura, nunca la comoda. El coste es que una key con permisos
- * legitimos aun no catalogados se rechaza y hay que anadir su codigo aqui; el
- * beneficio es que ninguna key con permiso de retiro entra por descuido.
+ * Los tres se aceptan. Los dos ultimos, y cualquier codigo sin catalogar,
+ * generan una **advertencia** que llega a la pantalla en el momento del alta.
+ * Aceptar en silencio seria lo unico peor que rechazar: el operador tiene que
+ * enterarse de que acaba de guardar una clave que puede vaciar la cuenta.
  */
 import type { ModoMargen, ModoPosicion } from '@shared/types';
-import { trazaSaldo } from '../debug-saldo';
 import { ErrorBitget } from './errors';
 import { MERCADO_REAL, type Mercado } from './mercado';
 import type { ClienteBitget } from './rest/client';
@@ -43,7 +62,8 @@ import { obtenerCuentaSimbolo, obtenerInfoCuenta } from './rest/endpoints/cuenta
  *
  * Estado: `coow` y `cpow` capturados el 28/07/2026 de una key creada **desde la
  * web** solo con permiso de Futuros. El catalogo se amplia conforme se observen
- * otras combinaciones; hasta entonces, lo no listado se rechaza.
+ * otras combinaciones; lo no listado se acepta con advertencia, y catalogarlo
+ * solo mejora lo que se le dice al operador.
  *
  * --------------------------------------------------------------------------
  * `ttow`: por que se cataloga sin que Bitget publique su significado
@@ -68,12 +88,68 @@ import { obtenerCuentaSimbolo, obtenerInfoCuenta } from './rest/endpoints/cuenta
  * -api@bitget.com- y anotar aqui la respuesta. Ver scripts/ver-permisos.mjs
  * para reproducir la observacion.
  */
-const PERMISOS_ACEPTADOS: Record<string, string> = {
-  coow: 'Futuros: ordenes',
-  cpow: 'Futuros: posiciones',
-  ttow: 'Futuros: operar (alta por API)',
-  chow: 'Subcuentas: administrar'
+/**
+ * Que puede hacer un permiso con el dinero. Ver la cabecera del archivo.
+ */
+export type NivelPermiso = 'operacion' | 'traspaso' | 'retiro';
+
+interface PermisoCatalogado {
+  /** Texto para la pantalla de cuentas. */
+  descripcion: string;
+  nivel: NivelPermiso;
+}
+
+const CATALOGO_PERMISOS: Record<string, PermisoCatalogado> = {
+  coow: { descripcion: 'Futuros: ordenes', nivel: 'operacion' },
+  cpow: { descripcion: 'Futuros: posiciones', nivel: 'operacion' },
+  ttow: { descripcion: 'Futuros: operar (alta por API)', nivel: 'operacion' },
+  chow: { descripcion: 'Subcuentas: administrar', nivel: 'operacion' }
+
+  /*
+   * Los codigos de traspaso y de retiro todavia no se conocen, y **no se
+   * inventan**: la clave de la cuenta madre, consultada el 29/08/2026 con
+   * `node scripts/ver-permisos.mjs --env MADRE`, devuelve `[coow, cpow, chow]`
+   * -hoy no tiene ninguno de los dos, que es justo por lo que el traspaso de
+   * prueba fallo con `40014 · need transfer write permissions`-.
+   *
+   * Desde el cambio de politica **eso ya no bloquea nada**: una clave con esos
+   * permisos entra igual, avisando de que trae codigos sin catalogar. Anadirlos
+   * aqui cuando aparezcan no cambia quien entra; cambia que la advertencia diga
+   * «puede sacar fondos» en vez de «trae un permiso que no reconozco».
+   */
 };
+
+/**
+ * Niveles que el panel acepta.
+ *
+ * Los tres, por decision del cliente del 29/08/2026. Quitar `retiro` de esta
+ * linea vuelve a rechazar las claves que puedan sacar fondos, y quitar tambien
+ * `traspaso` deja el panel como estaba antes de la funcion de traspasos.
+ */
+const NIVELES_ACEPTADOS: ReadonlySet<NivelPermiso> = new Set<NivelPermiso>([
+  'operacion',
+  'traspaso',
+  'retiro'
+]);
+
+/**
+ * Que hacer con un codigo que no esta en el catalogo.
+ *
+ * --------------------------------------------------------------------------
+ * Por que dejo de rechazar
+ * --------------------------------------------------------------------------
+ * La lista blanca existia por un argumento concreto: «un codigo que no se sabe
+ * interpretar **podria ser el de retiro**, asi que no pasa». Ese argumento se
+ * cae solo en cuanto el retiro se acepta a proposito. Ningun permiso de Bitget
+ * es peor que sacar el dinero de la cuenta, de modo que seguir rechazando lo
+ * desconocido ya no protegia de nada: solo dejaba fuera claves legitimas -la
+ * de traspaso, sin ir mas lejos, cuyo codigo nadie ha visto todavia-.
+ *
+ * Se acepta, pero nunca en silencio: los codigos sin catalogar salen nombrados
+ * en una advertencia. Poner esto en `false` restaura el comportamiento de
+ * fallar cerrado tal como estaba hasta el 29/08/2026.
+ */
+const ACEPTAR_DESCONOCIDOS = true;
 
 /**
  * El `parentId` de Bitget, normalizado a cadena.
@@ -91,7 +167,14 @@ function uidPadreDe(parentId: number | null | undefined): string | null {
 export type VeredictoCredencial = 'valida' | 'rechazada' | 'invalida';
 
 export type CodigoAdvertencia =
-  'sin-ip-ligada' | 'margen-cruzado' | 'modo-unilateral' | 'sin-saldo' | 'reloj-desviado';
+  | 'sin-ip-ligada'
+  | 'margen-cruzado'
+  | 'modo-unilateral'
+  | 'sin-saldo'
+  | 'reloj-desviado'
+  | 'permiso-traspaso'
+  | 'permiso-retiro'
+  | 'permiso-desconocido';
 
 export interface Advertencia {
   codigo: CodigoAdvertencia;
@@ -224,7 +307,12 @@ export async function verificarCredencial(
   }
 
   const permisos = info.datos.authorities;
-  const desconocidos = permisos.filter((p) => !(p in PERMISOS_ACEPTADOS));
+  const desconocidos = permisos.filter((p) => !(p in CATALOGO_PERMISOS));
+  /* Catalogados, pero de un nivel que la politica no admite. Hoy: ninguno. */
+  const vetados = permisos.filter((p) => {
+    const catalogado = CATALOGO_PERMISOS[p];
+    return catalogado !== undefined && !NIVELES_ACEPTADOS.has(catalogado.nivel);
+  });
   const ips = info.datos.ips
     ? info.datos.ips
         .split(',')
@@ -244,7 +332,7 @@ export async function verificarCredencial(
 
   /* ---- 2. ¿permisos justos? ---- */
 
-  if (desconocidos.length > 0) {
+  if (!ACEPTAR_DESCONOCIDOS && desconocidos.length > 0) {
     return {
       ...parcial,
       veredicto: 'rechazada',
@@ -252,6 +340,30 @@ export async function verificarCredencial(
         `La API Key tiene permisos que el panel no reconoce (${desconocidos.join(', ')}). ` +
         'Por seguridad no se acepta: crea la key solo con permiso de Futuros, ' +
         'sin Wallet ni retiros.',
+      latenciaMs: Date.now() - inicio
+    };
+  }
+
+  /*
+   * Se comprueba **despues** de los desconocidos y con su propio mensaje.
+   *
+   * Un codigo desconocido y uno vetado se rechazan igual, pero no se arreglan
+   * igual: el primero se cataloga aqui tras averiguar que es, y el segundo hay
+   * que quitarlo en Bitget. Un solo mensaje para los dos mandaba al operador a
+   * la pantalla equivocada.
+   *
+   * Con la politica de hoy -los tres niveles aceptados- esto no se dispara. Es
+   * el freno que vuelve a funcionar en cuanto se quite un nivel de
+   * `NIVELES_ACEPTADOS`, sin tener que reescribir nada.
+   */
+  if (vetados.length > 0) {
+    const nombres = vetados.map((p) => `${p} · ${describirPermiso(p)}`).join(', ');
+    return {
+      ...parcial,
+      veredicto: 'rechazada',
+      motivo:
+        `La API Key permite sacar fondos (${nombres}). El panel no acepta claves con ` +
+        'permiso de retiro. Edita la key en Bitget y quitaselo, o crea una nueva sin el.',
       latenciaMs: Date.now() - inicio
     };
   }
@@ -269,14 +381,6 @@ export async function verificarCredencial(
 
   let cuenta;
   try {
-    /* DEPURACIÓN TEMPORAL · ver src/main/debug-saldo.ts */
-    trazaSaldo('1·consulta', {
-      uid: parcial.uid,
-      mercado: mercado.clave,
-      simbolo,
-      productType: mercado.productType,
-      marginCoin: mercado.marginCoin
-    });
     cuenta = await obtenerCuentaSimbolo(
       cliente,
       credencial,
@@ -287,12 +391,6 @@ export async function verificarCredencial(
   } catch (e) {
     if (e instanceof ErrorBitget && e.reintentable) throw e;
     const err = e as ErrorBitget;
-    /* DEPURACIÓN TEMPORAL */
-    trazaSaldo('1·consulta FALLÓ', {
-      uid: parcial.uid,
-      codigo: err.codigo,
-      motivo: err.message
-    });
     return {
       ...parcial,
       motivo: `Autentica, pero no se pudo leer la cuenta de futuros: ${err.message}`,
@@ -301,21 +399,57 @@ export async function verificarCredencial(
     };
   }
 
-  /* DEPURACIÓN TEMPORAL · lo que Bitget respondio, antes de interpretarlo */
-  trazaSaldo('2·respuesta', {
-    uid: parcial.uid,
-    available: cuenta.datos.available,
-    accountEquity: cuenta.datos.accountEquity,
-    marginCoin: cuenta.datos.marginCoin,
-    marginMode: cuenta.datos.marginMode,
-    posMode: cuenta.datos.posMode
-  });
-
   const modoPosicion: ModoPosicion =
     cuenta.datos.posMode === 'hedge_mode' ? 'cobertura' : 'unilateral';
   const modoMargen: ModoMargen = cuenta.datos.marginMode === 'isolated' ? 'aislado' : 'cruzado';
 
   const advertencias: Advertencia[] = [];
+
+  /*
+   * Un permiso que mueve dinero se acepta, pero no en silencio.
+   *
+   * Es la contrapartida de haber quitado el rechazo. La clave deja de ser
+   * inocua y quien la da de alta tiene que enterarse **en ese momento**, no el
+   * dia que alguien pregunte por que una key de subcuenta podia vaciar la
+   * cuenta. Las tres advertencias van por separado porque no se responden
+   * igual: al traspaso se le pone IP ligada, al retiro se le quita el permiso,
+   * y lo desconocido se cataloga.
+   */
+  const conNivel = (n: NivelPermiso): string[] =>
+    permisos.filter((p) => CATALOGO_PERMISOS[p]?.nivel === n);
+
+  const traspaso = conNivel('traspaso');
+  if (traspaso.length > 0) {
+    advertencias.push({
+      codigo: 'permiso-traspaso',
+      mensaje:
+        `Esta API Key puede mover saldo entre cuentas (${traspaso.join(', ')}). ` +
+        'No puede retirar a un destino externo, pero deja de ser una clave de solo operar: ' +
+        'usala solo en la cuenta principal y con IP ligada.'
+    });
+  }
+
+  const retiro = conNivel('retiro');
+  if (retiro.length > 0) {
+    advertencias.push({
+      codigo: 'permiso-retiro',
+      mensaje:
+        `Esta API Key PUEDE SACAR FONDOS de la cuenta (${retiro.join(', ')}). ` +
+        'Queda guardada cifrada en este equipo, pero quien llegue a ella podria retirar ' +
+        'dinero a un destino externo. Usala solo con IP ligada y quitale el permiso en ' +
+        'Bitget en cuanto deje de hacer falta.'
+    });
+  }
+
+  if (desconocidos.length > 0) {
+    advertencias.push({
+      codigo: 'permiso-desconocido',
+      mensaje:
+        `Esta API Key trae permisos que el panel no sabe interpretar (${desconocidos.join(', ')}). ` +
+        'Se acepta, pero no se puede decir que permiten: comprueba en Bitget que la key ' +
+        'solo tenga lo que querias darle.'
+    });
+  }
 
   if (modoPosicion !== 'cobertura') {
     advertencias.push({
@@ -386,5 +520,15 @@ export async function verificarCredencial(
 
 /** Descripcion legible de un codigo de permiso, para la pantalla de cuentas. */
 export function describirPermiso(codigo: string): string {
-  return PERMISOS_ACEPTADOS[codigo] ?? `Permiso desconocido (${codigo})`;
+  return CATALOGO_PERMISOS[codigo]?.descripcion ?? `Permiso desconocido (${codigo})`;
+}
+
+/**
+ * Nivel de un codigo de permiso. `null` si no esta catalogado.
+ *
+ * La expone la verificacion para que quien tenga que decidir -la pantalla de
+ * cuentas, una prueba- no vuelva a interpretar los codigos por su cuenta.
+ */
+export function nivelDePermiso(codigo: string): NivelPermiso | null {
+  return CATALOGO_PERMISOS[codigo]?.nivel ?? null;
 }

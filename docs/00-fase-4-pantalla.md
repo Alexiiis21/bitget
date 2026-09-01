@@ -25,15 +25,33 @@ que dice el documento.
 |---|---|---|
 | Abrir | *Abrir* | `apertura:planificar` · `apertura:ejecutar` |
 | Cerrar (rápido) | *Cerrar* | `cierre:planificar` · `cierre:ejecutar` |
-| Poner Take Profit | campo *Take Profit %* | `tp:planificar` · `tp:ejecutar` |
+| Poner Take Profit | *Poner Take Profit* | `tp:planificar` · `tp:ejecutar` |
 | **Quitar Take Profit** | *Quitar Take Profit* | `tp:planificar-quitar` · `tp:ejecutar-quitar` |
-| Agregar margen | campo *Margen adicional* | `margen:planificar` · `margen:ejecutar` |
+| Agregar margen | *Agregar* | `margen:planificar` · `margen:ejecutar` |
+| **Quitar margen** | *Quitar* | `margen:planificar` · `margen:ejecutar` |
 | Ajustar apalancamiento | campo *Apalancamiento* | `apalancamiento:planificar` · `apalancamiento:ejecutar` |
 
-> **Actualización del 26/08/2026.** Las dos filas centrales ya no existen como operación propia: el
-> Take Profit y el margen adicional viajan **dentro de la apertura**, y sus cuatro canales se
-> retiraron. Convivir con la apertura que ya los llevaba dentro permitía enviarlos dos veces sobre
-> la misma posición. Ver `docs/00-correcciones-26-08.md` § 3.5.
+> **Actualización del 26/08/2026.** Las filas del Take Profit y del margen dejaron de existir como
+> operación propia: los dos viajan **dentro de la apertura**, y sus cuatro canales se retiraron.
+> Convivir con la apertura que ya los llevaba dentro permitía enviarlos dos veces sobre la misma
+> posición. Ver `docs/00-correcciones-26-08.md` § 3.5.
+>
+> **Actualización del 01/09/2026.** Vuelven, porque el cliente necesita corregir lo que ya está
+> abierto —una posición que quedó sin Take Profit, otra a la que hay que darle o quitarle colchón—,
+> y cerrarla para reabrirla cuesta la diferencia de precio. Están en su propia sección de la barra
+> lateral, **Sobre posiciones abiertas**, y con tres cambios que no tenían:
+>
+> - **Campos distintos.** El *Take Profit %* y el *Margen adicional* de PARÁMETROS siguen saliendo
+>   solo con la orden; los de ajuste son otras dos casillas. El importe escrito para abrir ya no
+>   puede reenviarse por inercia, que es como ocurrió el 26/08/2026.
+> - **Poner Take Profit sustituye.** El plan lee el que hay puesto, lo cancela y coloca el nuevo:
+>   una posición nunca acaba con dos órdenes de cierre. La confirmación enseña `0,00263 → 0,00271`.
+> - **El margen enseña `actual → resultante`**, leído de Bitget al planificar. Aplicar dos veces el
+>   mismo importe se ve en la confirmación, antes de enviar.
+>
+> Agregar y quitar margen comparten campo y canal, y se distinguen por el **botón**: el sentido no
+> depende de un `-` tecleado, porque retirar margen acerca la liquidación y esa no es una diferencia
+> que pueda perderse en un carácter.
 
 Y tres piezas que faltaban para que nada quedara en modo demostración:
 
@@ -204,8 +222,11 @@ Los dos puntos que quedaban abiertos se resolvieron el 25 de agosto y ya no bloq
 
 Queda:
 
-- Las posiciones en vivo son de la Fase 6: hasta entonces el área del monitor avisa de que no hay
-  datos en lugar de inventarlos.
+- Las posiciones en vivo son de la Fase 6.
+
+  > **Al día 29/08/2026.** Esto decía que hasta entonces el monitor avisa de que no hay datos.
+  > El barrido REST y el pool de sockets se construyeron después, así que las posiciones ya se
+  > pintan. La fase sigue sin abrirse: nada de eso se ha revisado contra el uso real.
 - Nada pendiente en las suites de red: `test:red` iba en paralelo y se quitaba a sí mismo el cupo
   de la IP —Bitget respondía *«está limitando las peticiones»* y la suite fallaba por el cupo, no
   por el panel—. Ahora corre en serie, igual que `test:staging`, y las tres se pueden encadenar.

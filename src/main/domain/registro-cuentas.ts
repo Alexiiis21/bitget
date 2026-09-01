@@ -67,11 +67,21 @@ const esquemaArchivo = z.object({
   cuentas: z.array(esquemaCuenta)
 });
 
-/** Datos de alta de una cuenta. La casilla la asigna el registro; el `id`, `reservarId`. */
+/** Datos de alta de una cuenta. El `id` lo decide `reservarId`. */
 export interface AltaCuentaRegistro {
   id: string;
   grupoNombre: string;
   etiqueta: string;
+  /**
+   * En que casilla de la cuenta principal va, de 1 a `SUBCUENTAS_POR_GRUPO`.
+   *
+   * La elige el operador desde el 28/08/2026: antes se asignaba sola -la
+   * primera libre- y no habia forma de decir «esta subcuenta va en la 7», que es
+   * como el operador tiene organizada su rejilla. Sin ella se mantiene el
+   * reparto automatico, que es lo que usan la importacion masiva y los archivos
+   * antiguos.
+   */
+  slot?: number;
   /** UID de Bitget. Lo trae la verificacion, nunca el formulario. */
   uid: string;
   /** UID de la cuenta principal segun Bitget, o cadena vacia si no lo informa. */
@@ -83,7 +93,7 @@ export interface AltaCuentaRegistro {
 }
 
 /** Motivo por el que un alta no cabe en el registro. */
-export type MotivoRegistro = 'grupos-llenos' | 'casillas-llenas';
+export type MotivoRegistro = 'grupos-llenos' | 'casillas-llenas' | 'casilla-ocupada';
 
 export class ErrorRegistro extends Error {
   readonly motivo: MotivoRegistro;
@@ -186,6 +196,36 @@ export class RegistroCuentas {
     );
   }
 
+  /**
+   * Quien ocupa una casilla concreta, sin contar a la propia subcuenta del alta.
+   *
+   * `exceptoId` es lo que hace que rotar la clave de una subcuenta y dejarla
+   * donde estaba no se lea como un choque consigo misma.
+   */
+  private ocupanteDe(grupoId: string, slot: number, exceptoId?: string): Cuenta | undefined {
+    return this.cuentas.find((c) => c.grupoId === grupoId && c.slot === slot && c.id !== exceptoId);
+  }
+
+  /** La casilla pedida, comprobada. Lanza si la ocupa otra subcuenta. */
+  private casillaPedida(grupo: Grupo, slot: number, exceptoId?: string): number {
+    if (!Number.isInteger(slot) || slot < 1 || slot > SUBCUENTAS_POR_GRUPO) {
+      throw new ErrorRegistro(
+        'casillas-llenas',
+        `La casilla ${slot} no existe: cada cuenta principal tiene ${SUBCUENTAS_POR_GRUPO}.`
+      );
+    }
+
+    const ocupante = this.ocupanteDe(grupo.id, slot, exceptoId);
+    if (ocupante !== undefined) {
+      throw new ErrorRegistro(
+        'casilla-ocupada',
+        `La casilla ${slot} de la cuenta «${grupo.nombre}» ya la ocupa «${ocupante.etiqueta}». ` +
+          'Elija otra casilla, o dé de baja esa subcuenta primero.'
+      );
+    }
+    return slot;
+  }
+
   listarCuentas(): Cuenta[] {
     return this.cuentas.map((c) => ({ ...c }));
   }
@@ -274,13 +314,14 @@ export class RegistroCuentas {
    * dejaria la credencial ya cifrada en memoria sin cuenta a la que pertenecer.
    * Dar de alta una subcuenta que ya existe siempre cabe: es rotar su clave.
    */
-  comprobarCabida(grupoNombre: string, etiqueta: string): ErrorRegistro | null {
-    if (this.existente(grupoNombre, etiqueta) !== undefined) return null;
+  comprobarCabida(grupoNombre: string, etiqueta: string, slot?: number): ErrorRegistro | null {
+    const yaEsta = this.existente(grupoNombre, etiqueta);
 
     const nombre = grupoNombre.trim().toLowerCase();
     const grupo = this.grupos.find((g) => g.nombre.toLowerCase() === nombre);
 
     if (grupo === undefined) {
+      /* Cuenta principal nueva: sus veinte casillas están libres, incluida la pedida. */
       if (this.grupos.length < CUENTAS_MADRE_MAX) return null;
       return new ErrorRegistro(
         'grupos-llenos',
@@ -288,6 +329,24 @@ export class RegistroCuentas {
           'Registre la subcuenta en una de las existentes.'
       );
     }
+
+    /*
+     * Con casilla elegida, la pregunta deja de ser «¿queda sitio?» y pasa a ser
+     * «¿está libre esa?». Una cuenta principal llena se detecta igual -sus veinte
+     * casillas están ocupadas- pero con el nombre de quien estorba, que es lo
+     * que el operador necesita para decidir.
+     */
+    if (slot !== undefined) {
+      try {
+        this.casillaPedida(grupo, slot, yaEsta?.id);
+        return null;
+      } catch (e) {
+        if (e instanceof ErrorRegistro) return e;
+        throw e;
+      }
+    }
+
+    if (yaEsta !== undefined) return null;
 
     const ocupadas = this.cuentas.filter((c) => c.grupoId === grupo.id).length;
     if (ocupadas < SUBCUENTAS_POR_GRUPO) return null;
@@ -317,12 +376,23 @@ export class RegistroCuentas {
    * UID de Bitget, asi que aqui basta con buscar por `id`. Puede llegar con el
    * nombre cambiado, con otra clave o incluso en otra cuenta principal: sigue
    * siendo la misma subcuenta y conserva su ficha.
+   *
+   * La casilla la manda el alta si la trae -«esta va en la 7»- y se comprueba
+   * antes de escribir nada: una casilla ocupada por otra subcuenta rechaza el
+   * alta en vez de desalojarla. Sin casilla pedida se conserva la que tuviera, o
+   * se le da la primera libre.
    */
   agregar(alta: AltaCuentaRegistro): Cuenta {
     const grupo = this.grupoPorNombre(alta.grupoNombre);
     const previa = this.cuentas.find((c) => c.id === alta.id);
     /* Rotar la clave no mueve de casilla; cambiar de cuenta principal, si. */
     const sigueEnSuGrupo = previa !== undefined && previa.grupoId === grupo.id;
+    const casilla =
+      alta.slot !== undefined
+        ? this.casillaPedida(grupo, alta.slot, previa?.id)
+        : sigueEnSuGrupo
+          ? previa.slot
+          : this.casillaLibre(grupo.id);
 
     const cuenta: Cuenta = {
       id: alta.id,
@@ -332,7 +402,7 @@ export class RegistroCuentas {
       uidPadre: alta.uidPadre,
       credencialId: alta.credencialId,
       apiKeyEnmascarada: alta.apiKeyEnmascarada,
-      slot: sigueEnSuGrupo ? previa.slot : this.casillaLibre(grupo.id),
+      slot: casilla,
       activa: true,
       modoPosicion: alta.modoPosicion,
       modoMargen: alta.modoMargen,

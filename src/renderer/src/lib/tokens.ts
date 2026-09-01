@@ -103,12 +103,54 @@ export const SOMBRA = {
   aviso: '0 14px 36px rgba(8,26,42,.20)'
 } as const;
 
-/** Estados de acción TP · MGA · AP · OE, colores configurables por el cliente. */
+/**
+ * Estados de acción TP · MGA · AP · OE. Los elige el operador.
+ *
+ * Eran tres hex fijos hasta el 29/08/2026, y eran la única excepción a la regla
+ * que encabeza este archivo: los colores viven en `styles/index.css`, aquí solo
+ * sus nombres. Al hacerlos configurables se corrige también esa excepción, y
+ * por eso cambiar uno no vuelve a renderizar ni un componente: se reescribe la
+ * variable en el `<body>` y la cascada hace el resto.
+ *
+ * `error` no pinta solo el distintivo: también los rótulos SUSP y SUSPENDIDO de
+ * la barra lateral y del buscador. Es el mismo token semántico —«esto no se
+ * puede operar»— y por eso se mueve con él.
+ */
 export const ESTADO_ACCION = {
+  realizada: 'var(--estado-realizada)',
+  pendiente: 'var(--estado-pendiente)',
+  error: 'var(--estado-error)'
+} as const;
+
+export type ClaveColorEstado = keyof typeof ESTADO_ACCION;
+
+/**
+ * Los valores de fábrica, en hex.
+ *
+ * Hacen falta en hex y no como `var(--x)` por dos motivos: `<input type="color">`
+ * solo acepta `#rrggbb`, y *Restablecer* tiene que poder volver a un valor
+ * concreto. Son los mismos que declara `:root` en `styles/index.css`; si se
+ * cambian ahí, hay que cambiarlos aquí.
+ */
+export const ESTADO_ACCION_FABRICA: Record<ClaveColorEstado, string> = {
   realizada: '#2f9e44',
   pendiente: '#e03131',
   error: '#f2b705'
-} as const;
+};
+
+/** Nombre de cada color en la pantalla de ajustes. */
+export const ESTADO_ACCION_ROTULO: Record<ClaveColorEstado, string> = {
+  realizada: 'Realizada',
+  pendiente: 'Pendiente',
+  error: 'Error o suspendido'
+};
+
+/** La variable CSS que hay que escribir para cada color. */
+export const ESTADO_ACCION_VARIABLE: Record<ClaveColorEstado, string> = {
+  realizada: '--estado-realizada',
+  pendiente: '--estado-pendiente',
+  error: '--estado-error'
+};
 
 /** Realce de la primera entrada de cada cuenta (long/short). */
 export const REALCE = {
@@ -136,10 +178,61 @@ export const DISTINTIVO_API = {
  *
  * Anchuras fijas a propósito: las cifras se comparan en columna entre
  * subcuentas, y una columna elástica las desalinearía al cambiar de activo.
+ *
+ * La segunda columna es el activo, y es estrecha porque lleva el nombre corto
+ * del catálogo —`BTC`, `PEPE`—, nunca el símbolo de la API. Existe desde que la
+ * fila es la pareja (casilla, activo): una casilla puede tener dos activos
+ * abiertos, y sin esta columna las dos filas serían indistinguibles.
  */
 export const REJILLA_MONITOR =
-  'minmax(190px,1.15fr) repeat(4,minmax(0,96px)) minmax(0,1.34fr) minmax(0,1.05fr) repeat(4,minmax(0,96px)) minmax(0,1.34fr)';
-export const ANCHO_MINIMO_MONITOR = 1546;
+  'minmax(160px,1fr) minmax(0,58px) repeat(4,minmax(0,100px)) minmax(0,1.34fr) minmax(0,1.05fr) repeat(4,minmax(0,100px)) minmax(0,1.34fr)';
+/**
+ * Ancho a partir del cual las dos puntas caben una al lado de la otra.
+ *
+ * Es a la vez el ancho mínimo de la rejilla ancha y **el punto de quiebre**:
+ * por debajo, el monitor no encoge la tabla —encogerla es lo que dejaba el
+ * SHORT fuera de la pantalla, recortado y sin barra de desplazamiento— sino que
+ * parte cada fila en dos, con el SHORT debajo del LONG. Ver `AccordeonMonitor`.
+ */
+export const ANCHO_MINIMO_MONITOR = 1620;
+
+/**
+ * Escala tipográfica del Centro de Monitoreo.
+ *
+ * Vive aquí y no repartida por el componente porque la usan las dos
+ * disposiciones —la ancha y la partida— y tienen que crecer a la vez: son la
+ * misma información leída en dos sitios distintos, y que una quede más pequeña
+ * que la otra es lo que hace dudar de si se está mirando lo mismo.
+ *
+ * Los tamaños subieron el 31/08/2026 a petición del cliente: las cifras iban a
+ * 9,5 px y los distintivos a 7, que en una laptop de 14" no se leen de un
+ * vistazo, y este panel se mira de un vistazo mientras el precio se mueve.
+ */
+const VALOR_MONITOR = 12.5;
+
+export const TIPO_MONITOR = {
+  /** Rótulos de columna: SUBCUENTA, Liquidación… */
+  rotulo: 11,
+  /** Las cifras: liquidación, entrada, margen, take profit. */
+  valor: VALOR_MONITOR,
+  /** Lo que se busca primero: el nombre de la casilla y la distancia L/S. */
+  destacado: 13.5,
+  /** La sigla del distintivo dentro de su pastilla: TP, MGA, AP, OE. */
+  distintivo: 10,
+  /**
+   * El numerito bajo cada distintivo: el `1.5%` del TP, el `50` del margen, el
+   * `10x` del apalancamiento.
+   *
+   * **Es el mismo tamaño que `valor`, y a propósito.** Iba a 8,5 px —la letra
+   * más pequeña de todo el panel— y el cliente lo dijo con estas palabras el
+   * 31/08/2026: «exageradamente pequeños». No es un pie de foto: es el
+   * porcentaje al que sale el Take Profit y el apalancamiento al que está la
+   * posición, la misma clase de dato que las cifras de la izquierda de la fila.
+   * Se escribe como referencia y no como número suelto para que no vuelvan a
+   * separarse.
+   */
+  distintivoValor: VALOR_MONITOR
+} as const;
 /** 2 bloques de 20 casillas + etiquetas de lado. */
 export const ANCHO_MINIMO_MATRIZ = 1180;
 export const CASILLAS_POR_CUENTA = 20;

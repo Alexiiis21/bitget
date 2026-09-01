@@ -74,7 +74,11 @@ beforeAll(async () => {
   cliente = new ClienteBitget();
   await cliente.sincronizarReloj();
   sesion = new Sesion(
-    { vault: join(carpeta, 'vault.enc'), cuentas: join(carpeta, 'cuentas.json') },
+    {
+      vault: join(carpeta, 'vault.enc'),
+      cuentas: join(carpeta, 'cuentas.json'),
+      activos: join(carpeta, 'activos.json')
+    },
     cliente
   );
 });

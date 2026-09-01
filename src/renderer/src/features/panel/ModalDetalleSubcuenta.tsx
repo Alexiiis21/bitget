@@ -43,7 +43,15 @@ function BloquePunta({ posicion, lado }: { posicion: Position | undefined; lado:
       <div style={{ display: 'flex', flexDirection: 'column', gap: 7, fontSize: 12.5 }}>
         <Dato rotulo="Entrada" valor={cifra(posicion?.entryPrice)} estilo={{ fontWeight: 600 }} />
         <Dato rotulo="Liquidación" valor={cifra(posicion?.liquidationPrice)} />
-        <Dato rotulo="Margen inicial" valor={posicion ? `${cifra(posicion.initialMarginAccum)} USDT` : '—'} estilo={{ fontWeight: 600 }} />
+        {/*
+          * El guion no es cero: es que el panel no vio abrirse esta posición.
+          * Por eso no lleva unidad detrás —«— USDT» se leería como cero USDT—.
+          */}
+        <Dato
+          rotulo="Margen inicial"
+          valor={posicion?.initialMarginAccum == null ? '—' : `${cifra(posicion.initialMarginAccum)} USDT`}
+          estilo={{ fontWeight: 600 }}
+        />
         <Dato rotulo="Take Profit" valor={cifra(posicion?.takeProfitPrice)} estilo={{ color }} />
       </div>
       <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
@@ -72,8 +80,20 @@ export function ModalDetalleSubcuenta() {
   const sub = cuenta?.subAccounts.find((s) => s.id === detalle.subAccountId);
   if (!cuenta || !sub) return null;
 
-  const long = posiciones.find((p) => p.subAccountId === sub.id && p.side === 'long');
-  const short = posiciones.find((p) => p.subAccountId === sub.id && p.side === 'short');
+  /*
+   * Las dos puntas de **este** activo, no las de la casilla.
+   *
+   * Con dos activos abiertos en la misma casilla, buscar solo por lado
+   * devolvería la primera que apareciera y el modal enfrentaría el long de BTC
+   * contra el short de ETH: dos posiciones que no tienen nada que ver, con una
+   * distancia L/S inventada entre ellas.
+   */
+  const long = posiciones.find(
+    (p) => p.subAccountId === sub.id && p.assetId === detalle.assetId && p.side === 'long'
+  );
+  const short = posiciones.find(
+    (p) => p.subAccountId === sub.id && p.assetId === detalle.assetId && p.side === 'short'
+  );
   const hayError = long?.hasError || short?.hasError;
   const hayAbierta = long?.actions.oe || short?.actions.oe;
   const distancia = long && short ? restar(short.entryPrice, long.entryPrice) : null;

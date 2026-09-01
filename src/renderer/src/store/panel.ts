@@ -33,9 +33,12 @@ import type {
   Side
 } from '@shared/domain/panel-view';
 import type { Decimal } from '@shared/types';
+import { SUBCUENTAS_POR_GRUPO } from '@shared/constants';
 import { NotImplementedError } from '@shared/ports/panel-service';
 import { panelService } from '@/services/panel-service';
 import { casillas } from '@/lib/formato';
+import { reproducirCajaRegistradora } from '@/lib/sonido';
+import { ESTADO_ACCION_FABRICA, type ClaveColorEstado } from '@/lib/tokens';
 import type {
   AlcanceLado,
   Aviso,
@@ -53,12 +56,87 @@ const MINIMO_PASO = 3;
 const FORMULARIO_VACIO: FormularioApiKey = {
   subcuenta: '',
   cuenta: 'A',
+  casilla: '1',
   apiKey: '',
   secretKey: '',
   passphrase: ''
 };
 
+/**
+ * La primera casilla libre de una cuenta principal, o `''` si está llena.
+ *
+ * El formulario la propone sola al elegir la cuenta principal: el operador
+ * quiere decir «esta subcuenta va en la 7», pero cuando le da igual, lo que no
+ * puede pasar es que el formulario proponga la 1 —ocupada desde hace meses— y el
+ * alta se rechace después de haber tecleado tres claves de 64 caracteres.
+ *
+ * La cadena vacía es «no queda ninguna», y se enseña como tal en vez de
+ * proponer una casilla que va a chocar.
+ */
+const primeraCasillaLibre = (
+  cuentas: readonly Account[],
+  nombre: string,
+  /**
+   * Una casilla más que contar como ocupada.
+   *
+   * Es la que se acaba de dar de alta: la matriz llega del proceso principal y
+   * puede tardar un instante en traerla, y sin esto el formulario propondría
+   * otra vez la casilla que acaba de llenarse.
+   */
+  ocupadaAdemas?: number
+): string => {
+  const cuenta = cuentas.find((c) => c.name === nombre);
+  const ocupadas = new Set(cuenta?.subAccounts.map((s) => s.slot) ?? []);
+  if (ocupadaAdemas !== undefined) ocupadas.add(ocupadaAdemas);
+  for (let n = 1; n <= SUBCUENTAS_POR_GRUPO; n += 1) {
+    if (!ocupadas.has(n)) return String(n);
+  }
+  return '';
+};
+
 const seleccionVacia = (n: number): boolean[] => Array.from({ length: n }, () => false);
+
+/** Las casillas de activo que tienen algo. Una casilla vacía no es un activo. */
+const llenas = (ranuras: readonly (Asset | null)[]): Asset[] =>
+  ranuras.filter((a): a is Asset => a !== null);
+
+/** Los lados que el alcance opera: en «Ambos», los dos. */
+const operaLong = (a: AlcanceLado): boolean => a !== 'short';
+const operaShort = (a: AlcanceLado): boolean => a !== 'long';
+
+/**
+ * Deja la selección de una cuenta coherente con el alcance.
+ *
+ * --------------------------------------------------------------------------
+ * Por qué el alcance ya no se limita a filtrar
+ * --------------------------------------------------------------------------
+ * Hasta el 28/08/2026 el alcance no tocaba la selección: las casillas se
+ * marcaban igual en los dos lados y al contar se descartaba el lado que no
+ * tocaba. Eso dejaba marcas visibles que no se enviaban —y, peor, marcas que se
+ * enviaban al cambiar el alcance—. Pulsar «Todas» con el alcance en *Long*
+ * marcaba por dentro las veinte short, invisibles en el recuento; volver a
+ * *Ambos* convertía un lote de veinte casillas en uno de cuarenta sin que nadie
+ * hubiera tocado la matriz. La otra mitad del problema era la simétrica: en
+ * *Ambos* se podía marcar una sola punta de la columna y salía una posición a
+ * medias donde el operador había pedido el par.
+ *
+ * La regla que queda es una sola, y es la que el cliente acordó el 28/08/2026:
+ * **lo marcado es exactamente lo que se va a enviar**. En «Ambos» las dos
+ * casillas de una columna son una: marcar una marca la otra. En «Long» y en
+ * «Short» el lado que no se opera se destilda, para que no quede nada esperando
+ * a que un cambio de alcance lo despierte.
+ */
+const reconciliar = (sel: SeleccionCuenta, alcance: AlcanceLado): SeleccionCuenta => {
+  if (alcance === 'ambos') {
+    /* Una columna marcada por cualquiera de sus dos puntas queda marcada entera. */
+    const par = sel.selLong.map((v, i) => v || sel.selShort[i] === true);
+    return { selLong: par, selShort: [...par] };
+  }
+  return {
+    selLong: operaLong(alcance) ? sel.selLong : sel.selLong.map(() => false),
+    selShort: operaShort(alcance) ? sel.selShort : sel.selShort.map(() => false)
+  };
+};
 
 /**
  * Estado de carga de una sección que trae datos de fuera.
@@ -86,6 +164,38 @@ const temaInicial = (): 'light' | 'dark' => {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 };
 
+const CLAVE_COLORES = 'pcb.colores-estado';
+
+/** `#rrggbb` en minúsculas o mayúsculas. Es lo único que devuelve un `<input type="color">`. */
+const esHex = (v: unknown): v is string => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
+
+/**
+ * Los tres colores de estado guardados, o los de fábrica.
+ *
+ * Se guardan en `localStorage` y no en disco por el proceso principal, igual
+ * que el tema: no hay backend detrás de una preferencia visual, y montarle
+ * canal IPC, esquema y archivo a tres cadenas sería más maquinaria que dato.
+ *
+ * Cada color se valida por separado. Un `localStorage` a medias —editado a
+ * mano, o escrito por una versión anterior— no debe poder dejar la matriz sin
+ * un color: lo que no sea un hex de seis dígitos vuelve al de fábrica y el
+ * resto se conserva.
+ */
+const coloresIniciales = (): Record<ClaveColorEstado, string> => {
+  const salida = { ...ESTADO_ACCION_FABRICA };
+  try {
+    const crudo: unknown = JSON.parse(localStorage.getItem(CLAVE_COLORES) ?? '{}');
+    if (crudo === null || typeof crudo !== 'object') return salida;
+    for (const clave of Object.keys(salida) as ClaveColorEstado[]) {
+      const valor = (crudo as Record<string, unknown>)[clave];
+      if (esHex(valor)) salida[clave] = valor;
+    }
+  } catch {
+    /* JSON ilegible: se arranca con los de fábrica en vez de con la pantalla rota. */
+  }
+  return salida;
+};
+
 let secuenciaAviso = 0;
 let cancelarPrecios: (() => void) | undefined;
 let cancelarPosiciones: (() => void) | undefined;
@@ -99,6 +209,9 @@ export interface EstadoPanel {
   numeroPanel: number;
   ocupado: boolean;
   tema: 'light' | 'dark';
+  /** Los tres colores de estado de acción, en hex. Los elige el operador. */
+  coloresEstado: Record<ClaveColorEstado, string>;
+  coloresAbierto: boolean;
   /**
    * Mercado contra el que opera este panel. Lo dice el proceso principal.
    *
@@ -110,9 +223,26 @@ export interface EstadoPanel {
   mercado: 'real' | 'simulado';
 
   /* ---- activos ---- */
+  /**
+   * Las ocho casillas del selector, con sus huecos. `null` es casilla vacía.
+   *
+   * Es la lista tal como está en el proceso principal: la posición importa
+   * porque el operador edita cada casilla por su número. `activos` es esta
+   * misma lista compactada, y es la que usa todo lo que no dibuja el selector.
+   */
+  ranuras: (Asset | null)[];
   activos: Asset[];
   precios: Record<string, Decimal>;
   activoId: string;
+  /* ---- buscador de activos ---- */
+  /** Casilla que se está editando, o `null` si el buscador está cerrado. */
+  ranuraEditando: number | null;
+  catalogo: Asset[];
+  cargaCatalogo: EstadoCarga;
+  motivoCatalogo: string | null;
+  filtroCatalogo: string;
+  /** Guardando la casilla: bloquea un segundo clic sobre otro activo. */
+  fijandoRanura: boolean;
 
   /* ---- barra lateral ---- */
   alcance: AlcanceLado;
@@ -180,7 +310,15 @@ export interface EstadoPanel {
 
   /* ---- pantallas superpuestas ---- */
   apisAbierto: boolean;
-  detalle: { accountId: string; subAccountId: string } | null;
+  /**
+   * La casilla abierta en el detalle, y sobre qué activo.
+   *
+   * `assetId` forma parte de la identidad porque el detalle enfrenta las dos
+   * puntas de **una** posición: una casilla con BTC y ETH abiertos tiene cuatro
+   * puntas, y sin el activo el modal mezclaría el long de una con el short de
+   * la otra y enseñaría una distancia L/S que no existe.
+   */
+  detalle: { accountId: string; subAccountId: string; assetId: string } | null;
   batch: BatchResult | null;
   /** Repite el último lote, acotado a sus objetivos fallidos. `null` si el último lote no tuvo fallos o no es repetible. */
   reintentarFallidas: (() => Promise<void>) | null;
@@ -219,6 +357,21 @@ export interface EstadoPanel {
   errorPaso: string;
   intentosPaso: number;
 
+  /* ---- baja de una API key ---- */
+  /**
+   * La ficha que se está dando de baja, o `null`.
+   *
+   * Mientras esto no sea `null` hay un diálogo abierto y **no se ha borrado
+   * nada**: la baja sale con `confirmarBajaApi`, y solo con la contraseña de
+   * paso. `hayPaso` dice si este panel tiene alguna configurada; sin ella el
+   * proceso principal no deja borrar, y el diálogo lo explica en vez de gastar
+   * los tres intentos en una clave que no existe.
+   */
+  bajaApi: { id: string; etiqueta: string; cuenta: string; hayPaso: boolean } | null;
+  pinBaja: string;
+  errorBaja: string;
+  intentosBaja: number;
+
   /* ---- avisos ---- */
   avisos: Aviso[];
 
@@ -230,7 +383,18 @@ export interface EstadoPanel {
   fijarTema: (t: 'light' | 'dark') => void;
   fijarNumeroPanel: (n: number) => Promise<void>;
 
+  abrirColores: () => void;
+  cerrarColores: () => void;
+  fijarColorEstado: (clave: ClaveColorEstado, hex: string) => void;
+  restablecerColores: () => void;
+
   fijarActivo: (id: string) => void;
+  /** Abre el buscador sobre una casilla concreta y trae el catálogo. */
+  abrirBuscadorActivos: (indice: number) => Promise<void>;
+  cerrarBuscadorActivos: () => void;
+  escribirFiltroCatalogo: (v: string) => void;
+  /** Pone un activo en la casilla que se está editando, o la vacía con `null`. */
+  fijarRanura: (simbolo: string | null) => Promise<void>;
   fijarAlcance: (a: AlcanceLado) => void;
   fijarValor: (clave: keyof ValoresHerramientas, v: string) => void;
   alternarValoresFijos: () => void;
@@ -261,7 +425,11 @@ export interface EstadoPanel {
   refrescarApis: () => Promise<void>;
   guardarApi: () => Promise<void>;
   probarApi: (id: string) => Promise<void>;
-  eliminarApi: (id: string) => Promise<void>;
+  /** Abre la confirmación de la baja. No borra: para eso está `confirmarBajaApi`. */
+  pedirBajaApi: (id: string) => Promise<void>;
+  escribirPinBaja: (v: string) => void;
+  confirmarBajaApi: () => Promise<void>;
+  cancelarBajaApi: () => void;
 
   abrirSeguridad: () => void;
   cerrarSeguridad: () => void;
@@ -273,19 +441,24 @@ export interface EstadoPanel {
   alternarCmp: (accountId: string) => void;
   alternarHist: (accountId: string) => Promise<void>;
   alternarHistSub: (subAccountId: string) => void;
-  abrirDetalle: (accountId: string, subAccountId: string) => void;
+  abrirDetalle: (accountId: string, subAccountId: string, assetId: string) => void;
   cerrarDetalle: () => void;
   reintentarConexion: (accountId: string, subAccountId: string) => void;
 
   avisar: (tipo: TipoAviso, titulo: string, cuerpo: string, meta?: string) => void;
   cerrarAviso: (id: string) => void;
+  /** Vacía la pila entera. Ningún aviso se cierra solo; ver `avisar`. */
+  cerrarAvisos: () => void;
 }
 
 /** Cómo se llama cada operación en los avisos y en el diálogo. */
 const TITULOS: Record<PlanKind, string> = {
   open: 'Abrir posiciones',
   close: 'Cerrar posiciones',
+  tp: 'Poner Take Profit',
   'tp-remove': 'Quitar Take Profit',
+  'margin-add': 'Agregar margen',
+  'margin-remove': 'Quitar margen',
   leverage: 'Apalancamiento'
 };
 
@@ -293,13 +466,18 @@ const TITULOS: Record<PlanKind, string> = {
  * Qué campo del formulario necesita cada operación, o `null` si ninguno.
  *
  * Cerrar y quitar el Take Profit no llevan valor: actúan sobre lo que ya hay.
- * El Take Profit y el margen adicional tampoco tienen entrada propia: van
- * dentro de la apertura, y su campo lo lee `planear('open')`.
+ * Los campos `tp` y `mga` no aparecen aquí porque no son operaciones: viajan
+ * dentro de la apertura, y los lee `planear('open')`. Los que sí aparecen son
+ * sus gemelos de ajuste —`tpAjuste` y `mgAjuste`—, que actúan sobre posiciones
+ * ya abiertas y por eso son campos aparte. Ver `ValoresHerramientas`.
  */
 const CAMPO_DE: Record<PlanKind, keyof ValoresHerramientas | null> = {
   open: 'mgi',
   close: null,
+  tp: 'tpAjuste',
   'tp-remove': null,
+  'margin-add': 'mgAjuste',
+  'margin-remove': 'mgAjuste',
   leverage: 'ap'
 };
 
@@ -343,7 +521,15 @@ const LIMPIA_TRAS: Record<PlanKind, Partial<ValoresHerramientas>> = {
   /* Los tres campos de la apertura salieron con ella; no se heredan al siguiente lote. */
   open: { mgi: '', tp: '', mga: '' },
   close: {},
+  /*
+   * Los dos de ajuste se vacían por lo mismo que los de la apertura, y aquí
+   * importa más: un importe de margen que se queda escrito es un importe que se
+   * vuelve a enviar con la siguiente pulsación sobre las mismas casillas.
+   */
+  tp: { tpAjuste: '' },
   'tp-remove': {},
+  'margin-add': { mgAjuste: '' },
+  'margin-remove': { mgAjuste: '' },
   leverage: {}
 };
 
@@ -354,14 +540,24 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   numeroPanel: 1,
   ocupado: false,
   tema: temaInicial(),
+  coloresEstado: coloresIniciales(),
+  coloresAbierto: false,
   mercado: 'simulado',
 
+  ranuras: [],
   activos: [],
   precios: {},
   activoId: 'BTC',
+  ranuraEditando: null,
+  catalogo: [],
+  cargaCatalogo: 'inicial',
+  motivoCatalogo: null,
+  filtroCatalogo: '',
+  fijandoRanura: false,
 
   alcance: 'ambos',
-  valores: { tp: '1.5', mgi: '100', mga: '50', ap: '10' },
+  /* Los dos campos de ajuste arrancan vacíos: nada se aplica sin teclearlo. */
+  valores: { tp: '1.5', mgi: '100', mga: '50', ap: '10', tpAjuste: '', mgAjuste: '' },
   valoresFijos: false,
   tipoOrden: 'market',
   modoMargen: 'isolated',
@@ -407,17 +603,27 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   errorPaso: '',
   intentosPaso: 0,
 
+  bajaApi: null,
+  pinBaja: '',
+  errorBaja: '',
+  intentosBaja: 0,
+
   avisos: [],
 
   /* ---------------- sesión ---------------- */
 
   iniciar: async () => {
     try {
-      const [info, activos] = await Promise.all([panelService.getSystemInfo(), panelService.listAssets()]);
+      const [info, ranuras] = await Promise.all([
+        panelService.getSystemInfo(),
+        panelService.listAssetSlots()
+      ]);
+      const activos = llenas(ranuras);
       const primero = activos[0];
       set((estado) => ({
         numeroPanel: info.panelNumber,
         mercado: info.market,
+        ranuras,
         activos,
         activoId: primero?.id ?? 'BTC',
         valores: { ...estado.valores, ap: primero === undefined ? estado.valores.ap : String(primero.maxLeverage) }
@@ -471,8 +677,8 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
         cancelarCuentas = panelService.subscribeAccounts((frescas) => set({ cuentas: frescas }));
       } catch (e) {
         /*
-         * El motivo se guarda además de avisar: el aviso emergente se va solo a
-         * los pocos segundos y la matriz se queda vacía el resto de la sesión.
+         * El motivo se guarda además de avisar: el aviso lo cierra el operador
+         * -a veces sin leerlo- y la matriz se queda vacía el resto de la sesión.
          * Sin esto, quien llegue tarde a la pantalla no tiene forma de saber
          * por qué no hay nada.
          */
@@ -521,7 +727,20 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       errorContrasena: '',
       apisAbierto: false,
       seguridadAbierta: false,
+      /*
+       * El buscador se cierra, pero las ocho casillas se quedan: son la
+       * configuración del panel, no datos de la sesión, y el catálogo del
+       * mercado es público. Lo que no puede quedarse abierto sobre la pantalla
+       * de desbloqueo es un diálogo.
+       */
+      ranuraEditando: null,
+      filtroCatalogo: '',
       detalle: null,
+      /* Incluida la baja a medio confirmar: no se hereda a la siguiente sesión. */
+      bajaApi: null,
+      pinBaja: '',
+      errorBaja: '',
+      intentosBaja: 0,
       avisos: [],
       apiKeys: [],
       cuentas: [],
@@ -546,12 +765,48 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     set({ tema });
   },
 
+  abrirColores: () => set({ coloresAbierto: true }),
+  cerrarColores: () => set({ coloresAbierto: false }),
+
+  /*
+   * El color se guarda en cuanto se toca, sin botón de aceptar.
+   *
+   * Es el mismo criterio que el interruptor de tema: el resultado se ve en la
+   * matriz que hay detrás del diálogo mientras se elige, así que un «guardar»
+   * solo añadiría una forma de perder lo que ya se estaba viendo aplicado.
+   * Deshacerlo es *Restablecer*, o volver a elegir.
+   */
+  fijarColorEstado: (clave, hex) => {
+    const coloresEstado = { ...get().coloresEstado, [clave]: hex };
+    localStorage.setItem(CLAVE_COLORES, JSON.stringify(coloresEstado));
+    set({ coloresEstado });
+  },
+
+  restablecerColores: () => {
+    localStorage.removeItem(CLAVE_COLORES);
+    set({ coloresEstado: { ...ESTADO_ACCION_FABRICA } });
+  },
+
+  /**
+   * Cambia el número del panel y lo manda guardar.
+   *
+   * Se aplica en pantalla antes de que el disco conteste porque es un rótulo:
+   * no decide nada y esperar por él haría que el campo fuera a tirones al
+   * teclear. Si la escritura falla, el número **se queda a la vista** y se dice
+   * que no se guardó: revertirlo mientras el operador teclea sería aún más
+   * confuso, y al reiniciar volverá el anterior de todas formas.
+   */
   fijarNumeroPanel: async (n) => {
     set({ numeroPanel: n });
     try {
       await panelService.setPanelNumber(n);
     } catch (e) {
-      get().avisar('aviso', 'Número de panel no persistido', textoDeError(e), 'PCB');
+      get().avisar(
+        'aviso',
+        'El número de panel no se guardó',
+        `${textoDeError(e)} Se ve el ${n} en la cabecera, pero al reiniciar volverá el anterior.`,
+        'PCB'
+      );
     }
   },
 
@@ -575,7 +830,102 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       if (activo === undefined || s.valoresFijos) return { activoId };
       return { activoId, valores: { ...s.valores, ap: String(activo.maxLeverage) } };
     }),
-  fijarAlcance: (alcance) => set({ alcance }),
+
+  /**
+   * Abre el buscador sobre una casilla. El catálogo se pide una sola vez.
+   *
+   * Son los 754 contratos del mercado y no cambian mientras el panel está
+   * abierto, así que volver a pedirlos cada vez que se abre el buscador sería
+   * una espera por nada. El proceso principal ya lo cachea; esto evita incluso
+   * el viaje por IPC.
+   */
+  abrirBuscadorActivos: async (indice) => {
+    set({ ranuraEditando: indice, filtroCatalogo: '' });
+    if (get().cargaCatalogo === 'listo') return;
+
+    set({ cargaCatalogo: 'cargando', motivoCatalogo: null });
+    try {
+      set({ catalogo: await panelService.listAssetCatalog(), cargaCatalogo: 'listo', motivoCatalogo: null });
+    } catch (e) {
+      set({ cargaCatalogo: 'error', motivoCatalogo: textoDeError(e) });
+    }
+  },
+
+  cerrarBuscadorActivos: () => set({ ranuraEditando: null, filtroCatalogo: '' }),
+  escribirFiltroCatalogo: (filtroCatalogo) => set({ filtroCatalogo }),
+
+  /**
+   * Cambia el activo de la casilla que se está editando.
+   *
+   * --------------------------------------------------------------------------
+   * Lo que hay que arreglar además de la casilla
+   * --------------------------------------------------------------------------
+   * Quitar un activo de su casilla puede dejar `activoId` apuntando a algo que
+   * ya no está en el selector, y con él se planifica: sin esto, «Abrir» iría
+   * contra un activo que la pantalla ya no enseña. Cuando pasa, la selección
+   * cae en el primer activo que quede —y arrastra el tope de apalancamiento,
+   * como cualquier cambio de activo, salvo con «valores fijos» puestos—.
+   *
+   * El proceso principal es quien valida y quien guarda; aquí solo se refleja
+   * lo que devolvió. Un rechazo —símbolo inexistente, activo repetido— se
+   * enseña como aviso y **no cambia nada**: las casillas siguen como estaban.
+   */
+  fijarRanura: async (simbolo) => {
+    const { ranuraEditando, avisar, fijandoRanura } = get();
+    if (ranuraEditando === null || fijandoRanura) return;
+
+    set({ fijandoRanura: true });
+    try {
+      const ranuras = await panelService.setAssetSlot(ranuraEditando, simbolo);
+      const activos = llenas(ranuras);
+
+      set((s) => {
+        const sigueViva = activos.some((a) => a.id === s.activoId);
+        const primero = activos[0];
+        const activoId = sigueViva ? s.activoId : (primero?.id ?? '');
+        const ap =
+          sigueViva || s.valoresFijos || primero === undefined
+            ? s.valores.ap
+            : String(primero.maxLeverage);
+
+        return {
+          ranuras,
+          activos,
+          activoId,
+          valores: { ...s.valores, ap },
+          ranuraEditando: null,
+          filtroCatalogo: ''
+        };
+      });
+
+      const puesto = ranuras[ranuraEditando];
+      avisar(
+        'ok',
+        `Casilla ${ranuraEditando + 1} actualizada`,
+        puesto === null || puesto === undefined
+          ? 'La casilla quedó vacía. El activo que tenía ya no se puede elegir desde el panel.'
+          : `${puesto.label} ocupa ahora la casilla ${ranuraEditando + 1}.`,
+        'Activos'
+      );
+    } catch (e) {
+      avisar('aviso', 'No se cambió la casilla', textoDeError(e), 'Activos');
+    } finally {
+      set({ fijandoRanura: false });
+    }
+  },
+  /*
+   * Cambiar el alcance reconcilia lo que ya estaba marcado.
+   *
+   * No es una comodidad: sin esto, el alcance solo filtraba y la selección
+   * guardaba lados que la pantalla no enseñaba como suyos. Ver `reconciliar`.
+   */
+  fijarAlcance: (alcance) =>
+    set((s) => ({
+      alcance,
+      seleccion: Object.fromEntries(
+        Object.entries(s.seleccion).map(([id, sel]) => [id, reconciliar(sel, alcance)])
+      )
+    })),
   fijarValor: (clave, v) => set((s) => ({ valores: { ...s.valores, [clave]: v } })),
   alternarValoresFijos: () => set((s) => ({ valoresFijos: !s.valoresFijos })),
   fijarTipoOrden: (tipoOrden) => set({ tipoOrden }),
@@ -584,6 +934,14 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
   /* ---------------- selección ---------------- */
 
+  /*
+   * El filtro por alcance sigue aquí aunque `reconciliar` ya lo garantice.
+   *
+   * Es redundante a propósito, y en la dirección segura: si algún camino
+   * dejara una marca fuera del alcance, el filtro hace que **no se envíe** —se
+   * vería una casilla tildada de menos en el recuento— en vez de que salga una
+   * orden que el operador no pidió.
+   */
   contarSeleccion: () => {
     const { seleccion, alcance } = get();
     return Object.values(seleccion).reduce(
@@ -609,30 +967,58 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     return objetivos;
   },
 
+  /* «Todas» marca solo los lados que el alcance opera; el otro se queda vacío. */
   alternarCuenta: (accountId) =>
     set((s) => {
       const cuenta = s.cuentas.find((c) => c.id === accountId);
       if (!cuenta) return s;
       const n = cuenta.subAccounts.length;
       const actual = s.seleccion[accountId] ?? { selLong: seleccionVacia(n), selShort: seleccionVacia(n) };
-      const todas = actual.selLong.every(Boolean) && actual.selShort.every(Boolean);
+      const todas =
+        (!operaLong(s.alcance) || actual.selLong.every(Boolean)) &&
+        (!operaShort(s.alcance) || actual.selShort.every(Boolean));
+      const marcar = !todas;
       return {
         seleccion: {
           ...s.seleccion,
-          [accountId]: { selLong: seleccionVacia(n).map(() => !todas), selShort: seleccionVacia(n).map(() => !todas) }
+          [accountId]: {
+            selLong: seleccionVacia(n).map(() => marcar && operaLong(s.alcance)),
+            selShort: seleccionVacia(n).map(() => marcar && operaShort(s.alcance))
+          }
         }
       };
     }),
 
+  /**
+   * Marca o desmarca una casilla. En «Ambos», la columna entera.
+   *
+   * Las dos puntas de una columna van juntas porque el alcance ya dijo que se
+   * opera en las dos: pedir «Ambos» y tener que acertar dos clics —uno en la
+   * fila LONG y otro en la SHORT, sobre casillas de 20 px— es donde se colaba
+   * media posición sin que nadie lo notara.
+   *
+   * Y la casilla del lado que no se opera no se marca: en «Long» la fila SHORT
+   * no responde. Marcarla no habría enviado nada, pero se quedaba tildada
+   * esperando a que un cambio de alcance la convirtiera en una orden.
+   */
   alternarCasilla: (accountId, lado, indice) =>
     set((s) => {
+      const enAlcance = lado === 'selLong' ? operaLong(s.alcance) : operaShort(s.alcance);
+      if (!enAlcance) return s;
+
       const cuenta = s.cuentas.find((c) => c.id === accountId);
       const n = cuenta?.subAccounts.length ?? 20;
       const actual = s.seleccion[accountId] ?? { selLong: seleccionVacia(n), selShort: seleccionVacia(n) };
+      const marcar = actual[lado][indice] !== true;
+      const aplicar = (lista: boolean[]): boolean[] => lista.map((v, i) => (i === indice ? marcar : v));
+
       return {
         seleccion: {
           ...s.seleccion,
-          [accountId]: { ...actual, [lado]: actual[lado].map((v, i) => (i === indice ? !v : v)) }
+          [accountId]:
+            s.alcance === 'ambos'
+              ? { selLong: aplicar(actual.selLong), selShort: aplicar(actual.selShort) }
+              : { ...actual, [lado]: aplicar(actual[lado]) }
         }
       };
     }),
@@ -650,8 +1036,9 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
         s.cuentas.map((c) => [
           c.id,
           {
-            selLong: c.subAccounts.map(() => true),
-            selShort: c.subAccounts.map(() => true)
+            /* Solo los lados del alcance: en «Long» no se marcan las short por debajo. */
+            selLong: c.subAccounts.map(() => operaLong(s.alcance)),
+            selShort: c.subAccounts.map(() => operaShort(s.alcance))
           }
         ])
       )
@@ -703,6 +1090,30 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     const valor = campo === null ? '' : valores[campo].trim();
     if (campo !== null && valor === '') {
       avisar('aviso', 'Campo vacío', `Escriba un valor en ${titulo} antes de continuar.`, `PCB · ${titulo}`);
+      return;
+    }
+
+    /*
+     * Los tres ajustes sobre una posición abierta exigen un número **sin signo**.
+     *
+     * El canal lo rechaza igualmente —el esquema de `margen:planificar` no
+     * acepta el menos—, pero un `-5` escrito en el campo tiene que responder
+     * aquí y en castellano: quien lo teclea está pensando «quitar 5», y el
+     * botón que pulsa ya dice si se agrega o se retira. Dejar que el signo
+     * también opine sería tener dos mandos para lo mismo, y con ellos la
+     * posibilidad de que se contradigan.
+     */
+    if (
+      (kind === 'tp' || kind === 'margin-add' || kind === 'margin-remove') &&
+      !/^\d+(\.\d+)?$/.test(valor)
+    ) {
+      avisar(
+        'aviso',
+        'Valor no válido',
+        'Escriba un número positivo y sin signo. Si quiere retirar margen, use el botón «Quitar margen»: ' +
+          'el sentido lo decide el botón, no un menos delante del número.',
+        `PCB · ${titulo}`
+      );
       return;
     }
 
@@ -761,16 +1172,41 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
           })
         : kind === 'close'
           ? panelService.planClose({ targets, assetId: activoId })
-          : kind === 'tp-remove'
-            ? panelService.planRemoveTakeProfit({ targets, assetId: activoId })
-            : panelService.planLeverage({ targets, assetId: activoId, leverage: apalancamiento }));
+          : kind === 'tp'
+            ? /*
+               * El porcentaje sale de `tpAjuste`, no de `tp`: este se aplica
+               * sobre lo que ya está abierto y aquel viaja con la apertura. Son
+               * dos campos justamente para que este botón no pueda reenviar el
+               * valor que se tecleó para abrir. Ver `ValoresHerramientas`.
+               */
+              panelService.planTakeProfit({ targets, assetId: activoId, percent: valor })
+            : kind === 'tp-remove'
+              ? panelService.planRemoveTakeProfit({ targets, assetId: activoId })
+              : kind === 'margin-add' || kind === 'margin-remove'
+                ? panelService.planMargin({
+                    targets,
+                    assetId: activoId,
+                    amount: valor,
+                    /* La dirección la decide el botón pulsado, nunca un signo tecleado. */
+                    direction: kind === 'margin-remove' ? 'quitar' : 'agregar'
+                  })
+                : panelService.planLeverage({
+                    targets,
+                    assetId: activoId,
+                    leverage: apalancamiento
+                  }));
 
       /*
        * Un plan sin ninguna casilla viable no se enseña como plan: sería un
        * diálogo con una lista vacía y un botón de confirmar que no haría nada.
        * Se dice por qué no salió ninguna, que es la información útil.
+       *
+       * Salvo que venga impedido. Entonces el diálogo **sí** se abre aunque no
+       * quede ninguna casilla viable, porque el cliente pidió justo eso: ver el
+       * motivo en la confirmación, con las casillas que lo causan nombradas una
+       * a una, en lugar de un aviso suelto que solo cabe la primera razón.
        */
-      if (plan.entries.length === 0) {
+      if (plan.entries.length === 0 && plan.blocker === null) {
         set({ planCargando: false, plan: null, mensaje: '' });
         avisar(
           'aviso',
@@ -797,6 +1233,21 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   confirmarPlan: async () => {
     const { plan, pinPaso, intentosPaso, avisar } = get();
     if (!plan) return;
+
+    /*
+     * Un plan impedido no llega ni a pedir la contraseña.
+     *
+     * El diálogo ya lo enseña bloqueado, así que esto solo se alcanza si algo
+     * lo saltó —un Enter en el campo, una pulsación mientras se recalculaba—.
+     * Se comprueba igualmente porque es barato y porque la otra mitad del
+     * freno, la que de verdad cuenta, está en el proceso principal: él rechaza
+     * el plan al ejecutarlo, así que ni un fallo de esta pantalla puede sacar
+     * una orden.
+     */
+    if (plan.blocker !== null) {
+      set({ errorPaso: plan.blocker.message });
+      return;
+    }
 
     if (PIDE_PASO.has(plan.kind)) {
       let valido: boolean;
@@ -858,6 +1309,26 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
             : null
       });
 
+      /*
+       * La caja registradora: una vez por lote de apertura que haya entrado.
+       *
+       * `plan.kind === 'open'` y no las otras cinco porque solo abrir estrena
+       * posición; cerrar, ajustar apalancamiento o quitar el Take Profit no son
+       * lo que este sonido anuncia.
+       *
+       * `r.ok > 0` y no `r.failures.length === 0` porque un lote a medias
+       * también abrió: si veinte casillas entraron y tres fallaron, hay
+       * diecisiete mil dólares en el mercado que no estaban hace un segundo, y
+       * el aviso de error que sale justo debajo ya cuenta la otra mitad.
+       *
+       * Las indeterminadas no suenan por sí solas: no se sabe si entraron, y
+       * ese caso se resuelve mirando Bitget, no oyendo el panel.
+       *
+       * Vale igual para el reintento de fallidas, que vuelve a pasar por aquí:
+       * si el reintento entra, entró una posición, y suena.
+       */
+      if (plan.kind === 'open' && r.ok > 0) reproducirCajaRegistradora();
+
       if (r.undetermined.length > 0) {
         avisar('aviso', 'Hay casillas sin confirmar', `${casillas(r.undetermined.length)} se enviaron y no se pudo averiguar si entraron. Compruébelas en Bitget antes de repetir: reintentarlas a ciegas podría duplicarlas.`, `PCB · ${plan.title}`);
       } else if (r.failures.length === 0) {
@@ -870,6 +1341,26 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       if (!get().valoresFijos) {
         set((s) => ({ valores: { ...s.valores, ...LIMPIA_TRAS[plan.kind] }, limitPrice: plan.kind === 'open' ? '' : s.limitPrice }));
       }
+
+      /*
+       * Tras abrir, la selección se deshace sola.
+       *
+       * Lo pidió el cliente, y el peligro que evita es concreto: al terminar una
+       * apertura esas casillas ya tienen posición, así que la siguiente acción
+       * —cerrar, agregar margen, cambiar apalancamiento— caería sobre ellas si
+       * el operador olvida destildarlas. Destildar 40 casillas a mano es
+       * justamente lo que nadie hace.
+       *
+       * Solo tras `open`, y no tras las otras cinco, porque solo la apertura
+       * cambia lo que hay en la casilla. Encadenar dos ajustes sobre la misma
+       * selección —poner Take Profit y luego agregar margen— es un uso legítimo
+       * que se rompería si esto se aplicara a todo.
+       *
+       * Va después del informe y no antes: el resultado del lote se lee sobre la
+       * matriz, y vaciar la selección mientras se dibuja el informe haría
+       * parpadear las casillas que se están mirando.
+       */
+      if (plan.kind === 'open') get().limpiarSeleccion();
     } catch (e) {
       set({ enviando: false, mensaje: '' });
       avisar('error', `No se pudo enviar ${plan.title.toLowerCase()}`, textoDeError(e), `PCB · ${plan.title}`);
@@ -885,10 +1376,33 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
   /* ---------------- API keys ---------------- */
 
-  abrirApis: () => set({ apisAbierto: true }),
-  cerrarApis: () => set({ apisAbierto: false, ultimaValidacion: null }),
+  /* Al abrir, la casilla propuesta es la primera libre de la cuenta de partida. */
+  abrirApis: () =>
+    set((s) => ({
+      apisAbierto: true,
+      formulario: { ...s.formulario, casilla: primeraCasillaLibre(s.cuentas, s.formulario.cuenta) }
+    })),
+  /* Cerrar la pantalla cancela la baja a medio confirmar: su diálogo vive sobre ella. */
+  cerrarApis: () =>
+    set({ apisAbierto: false, ultimaValidacion: null, bajaApi: null, pinBaja: '', errorBaja: '', intentosBaja: 0 }),
+
+  /*
+   * Cambiar de cuenta principal arrastra la casilla propuesta.
+   *
+   * La casilla 3 de la cuenta A y la 3 de la B no tienen nada que ver, así que
+   * conservar el número al cambiar de cuenta proponía una casilla ocupada tan a
+   * menudo como una libre. Lo que el operador escribe a mano se respeta: esto
+   * solo salta cuando cambia la cuenta.
+   */
   escribirFormulario: (clave, v) =>
-    set((s) => ({ formulario: { ...s.formulario, [clave]: v }, ultimaValidacion: null })),
+    set((s) => ({
+      formulario: {
+        ...s.formulario,
+        [clave]: v,
+        ...(clave === 'cuenta' ? { casilla: primeraCasillaLibre(s.cuentas, v) } : {})
+      },
+      ultimaValidacion: null
+    })),
 
   refrescarApis: async () => {
     set({ cargaApis: 'cargando', motivoApis: null });
@@ -909,11 +1423,28 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       return;
     }
 
+    /*
+     * Sin casilla no se sale a la red. Pasa cuando la cuenta principal elegida
+     * tiene sus veinte ocupadas: `primeraCasillaLibre` devuelve vacío en vez de
+     * proponer una que va a chocar, y el aviso dice qué hacer.
+     */
+    const casilla = Number.parseInt(formulario.casilla, 10);
+    if (!Number.isInteger(casilla) || casilla < 1 || casilla > SUBCUENTAS_POR_GRUPO) {
+      avisar(
+        'aviso',
+        'Elija una casilla',
+        `Indique en qué casilla —de 1 a ${SUBCUENTAS_POR_GRUPO}— va esta subcuenta. Si la cuenta principal ${formulario.cuenta} las tiene todas ocupadas, use otra o dé de baja una subcuenta.`,
+        'Gestión de API keys'
+      );
+      return;
+    }
+
     set({ ocupado: true });
     try {
       const resultado: ValidationResult = await panelService.registerApiKey({
         subAccountLabel: formulario.subcuenta,
         accountName: formulario.cuenta,
+        slot: casilla,
         apiKey: formulario.apiKey,
         secretKey: formulario.secretKey,
         passphrase: formulario.passphrase
@@ -924,17 +1455,46 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
         return;
       }
 
-      set({
-        formulario: FORMULARIO_VACIO,
+      /*
+       * Se vacía el formulario menos la cuenta principal, y la casilla avanza a
+       * la siguiente libre. Dar de alta veinte subcuentas seguidas es el uso
+       * real de esta pantalla, y volver a «A · casilla 1» después de cada una
+       * obligaba a reelegir las dos cosas veinte veces. Los tres secretos sí se
+       * borran: eso no se hereda de un alta a la siguiente.
+       */
+      set((s) => ({
+        formulario: {
+          ...FORMULARIO_VACIO,
+          cuenta: formulario.cuenta,
+          casilla: primeraCasillaLibre(s.cuentas, formulario.cuenta, casilla)
+        },
         ultimaValidacion: {
           etiqueta: formulario.subcuenta,
           uid: resultado.uid ?? '',
           uidPadre: resultado.parentUid ?? ''
         }
-      });
+      }));
       await refrescarApis();
-      avisar('ok', 'API key guardada', `${formulario.subcuenta} se registró en la cuenta ${formulario.cuenta}.`, 'Gestión de API keys');
-      resultado.warnings.forEach((w) => avisar('aviso', 'Revise la configuración de la cuenta', w.message, formulario.subcuenta));
+      avisar('ok', 'API key guardada', `${formulario.subcuenta} se registró en la casilla ${formulario.casilla} de la cuenta ${formulario.cuenta}.`, 'Gestión de API keys');
+      /*
+       * Lo que dice de los permisos no se puede ir solo a los cuatro segundos.
+       *
+       * Los avisos normales se cierran con un temporizador; los de tipo `error`
+       * se quedan hasta que alguien los cierra a mano. Desde que el panel
+       * acepta claves con permiso de retiro —decisión del cliente del
+       * 29/08/2026, ver src/main/bitget/verificacion.ts— «esta clave puede
+       * sacar fondos» tiene que quedarse en pantalla: es lo único que separa
+       * guardarla a sabiendas de guardarla sin enterarse.
+       */
+      resultado.warnings.forEach((w) => {
+        if (w.code === 'permiso-retiro') {
+          avisar('error', 'Esta API Key puede sacar fondos', w.message, formulario.subcuenta);
+        } else if (w.code.startsWith('permiso-')) {
+          avisar('aviso', 'Permisos de la API Key', w.message, formulario.subcuenta);
+        } else {
+          avisar('aviso', 'Revise la configuración de la cuenta', w.message, formulario.subcuenta);
+        }
+      });
     } catch (e) {
       avisar('error', 'No se pudo guardar', textoDeError(e), 'Gestión de API keys');
     } finally {
@@ -960,16 +1520,106 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     }
   },
 
-  eliminarApi: async (id) => {
-    const { apiKeys, avisar, refrescarApis } = get();
-    const fila = apiKeys.find((a) => a.id === id);
+  /*
+   * ==========================================================================
+   * La baja de una API key, en dos fases y con contraseña de paso
+   * ==========================================================================
+   * Lo pidió el cliente el 31/08/2026. Hasta entonces «Eliminar» borraba en el
+   * acto, sin preguntar nada: un clic de más en la fila equivocada —o alguien
+   * que se sienta ante un panel desbloqueado— dejaba una subcuenta fuera del
+   * sistema, y recuperarla es ir a Bitget, generar otra API Key y teclear tres
+   * claves de 64 caracteres.
+   *
+   * Es la misma clave que piden abrir y cerrar (ver `PIDE_PASO`) y por el mismo
+   * motivo: lo que no se deshace pulsando otra vez se aprueba escribiendo algo.
+   * Aquí no se comprueba con `verifyStepPassword`: la clave viaja **con** la
+   * baja y la comprueba el proceso principal, que es el único que puede
+   * garantizar que no se borra nada sin ella.
+   */
+  pedirBajaApi: async (id) => {
+    const fila = get().apiKeys.find((a) => a.id === id);
     if (!fila) return;
+
+    set({
+      bajaApi: { id, etiqueta: fila.subAccountLabel, cuenta: fila.accountName, hayPaso: true },
+      pinBaja: '',
+      errorBaja: '',
+      intentosBaja: 0
+    });
+
+    /*
+     * Si este panel no tiene contraseña de paso, el proceso principal no va a
+     * dejar borrar —`comprobarPaso` responde «no», nunca «sí»—. Se dice aquí y
+     * no después de tres intentos fallidos contra una clave que no existe.
+     *
+     * La respuesta llega después de abrir el diálogo, y por eso se comprueba que
+     * siga siendo la misma ficha: entre una cosa y otra el operador ha podido
+     * cancelar y pedir la baja de otra.
+     */
     try {
-      await panelService.deleteApiKey(id);
+      const hayPaso = await panelService.hasStepPassword();
+      const { bajaApi } = get();
+      if (hayPaso || bajaApi === null || bajaApi.id !== id) return;
+      set({
+        bajaApi: { ...bajaApi, hayPaso: false },
+        errorBaja: 'Este panel todavía no tiene contraseña de paso. Fíjela en Seguridad —la misma que pide abrir y cerrar— antes de dar de baja una API key.'
+      });
+    } catch {
+      /*
+       * No poder preguntarlo no abre la puerta: el diálogo sigue pidiendo la
+       * clave y quien decide si vale es el proceso principal.
+       */
+    }
+  },
+
+  escribirPinBaja: (v) => set({ pinBaja: v, errorBaja: '' }),
+
+  cancelarBajaApi: () => set({ bajaApi: null, pinBaja: '', errorBaja: '', intentosBaja: 0 }),
+
+  confirmarBajaApi: async () => {
+    const { bajaApi, pinBaja, intentosBaja, ocupado, avisar, refrescarApis } = get();
+    if (bajaApi === null || ocupado) return;
+
+    if (!bajaApi.hayPaso) {
+      set({ errorBaja: 'Fije la contraseña de paso en Seguridad antes de dar de baja una API key.' });
+      return;
+    }
+    /* La cadena vacía no se manda: el canal la rechazaría, y como error de red. */
+    if (pinBaja === '') {
+      set({ errorBaja: 'Escriba la contraseña de paso para dar de baja esta API key.' });
+      return;
+    }
+
+    set({ ocupado: true });
+    try {
+      const desenlace = await panelService.deleteApiKey(bajaApi.id, pinBaja);
+
+      /* Tres intentos fallidos cancelan la baja, y la credencial sigue donde estaba. */
+      if (desenlace === 'paso-incorrecto') {
+        const intentos = intentosBaja + 1;
+        if (intentos >= INTENTOS_PASO) {
+          set({ bajaApi: null, pinBaja: '', errorBaja: '', intentosBaja: 0 });
+          avisar('error', 'Baja cancelada', `Se introdujo la contraseña de paso incorrecta ${INTENTOS_PASO} veces. ${bajaApi.etiqueta} sigue registrada.`, 'Seguridad');
+          return;
+        }
+        set({ pinBaja: '', errorBaja: `Contraseña de paso incorrecta. Intento ${intentos} de ${INTENTOS_PASO}.`, intentosBaja: intentos });
+        return;
+      }
+
+      set({ bajaApi: null, pinBaja: '', errorBaja: '', intentosBaja: 0 });
       await refrescarApis();
-      avisar('aviso', 'API key eliminada', `${fila.subAccountLabel} ya no recibirá órdenes desde este panel.`, `Cuenta ${fila.accountName}`);
+
+      /* Ya no estaba: la lista de esta pantalla se había quedado vieja. */
+      if (desenlace === 'no-estaba') {
+        avisar('aviso', 'No había nada que dar de baja', `${bajaApi.etiqueta} ya no figuraba en el registro de este panel.`, `Cuenta ${bajaApi.cuenta}`);
+        return;
+      }
+      avisar('aviso', 'API key eliminada', `${bajaApi.etiqueta} ya no recibirá órdenes desde este panel.`, `Cuenta ${bajaApi.cuenta}`);
     } catch (e) {
-      avisar('error', 'No se pudo eliminar', textoDeError(e), `Cuenta ${fila.accountName}`);
+      set({ bajaApi: null, pinBaja: '', errorBaja: '', intentosBaja: 0 });
+      avisar('error', 'No se pudo eliminar', textoDeError(e), `Cuenta ${bajaApi.cuenta}`);
+    } finally {
+      set({ ocupado: false });
     }
   },
 
@@ -1059,7 +1709,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
   alternarHistSub: (subAccountId) => set((s) => ({ histSubAbierto: { ...s.histSubAbierto, [subAccountId]: !s.histSubAbierto[subAccountId] } })),
 
-  abrirDetalle: (accountId, subAccountId) => set({ detalle: { accountId, subAccountId } }),
+  abrirDetalle: (accountId, subAccountId, assetId) => set({ detalle: { accountId, subAccountId, assetId } }),
   cerrarDetalle: () => set({ detalle: null }),
 
   reintentarConexion: (accountId, subAccountId) => {
@@ -1073,11 +1723,31 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
   /* ---------------- avisos ---------------- */
 
+  /**
+   * ==========================================================================
+   * Ningún aviso se va solo. Los cierra el operador.
+   * ==========================================================================
+   * Hasta el 31/08/2026 solo los de error esperaban; los demás se iban a los
+   * 4,2 segundos. Lo pidió el cliente el 31/08/2026 y el caso que lo motivó es
+   * el alta de una credencial: guardar una API key deja en pantalla el «API key
+   * guardada» **y**, detrás, los avisos de permisos de esa clave —incluido el de
+   * que puede sacar fondos—. Cuatro segundos no dan para leer eso, y lo que se
+   * fue no se puede volver a mirar: no hay historial de avisos.
+   *
+   * Que el temporizador cubriera unos tipos y no otros era además al revés de lo
+   * razonable: el aviso amarillo -«esta clave tiene permisos de más»- importa
+   * bastante más que el azul, y era el que se llevaba el temporizador por
+   * delante. O esperan todos o no espera ninguno.
+   *
+   * La contrapartida es que la pila crece hasta que alguien la vacía, y por eso
+   * `Avisos` ofrece «Cerrar todos» en cuanto hay más de uno.
+   */
   avisar: (tipo, titulo, cuerpo, meta = '') => {
     const id = `t${++secuenciaAviso}`;
     set((s) => ({ avisos: [...s.avisos, { id, tipo, titulo, cuerpo, meta }] }));
-    if (tipo !== 'error') setTimeout(() => get().cerrarAviso(id), 4200);
   },
 
-  cerrarAviso: (id) => set((s) => ({ avisos: s.avisos.filter((a) => a.id !== id) }))
+  cerrarAviso: (id) => set((s) => ({ avisos: s.avisos.filter((a) => a.id !== id) })),
+
+  cerrarAvisos: () => set({ avisos: [] })
 }));

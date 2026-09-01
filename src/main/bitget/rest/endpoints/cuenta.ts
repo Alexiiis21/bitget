@@ -10,7 +10,6 @@ import type { z } from 'zod';
 import { z as zod } from 'zod';
 import type { ClienteBitget, RespuestaRest } from '../client';
 import type { Credencial } from '../signer';
-import { trazaApertura, trazaFallo } from '../../../debug-apertura';
 
 /* ---------- /api/v2/spot/account/info ---------- */
 
@@ -198,7 +197,7 @@ export function fijarApalancamiento(
  * el motor solo llama aqui cuando el modo **de verdad** difiere del pedido: si
  * ya coincide, no hay nada que fijar y una posicion abierta no estorba.
  */
-export async function fijarModoMargen(
+export function fijarModoMargen(
   cliente: ClienteBitget,
   credencial: Credencial,
   datos: {
@@ -208,34 +207,21 @@ export async function fijarModoMargen(
     modoMargen: 'isolated' | 'crossed';
   }
 ): Promise<RespuestaRest<ApalancamientoFijado>> {
-  const cuerpo = {
-    symbol: datos.simbolo,
-    productType: datos.productType,
-    marginCoin: datos.marginCoin,
-    marginMode: datos.modoMargen
-  };
-
-  /* DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts */
-  trazaApertura('3·cuerpo-modo-margen', cuerpo);
-
-  try {
-    const r = await cliente.peticionFirmada(
-      credencial,
-      { metodo: 'POST', ruta: '/api/v2/mix/account/set-margin-mode', cuerpo, idempotente: false },
-      esquemaApalancamientoFijado
-    );
-    trazaApertura('4·respuesta-modo-margen', {
-      simbolo: datos.simbolo,
-      modoResultante: r.datos.marginMode
-    });
-    return r;
-  } catch (e) {
-    trazaFallo('4·modo-margen-RECHAZADO', e, {
-      simbolo: datos.simbolo,
-      modoPedido: datos.modoMargen
-    });
-    throw e;
-  }
+  return cliente.peticionFirmada(
+    credencial,
+    {
+      metodo: 'POST',
+      ruta: '/api/v2/mix/account/set-margin-mode',
+      cuerpo: {
+        symbol: datos.simbolo,
+        productType: datos.productType,
+        marginCoin: datos.marginCoin,
+        marginMode: datos.modoMargen
+      },
+      idempotente: false
+    },
+    esquemaApalancamientoFijado
+  );
 }
 
 /* ---------- /api/v2/mix/account/set-margin ---------- */
@@ -259,7 +245,7 @@ export async function fijarModoMargen(
  * `amount` positivo anade; negativo retira. El panel solo anade: retirar margen
  * acerca la liquidacion y no esta en el alcance contratado.
  */
-export async function ajustarMargen(
+export function ajustarMargen(
   cliente: ClienteBitget,
   credencial: Credencial,
   datos: {
@@ -270,40 +256,22 @@ export async function ajustarMargen(
     lado: 'long' | 'short';
   }
 ): Promise<RespuestaRest<unknown>> {
-  const cuerpo = {
-    symbol: datos.simbolo,
-    productType: datos.productType,
-    marginCoin: datos.marginCoin,
-    amount: datos.cantidad,
-    holdSide: datos.lado
-  };
-
-  /*
-   * DEPURACIÓN TEMPORAL · ver src/main/debug-apertura.ts
-   *
-   * Esta es la unica peticion del panel **sin `clientOid`**, asi que dos envios
-   * accidentales anaden el margen dos veces y nada lo impide. Trazarla es la
-   * unica forma de contar cuantas veces sale y desde donde -de ahi salio el
-   * diagnostico del margen duplicado del 26/08/2026-.
-   */
-  trazaApertura('3·cuerpo-margen', cuerpo);
-
-  try {
-    const r = await cliente.peticionFirmada(
-      credencial,
-      { metodo: 'POST', ruta: '/api/v2/mix/account/set-margin', cuerpo, idempotente: false },
-      zod.unknown()
-    );
-    trazaApertura('4·respuesta-margen', {
-      simbolo: datos.simbolo,
-      lado: datos.lado,
-      cantidad: datos.cantidad
-    });
-    return r;
-  } catch (e) {
-    trazaFallo('4·margen-RECHAZADO', e, { lado: datos.lado, cantidad: datos.cantidad });
-    throw e;
-  }
+  return cliente.peticionFirmada(
+    credencial,
+    {
+      metodo: 'POST',
+      ruta: '/api/v2/mix/account/set-margin',
+      cuerpo: {
+        symbol: datos.simbolo,
+        productType: datos.productType,
+        marginCoin: datos.marginCoin,
+        amount: datos.cantidad,
+        holdSide: datos.lado
+      },
+      idempotente: false
+    },
+    zod.unknown()
+  );
 }
 
 export function obtenerCuentaSimbolo(

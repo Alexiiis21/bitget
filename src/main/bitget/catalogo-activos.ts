@@ -5,10 +5,15 @@
  * Por que existe, si `simbolos.ts` ya trae los contratos
  * --------------------------------------------------------------------------
  * `obtenerContratos` devuelve los 754 contratos del exchange, con veinte campos
- * cada uno. La pantalla necesita otra cosa: los cinco que el cliente opera, en
+ * cada uno. La pantalla necesita otra cosa: los ocho que el cliente opera, en
  * su orden, con el nombre corto que reconoce y con los dos numeros que cambian
  * lo que puede escribir en el formulario -cuantos decimales tiene el precio y
  * hasta que apalancamiento llega ese activo-.
+ *
+ * Desde el 28/08/2026 hay una segunda vista de lo mismo, `catalogoCompleto`, que
+ * si devuelve los 754. No es una contradiccion: alimenta el **buscador** con el
+ * que el operador decide que activo va en cada casilla, y nada de lo que sale de
+ * ahi se puede operar hasta que ocupa una de las ocho.
  *
  * Esa traduccion vive aqui y no en el renderer por la regla del proyecto: el
  * renderer no habla con la red, y tampoco decide que se puede operar.
@@ -57,39 +62,78 @@ function nombreCorto(mercado: Mercado, contrato: Contrato): string {
   return base.slice(mercado.prefijoSimbolo.length);
 }
 
+/** Un contrato de Bitget, traducido a lo que la pantalla necesita. */
+function aActivo(mercado: Mercado, contrato: Contrato): ActivoOperable {
+  const corto = nombreCorto(mercado, contrato);
+  return {
+    id: corto,
+    simbolo: contrato.symbol,
+    etiqueta: `${corto}/${contrato.quoteCoin}`,
+    decimalesPrecio: Number(contrato.pricePlace),
+    apalancamientoMax: Number(contrato.maxLever),
+    apalancamientoMin: Number(contrato.minLever),
+    nocionalMinimo: contrato.minTradeUSDT,
+    operable: contrato.symbolStatus === 'normal'
+  };
+}
+
 /**
- * Los activos operables del mercado, en el orden declarado.
+ * Las casillas del selector, resueltas contra el catalogo y **con sus huecos**.
  *
- * Un simbolo que el exchange no devuelva **no se inventa**: se omite. Es
- * preferible un selector con cuatro activos a uno con cinco donde el quinto
- * falla al planificar, porque el segundo lo descubre el operador con la
+ * `ranuras` son los simbolos que el operador tiene puestos, en su orden; por
+ * defecto, la lista de fabrica del mercado. Desde el 28/08/2026 quien las decide
+ * es el operador y llegan de `activos.json` -ver `ranuras-activos.ts`-, pero el
+ * criterio no cambio: es una lista corta y explicita, no «todo lo que devuelva
+ * Bitget».
+ *
+ * La posicion se conserva: la casilla 3 vacia sale como `null` y no desaparece.
+ * La pantalla las dibuja numeradas y el operador las edita por su numero, asi
+ * que perder los huecos por el camino renumeraria las casillas cada vez que se
+ * vacia una.
+ *
+ * Un simbolo que el exchange no devuelva **no se inventa**: su casilla sale
+ * vacia. Es preferible un selector con cuatro activos a uno con cinco donde el
+ * quinto falla al planificar, porque el segundo lo descubre el operador con la
  * operacion ya empezada.
  */
-export async function catalogoActivos(
+export async function activosDeRanuras(
+  cliente: ClienteBitget,
+  mercado: Mercado,
+  ranuras: readonly (string | null)[] = mercado.simbolos
+): Promise<(ActivoOperable | null)[]> {
+  const contratos = await porSimboloDe(cliente, mercado);
+
+  return ranuras.map((simbolo) => {
+    if (simbolo === null) return null;
+    const contrato = contratos.get(simbolo);
+    return contrato === undefined ? null : aActivo(mercado, contrato);
+  });
+}
+
+/**
+ * Todo lo que el mercado ofrece, para el buscador.
+ *
+ * Son los 754 contratos del exchange, y solo se usan para **elegir** que va en
+ * cada casilla: nunca para operar. Van ordenados por nombre corto porque el
+ * orden en que Bitget los devuelve no significa nada para quien busca.
+ */
+export async function catalogoCompleto(
   cliente: ClienteBitget,
   mercado: Mercado
 ): Promise<ActivoOperable[]> {
   const r = await obtenerContratos(cliente, mercado);
-  const porSimbolo = new Map(r.datos.map((c) => [c.symbol, c]));
+  return r.datos
+    .map((contrato) => aActivo(mercado, contrato))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
 
-  const activos: ActivoOperable[] = [];
-  for (const simbolo of mercado.simbolos) {
-    const contrato = porSimbolo.get(simbolo);
-    if (contrato === undefined) continue;
-
-    const corto = nombreCorto(mercado, contrato);
-    activos.push({
-      id: corto,
-      simbolo,
-      etiqueta: `${corto}/${contrato.quoteCoin}`,
-      decimalesPrecio: Number(contrato.pricePlace),
-      apalancamientoMax: Number(contrato.maxLever),
-      apalancamientoMin: Number(contrato.minLever),
-      nocionalMinimo: contrato.minTradeUSDT,
-      operable: contrato.symbolStatus === 'normal'
-    });
-  }
-  return activos;
+/** Los contratos del mercado, indexados por simbolo. */
+async function porSimboloDe(
+  cliente: ClienteBitget,
+  mercado: Mercado
+): Promise<Map<string, Contrato>> {
+  const r = await obtenerContratos(cliente, mercado);
+  return new Map(r.datos.map((c) => [c.symbol, c]));
 }
 
 /**

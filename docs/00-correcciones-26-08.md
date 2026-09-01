@@ -150,6 +150,32 @@ ediciones —una liquida la posición y la otra retira una protección, que es l
 el 18 de agosto—. El apalancamiento tampoco: no viaja en ninguna orden, es configuración de la
 cuenta que se deja puesta **antes** de operar.
 
+> **Nota del 01/09/2026 · esta sección ya no describe el panel de hoy.**
+>
+> Las cuatro rutas de la tabla volvieron. El cliente necesita corregir lo que ya está abierto —una
+> posición que quedó sin Take Profit, otra a la que hay que darle o quitarle colchón—, y cerrar para
+> reabrir cuesta la diferencia de precio en cada casilla. La regla del recuadro deja de valer: hoy
+> se puede **poner y quitar** Take Profit y **agregar y quitar** margen sobre una posición abierta.
+>
+> Lo que sigue valiendo es el diagnóstico. Volvieron con lo que faltaba entonces, que es lo que
+> impide que el 26 de agosto se repita:
+>
+> - **Campos separados.** Los importes que salen con la apertura y los del ajuste posterior se
+>   teclean en casillas distintas, en dos secciones distintas de la barra. El valor escrito para
+>   abrir ya no está en el campo desde el que se pulsa el botón suelto —que es exactamente cómo
+>   ocurrió—.
+> - **Poner Take Profit sustituye.** El plan lee el que hay puesto, lo cancela y coloca el nuevo. Una
+>   posición nunca acaba con dos órdenes de cierre.
+> - **El margen se planifica contra Bitget.** La confirmación enseña `margen actual → resultante`,
+>   con el actual leído en ese momento. Un importe aplicado dos veces se ve **antes** de enviarlo, y
+>   no después en el saldo.
+> - **El sentido lo decide el botón**, no un signo tecleado: *Agregar* y *Quitar* comparten campo, y
+>   un `-5` se rechaza en vez de interpretarse.
+>
+> Lo único que **no** vuelve es *Aplicar todo* y el botón *Reintentar margen* del aviso CRÍTICO: los
+> dos aplicaban de una pulsación, sin la confirmación por medio, y esa confirmación es justamente lo
+> que hace visible la repetición. Ver `PlanKind` y `docs/00-fase-4-pantalla.md` § 2.
+
 **Lo que esto cuesta**, dicho claro: si una posición queda abierta sin su Take Profit o sin su
 margen —porque el envío falló después de abrir—, el panel ya no puede arreglarlo. Hay que
 ponérselo en Bitget, o cerrar y volver a abrir. Los mensajes del informe lo dicen así. Es el precio

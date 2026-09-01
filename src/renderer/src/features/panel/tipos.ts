@@ -26,17 +26,47 @@ export interface Aviso {
   meta: string;
 }
 
-/** Lo que el operador teclea en la barra lateral: los cuatro campos. */
+/**
+ * Lo que el operador teclea en la barra lateral.
+ *
+ * --------------------------------------------------------------------------
+ * Los importes de abrir y los de ajustar son campos distintos
+ * --------------------------------------------------------------------------
+ * `tp` y `mga` salen **con la orden** al pulsar «Abrir»; `tpAjuste` y
+ * `mgAjuste` se aplican **después**, sobre una posición que ya está abierta.
+ * Podrían haber sido dos campos en lugar de cuatro, y lo fueron: el 26/08/2026
+ * una posición acabó con 2 USDT de margen donde el operador había escrito 1,
+ * porque el importe salió con la apertura y el valor se quedó escrito en el
+ * mismo campo desde el que se pulsaba el botón suelto.
+ *
+ * Separarlos es lo que hace que ese descuido ya no exista: el número que se
+ * teclea para abrir no está en la casilla desde la que se ajusta lo abierto.
+ * Ver `PlanKind`.
+ */
 export interface ValoresHerramientas {
+  /** Take Profit que sale con la apertura, en %. */
   tp: string;
   mgi: string;
+  /** Margen adicional que sale con la apertura. */
   mga: string;
   ap: string;
+  /** Take Profit que se pone sobre posiciones ya abiertas, en %. */
+  tpAjuste: string;
+  /** Margen que se agrega o se retira de posiciones ya abiertas. Sin signo. */
+  mgAjuste: string;
 }
 
+/**
+ * El formulario de alta, tal como se teclea.
+ *
+ * `cuenta` y `casilla` son cadenas porque salen de un `<select>`, no porque sean
+ * texto libre: la cuenta principal es una de las quince fijas —de la A a la O— y
+ * la casilla, un número de 1 a 20. Los dos se convierten al enviarse.
+ */
 export interface FormularioApiKey {
   subcuenta: string;
   cuenta: string;
+  casilla: string;
   apiKey: string;
   secretKey: string;
   passphrase: string;
