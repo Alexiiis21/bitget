@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react';
 import { ANCHO_MINIMO_MONITOR, FUENTE, REALCE, REJILLA_MONITOR, T, TIPO_MONITOR } from '@/lib/tokens';
-import { cifra, cifraConSigno, restar } from '@/lib/formato';
+import { cifra, cifraConSigno, porcentajeConSigno, restar } from '@/lib/formato';
 import { useAncho } from '@/lib/medidas';
 import { usarPanel } from '@/store/panel';
 import { distintivosDe } from './distintivos';
@@ -29,7 +29,7 @@ import type { Account, Position, Side } from '@shared/domain/panel-view';
  * --------------------------------------------------------------------------
  * Dos disposiciones, y por qué no basta con una
  * --------------------------------------------------------------------------
- * Las trece columnas piden `ANCHO_MINIMO_MONITOR` para caber. En un monitor
+ * Las diecisiete columnas piden `ANCHO_MINIMO_MONITOR` para caber. En un monitor
  * grande sobra sitio; en una laptop no, y hasta el 31/08/2026 lo que pasaba era
  * lo peor de los dos mundos: la tabla se salía del contenedor, que la recorta
  * sin barra de desplazamiento, y **el bloque SHORT entero desaparecía de la
@@ -197,10 +197,14 @@ function CabeceraAncha() {
         <div style={{ textAlign: 'right', color: T.largo }}>LONG</div>
         <div />
         <div />
+        <div />
+        <div />
         <div style={{ textAlign: 'center', color: T.largo, padding: '0 6px' }}>ESTADO LONG</div>
         <div style={{ textAlign: 'center', fontWeight: 800, color: T.texto, padding: '0 2px', whiteSpace: 'nowrap' }}>DIST. L/S</div>
         <div />
         <div style={{ textAlign: 'right', color: T.corto }}>SHORT</div>
+        <div />
+        <div />
         <div />
         <div />
         <div style={{ textAlign: 'center', color: T.corto, padding: '0 6px' }}>ESTADO SHORT</div>
@@ -212,12 +216,16 @@ function CabeceraAncha() {
         <div style={{ textAlign: 'right' }}>Entrada</div>
         <div style={{ textAlign: 'right', fontWeight: 600 }}>M. inicial</div>
         <div style={{ textAlign: 'right' }}>Take Profit</div>
+        <div style={{ textAlign: 'right', fontWeight: 600 }}>P&amp;L</div>
+        <div style={{ textAlign: 'right', fontWeight: 600 }}>ROE</div>
         <div />
         <div />
         <div style={{ textAlign: 'right' }}>Liquidación</div>
         <div style={{ textAlign: 'right' }}>Entrada</div>
         <div style={{ textAlign: 'right', fontWeight: 600 }}>M. inicial</div>
         <div style={{ textAlign: 'right' }}>Take Profit</div>
+        <div style={{ textAlign: 'right', fontWeight: 600 }}>P&amp;L</div>
+        <div style={{ textAlign: 'right', fontWeight: 600 }}>ROE</div>
         <div />
       </div>
     </>
@@ -240,12 +248,16 @@ function FilaAncha({ fila, alAbrir }: { fila: Pintada; alAbrir: () => void }) {
       <Cifra valor={cifra(long?.entryPrice)} destacada={destacadaLong} lado="long" />
       <Cifra valor={cifra(long?.initialMarginAccum)} peso={600} titulo={TITULO_MARGEN} />
       <Cifra valor={cifra(long?.takeProfitPrice)} color={T.largo} peso={500} />
+      <Cifra valor={cifraConSigno(long?.pnl)} color={colorGanancia(long?.pnl)} peso={600} titulo={TITULO_PNL} />
+      <Cifra valor={porcentajeConSigno(long?.roe)} color={colorGanancia(long?.roe)} peso={600} titulo={TITULO_ROE} />
       <Distintivos posicion={long} etiquetaLado="Long" />
       <div style={{ textAlign: 'center', fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.destacado, fontWeight: 700, color: T.texto }}>{cifraConSigno(distancia)}</div>
       <Cifra valor={cifra(short?.liquidationPrice)} />
       <Cifra valor={cifra(short?.entryPrice)} destacada={destacadaShort} lado="short" />
       <Cifra valor={cifra(short?.initialMarginAccum)} peso={600} titulo={TITULO_MARGEN} />
       <Cifra valor={cifra(short?.takeProfitPrice)} color={T.corto} peso={500} />
+      <Cifra valor={cifraConSigno(short?.pnl)} color={colorGanancia(short?.pnl)} peso={600} titulo={TITULO_PNL} />
+      <Cifra valor={porcentajeConSigno(short?.roe)} color={colorGanancia(short?.roe)} peso={600} titulo={TITULO_ROE} />
       <Distintivos posicion={short} etiquetaLado="Short" />
     </div>
   );
@@ -267,7 +279,7 @@ function FilaAncha({ fila, alAbrir }: { fila: Pintada; alAbrir: () => void }) {
  */
 const rejillaPartida: CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: 'minmax(0,64px) repeat(4,minmax(0,152px)) minmax(0,auto)',
+  gridTemplateColumns: 'minmax(0,64px) repeat(6,minmax(0,152px)) minmax(0,auto)',
   justifyContent: 'start',
   gap: 12,
   alignItems: 'center',
@@ -312,6 +324,8 @@ function PuntaPartida({ lado, posicion, destacada }: { lado: Side; posicion: Pos
       <Dato rotulo="Entrada" valor={cifra(posicion?.entryPrice)} destacada={destacada} lado={lado} />
       <Dato rotulo="M. inicial" valor={cifra(posicion?.initialMarginAccum)} peso={600} titulo={TITULO_MARGEN} />
       <Dato rotulo="Take Profit" valor={cifra(posicion?.takeProfitPrice)} color={color} peso={500} />
+      <Dato rotulo="P&L" valor={cifraConSigno(posicion?.pnl)} color={colorGanancia(posicion?.pnl)} peso={600} titulo={TITULO_PNL} />
+      <Dato rotulo="ROE" valor={porcentajeConSigno(posicion?.roe)} color={colorGanancia(posicion?.roe)} peso={600} titulo={TITULO_ROE} />
       <Distintivos posicion={posicion} etiquetaLado={lado === 'long' ? 'Long' : 'Short'} />
     </div>
   );
@@ -407,6 +421,22 @@ function Cifra({
 const TITULO_MARGEN =
   'Margen inicial acumulado: apertura + reposicionamientos. ' +
   'Un guion significa que la posición ya estaba abierta cuando arrancó el panel.';
+
+const TITULO_PNL = 'Ganancia o pérdida no realizada, tal como la informa Bitget.';
+const TITULO_ROE =
+  'Retorno sobre el margen actual: P&L ÷ margen × 100. Bitget no lo informa, lo calcula el panel.';
+
+/**
+ * Verde en ganancia, rojo en pérdida — por el signo del valor, no por el lado
+ * de la posición. Un short en pérdidas tiene que leerse en rojo aunque su
+ * distintivo LONG/SHORT sea otro color; es la misma cifra que en cualquier
+ * exchange, y leerla al revés es peor que no pintarla.
+ */
+function colorGanancia(valor: string | number | null | undefined): string {
+  const n = typeof valor === 'number' ? valor : valor === null || valor === undefined || valor === '' ? null : Number.parseFloat(valor);
+  if (n === null || !Number.isFinite(n) || n === 0) return T.texto2;
+  return n > 0 ? T.largo : T.corto;
+}
 
 function Distintivos({ posicion, etiquetaLado }: { posicion: Position | undefined; etiquetaLado: string }) {
   const lista = distintivosDe(posicion, etiquetaLado);

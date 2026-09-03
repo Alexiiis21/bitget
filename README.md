@@ -130,7 +130,8 @@ filtró lógica hacia el renderer.
 | [`docs/00-validacion-fase-5.md`](docs/00-validacion-fase-5.md) | Fase 5: el guion con el que el cliente valida, punto por punto |
 | [`docs/00-resumen-para-daniel.md`](docs/00-resumen-para-daniel.md) | Resumen para el cliente: lo que dijo y cómo quedó |
 | [`docs/cliente/entrega-mercado-real.md`](docs/cliente/entrega-mercado-real.md) | Los dos binarios del cliente, cómo se generan y cómo se distinguen |
-| [`docs/cotizacion-traspasos-entre-subcuentas.md`](docs/cotizacion-traspasos-entre-subcuentas.md) | Propuesta y estimación: traspaso de saldo entre subcuentas |
+| [`docs/cotizacion-traspasos-entre-subcuentas.md`](docs/cotizacion-traspasos-entre-subcuentas.md) | Propuesta inicial: traspaso de saldo entre subcuentas, con las preguntas y pruebas contra la API |
+| [`docs/presupuesto-traspaso-subcuentas.md`](docs/presupuesto-traspaso-subcuentas.md) | Presupuesto formal por fases de la misma función — el que rige — y su cruce con lo ya cambiado en `verificacion.ts` |
 | [`docs/01-stack-tecnologico.md`](docs/01-stack-tecnologico.md) | Stack, hallazgos sobre la API de Bitget, pool de sockets, cola de ejecución |
 | [`docs/02-arquitectura.html`](docs/02-arquitectura.html) | Arquitectura técnica, flujo de una operación, estados de un lote |
 | [`docs/03-modelo-de-datos.md`](docs/03-modelo-de-datos.md) | Esquema de cada archivo, cifrado, órdenes indeterminadas |

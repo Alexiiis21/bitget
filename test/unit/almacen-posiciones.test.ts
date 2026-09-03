@@ -20,6 +20,7 @@ const posicion = (parcial: Partial<Posicion> & Pick<Posicion, 'cuentaId' | 'simb
   apalancamiento: 20,
   modoMargen: 'aislado',
   margen: '100',
+  pnl: '0',
   takeProfit: null,
   origen: 'rest',
   actualizadoEn: '2026-08-27T10:00:00.000Z',

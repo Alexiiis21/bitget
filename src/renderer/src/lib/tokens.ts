@@ -185,7 +185,7 @@ export const DISTINTIVO_API = {
  * abiertos, y sin esta columna las dos filas serían indistinguibles.
  */
 export const REJILLA_MONITOR =
-  'minmax(160px,1fr) minmax(0,58px) repeat(4,minmax(0,100px)) minmax(0,1.34fr) minmax(0,1.05fr) repeat(4,minmax(0,100px)) minmax(0,1.34fr)';
+  'minmax(160px,1fr) minmax(0,58px) repeat(6,minmax(0,100px)) minmax(0,1.34fr) minmax(0,1.05fr) repeat(6,minmax(0,100px)) minmax(0,1.34fr)';
 /**
  * Ancho a partir del cual las dos puntas caben una al lado de la otra.
  *
@@ -193,8 +193,11 @@ export const REJILLA_MONITOR =
  * por debajo, el monitor no encoge la tabla —encogerla es lo que dejaba el
  * SHORT fuera de la pantalla, recortado y sin barra de desplazamiento— sino que
  * parte cada fila en dos, con el SHORT debajo del LONG. Ver `AccordeonMonitor`.
+ *
+ * Subió con la incorporación de P&L y ROE el 03/09/2026: dos columnas más por
+ * lado, a `minmax(0,100px)` cada una, como el resto de cifras.
  */
-export const ANCHO_MINIMO_MONITOR = 1620;
+export const ANCHO_MINIMO_MONITOR = 2020;
 
 /**
  * Escala tipográfica del Centro de Monitoreo.

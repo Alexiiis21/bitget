@@ -22,7 +22,8 @@ import type {
   ResultadoVault
 } from '@shared/ipc-contract';
 import { PLAN_VIGENCIA_MS } from '@shared/constants';
-import type { Cuenta, EstadoConexion, Job, Lado, Lote, PosicionMonitor } from '@shared/types';
+import type { Cuenta, Decimal as Cantidad, EstadoConexion, Job, Lado, Lote, PosicionMonitor } from '@shared/types';
+import Decimal from 'decimal.js';
 import { ErrorBitget } from '../bitget/errors';
 import type { ModoMargenApi } from '../bitget/rest/endpoints/ordenes';
 import { MERCADOS, type ClaveMercado } from '../bitget/mercado';
@@ -154,6 +155,19 @@ const mensajeMargen = (estado: Job['estado']): string =>
  * haya vuelto, y una cuenta caida hace irrelevante que estuviera en modo REST.
  * Se resuelve de lo mas grave a lo menos.
  */
+/**
+ * Retorno sobre el margen actual, en %. Ver `PosicionMonitor.roe`.
+ *
+ * `null` sin P&L conocido -cadena vacia, Bitget no lo mando- o con un margen
+ * que no sirve de divisor: cero, negativo o tambien desconocido.
+ */
+function roeDe(pnl: Cantidad, margenActual: Cantidad): number | null {
+  if (pnl === '') return null;
+  const margen = new Decimal(margenActual || '0');
+  if (!margen.isFinite() || margen.lessThanOrEqualTo(0)) return null;
+  return new Decimal(pnl).dividedBy(margen).times(100).toNumber();
+}
+
 function estadoDePunta(
   estadoPosicion: 'viva' | 'indeterminada',
   estadoConexion: EstadoConexion,
@@ -728,6 +742,8 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         margenInicial: viva.aporte?.margenInicial ?? null,
         margenAdicional: viva.aporte?.margenAdicional ?? null,
         margenActual: viva.margen,
+        pnl: viva.pnl,
+        roe: roeDe(viva.pnl, viva.margen),
         apalancamiento: viva.apalancamiento,
         tamano: viva.tamano,
         origen: viva.origen,

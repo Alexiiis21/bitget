@@ -32,6 +32,13 @@ export function cifraConSigno(v: Decimal | number | null | undefined, decimales 
   return (n > 0 ? '+' : '') + cifra(n, decimales);
 }
 
+/** Un porcentaje con signo explícito, para el ROE: «+35,00 %» / «−12,40 %». */
+export function porcentajeConSigno(v: number | null | undefined, decimales = 2): string {
+  const n = aNumero(v);
+  if (n === null) return '—';
+  return `${cifraConSigno(n, decimales)} %`;
+}
+
 /** «1 casilla» / «34 casillas». Evita el «1 casillas» que delata una plantilla. */
 export function casillas(n: number): string {
   return `${n} ${n === 1 ? 'casilla' : 'casillas'}`;

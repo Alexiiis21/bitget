@@ -89,6 +89,7 @@ export function posicionesDeEmpujon(
       apalancamiento: Number(p.leverage ?? 0),
       modoMargen: p.marginMode === 'crossed' ? 'cruzado' : 'aislado',
       margen: p.marginSize ?? '',
+      pnl: p.unrealizedPL ?? '',
       takeProfit: null,
       origen: 'ws',
       actualizadoEn: instante,

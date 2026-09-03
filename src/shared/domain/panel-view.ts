@@ -117,6 +117,18 @@ export interface Position {
    * verdad, y empieza a contar desde el primer lote de esta sesión.
    */
   initialMarginAccum: Decimal | null;
+  /**
+   * Ganancia o pérdida no realizada, tal como la informa Bitget. Cadena vacía
+   * si el exchange no la mandó en la última lectura.
+   */
+  pnl: Decimal;
+  /**
+   * Retorno sobre el margen actual, en %. Bitget no lo informa: lo calcula el
+   * proceso principal contra el margen que el exchange tiene ahora mismo, no
+   * contra `initialMarginAccum` -que puede ser `null`-. `null` sin P&L
+   * conocido o sin margen contra el que dividir.
+   */
+  roe: number | null;
   leverage: number;
   actions: ActionState;
   /**

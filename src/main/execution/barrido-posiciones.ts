@@ -161,6 +161,7 @@ function aPosicionDominio(cuentaId: string, cruda: PosicionBitget, instante: str
     apalancamiento: Number(cruda.leverage ?? 0),
     modoMargen: modoMargenDe(cruda.marginMode),
     margen: cruda.marginSize ?? '',
+    pnl: cruda.unrealizedPL ?? '',
     takeProfit: null,
     origen: 'rest',
     actualizadoEn: instante,

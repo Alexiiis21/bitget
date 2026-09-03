@@ -108,6 +108,8 @@ const aPosicion = (p: PosicionMonitor): Position => ({
   liquidationPrice: p.liquidacion,
   takeProfitPrice: p.takeProfit,
   initialMarginAccum: p.margenInicial,
+  pnl: p.pnl,
+  roe: p.roe,
   leverage: p.apalancamiento,
   actions: {
     /* Si llega hasta aquí, está abierta: es lo que significa estar viva. */

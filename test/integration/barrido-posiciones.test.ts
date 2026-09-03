@@ -160,6 +160,7 @@ describe('lectura de una cuenta', () => {
     expect(vivas).toHaveLength(2);
     expect(vivas[0]?.precioEntrada).toBe('63200.5');
     expect(vivas[0]?.precioLiquidacion).toBe('57000.1');
+    expect(vivas[0]?.pnl).toBe('2.5');
     expect(vivas[0]?.origen).toBe('rest');
   });
 

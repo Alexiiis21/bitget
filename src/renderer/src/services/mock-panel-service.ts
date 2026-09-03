@@ -243,7 +243,13 @@ export class MockPanelService implements PanelService {
     conError: boolean,
     sinMargenAdicional: boolean
   ): void {
-    const base = 1 + (azar() - 0.5) / 25;
+    /*
+     * Anclada al precio real del activo -no a un «alrededor de 1» suelto-
+     * porque desde que el P&L se deriva contra `this.precios`, una entrada
+     * fuera de escala se traduce en una ganancia de varios millones sobre 150
+     * USDT de margen. Antes no se notaba: nada comparaba esta cifra con nada.
+     */
+    const base = (PRECIO_BASE.BTC ?? 1) * (1 + (azar() - 0.5) / 25);
     const dir = side === 'long' ? 1 : -1;
     const entrada = base;
     const liquidacion = base * (1 - dir * 0.061);
@@ -268,6 +274,9 @@ export class MockPanelService implements PanelService {
       liquidationPrice: dec(liquidacion, 6),
       takeProfitPrice: takeProfit === null ? null : dec(takeProfit, 6),
       initialMarginAccum: dec(100 + Math.floor(azar() * 3) * 50, 2),
+      /* `recalcularPnl` los sustituye antes de la primera publicación. */
+      pnl: '0',
+      roe: null,
       leverage: 10,
       actions: acciones,
       marginCritical: sinMargenAdicional,
@@ -417,6 +426,8 @@ export class MockPanelService implements PanelService {
           this.precios[activo.id] = (this.precios[activo.id] ?? base) + deriva;
         }
         this.publicarPrecios();
+        /* El P&L y el ROE se mueven con el precio, igual que en Bitget. */
+        this.publicarPosiciones();
       }, 2_000);
     }
 
@@ -473,6 +484,7 @@ export class MockPanelService implements PanelService {
 
   subscribePositions(cb: (snapshot: PositionSnapshot) => void): Unsubscribe {
     this.oyentesPosiciones.add(cb);
+    this.recalcularPnl();
     cb({ positions: [...this.posiciones.values()] });
     return () => {
       this.oyentesPosiciones.delete(cb);
@@ -480,8 +492,39 @@ export class MockPanelService implements PanelService {
   }
 
   private publicarPosiciones(): void {
+    this.recalcularPnl();
     const instantanea: PositionSnapshot = { positions: [...this.posiciones.values()] };
     for (const cb of this.oyentesPosiciones) cb(instantanea);
+  }
+
+  /**
+   * P&L y ROE de cada posición viva, contra el precio simulado de ahora.
+   *
+   * En Bitget el P&L no lo calcula el panel: lo informa el propio exchange
+   * (`unrealizedPL`) en cada lectura. Aquí no hay exchange, así que se deriva
+   * del precio simulado con la misma fórmula que usa `cerrar` al liquidar una
+   * posición -precio actual menos entrada, sobre el tamaño que ese margen y
+   * ese apalancamiento sostienen-, para que abrir y cerrar cuenten la misma
+   * historia. El ROE sí es cálculo del panel también contra Bitget real: no
+   * hay campo `roe` en la API, y aquí se deriva igual, contra el margen
+   * inicial que es el único que existe en esta demostración.
+   */
+  private recalcularPnl(): void {
+    for (const [clave, p] of this.posiciones) {
+      const entrada = Number.parseFloat(p.entryPrice);
+      const margen = Number.parseFloat(p.initialMarginAccum ?? '0');
+      const actual = this.precios[p.assetId] ?? entrada;
+
+      if (!Number.isFinite(entrada) || entrada <= 0 || !Number.isFinite(margen) || margen <= 0) {
+        this.posiciones.set(clave, { ...p, pnl: '', roe: null });
+        continue;
+      }
+
+      const dir = p.side === 'long' ? 1 : -1;
+      const pnl = dir * (actual - entrada) * ((margen * p.leverage) / entrada);
+      const roe = (pnl / margen) * 100;
+      this.posiciones.set(clave, { ...p, pnl: dec(pnl, 2), roe: Number(roe.toFixed(2)) });
+    }
   }
 
   /* ---------------- escritura ---------------- */
@@ -549,6 +592,9 @@ export class MockPanelService implements PanelService {
         liquidationPrice: dec(precio * (1 - dir * 0.061), 6),
         takeProfitPrice: tp,
         initialMarginAccum: req.initialMargin,
+        /* `recalcularPnl` los sustituye antes de la primera publicación. */
+        pnl: '0',
+        roe: null,
         leverage: 10,
         actions: {
           ...accionesVacias(),

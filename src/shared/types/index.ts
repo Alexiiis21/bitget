@@ -107,6 +107,12 @@ export interface Posicion {
   apalancamiento: number;
   modoMargen: ModoMargen;
   margen: Decimal;
+  /**
+   * Ganancia o perdida no realizada de la punta, tal como la informa Bitget
+   * (`unrealizedPL`). Cadena vacia si el exchange no la mando en esta lectura,
+   * igual que `precioEntrada` o `margen`: no es un dato que el panel calcule.
+   */
+  pnl: Decimal;
   /** Llega por el canal orders-algo, no por positions: puede faltar un instante. */
   takeProfit: TakeProfit | null;
   origen: 'ws' | 'rest';
@@ -171,6 +177,19 @@ export interface PosicionMonitor {
   margenAdicional: Decimal | null;
   /** Margen que la posicion tiene ahora segun Bitget. */
   margenActual: Decimal;
+  /** Ganancia o perdida no realizada, tal como la informa Bitget. Cadena vacia si no llego. */
+  pnl: Decimal;
+  /**
+   * Retorno sobre el margen actual, en porcentaje: `pnl / margenActual * 100`.
+   *
+   * Bitget no manda este numero -a diferencia del P&L, no hay campo `roe` en
+   * `all-position` ni en el canal `positions`-, asi que lo deriva el proceso
+   * principal contra el margen que el exchange informa ahora mismo, no contra
+   * `margenInicial`: ese es del panel y sale `null` en una posicion que ya
+   * estaba abierta al arrancar, y el ROE tiene que poder leerse en cualquier
+   * posicion viva. `null` sin P&L conocido o con margen cero o desconocido.
+   */
+  roe: number | null;
   apalancamiento: number;
   tamano: Decimal;
   /** De donde salio el ultimo dato. Distingue lo instantaneo de lo de hace 45 s. */
