@@ -560,6 +560,107 @@ describe('formato de version 2', () => {
   });
 });
 
+describe('formato de version 3 — antes de la convivencia con UTA', () => {
+  /*
+   * ==========================================================================
+   * Por que `classic` y no «desconocido»
+   * ==========================================================================
+   * Los archivos de version 3 no traen `accountMode`, porque se escribieron
+   * cuando UTA no existia y **todas** las cuentas eran clasicas. Cargarlas como
+   * clasicas no es una suposicion optimista: es un hecho sobre cuando se
+   * escribio el archivo.
+   *
+   * Lo que si seria peligroso es lo contrario. Una cuenta cargada como `uta` por
+   * defecto enrutaria sus peticiones a `/api/v3/*`, donde no la conocen, y el
+   * operador veria cien cuentas caidas tras actualizar el panel.
+   */
+  const cuentaV3 = {
+    id: 'c1',
+    grupoId: 'g1',
+    etiqueta: 'Sub-01',
+    uid: '5476143713',
+    uidPadre: '1513226215',
+    credencialId: 'cred_c1',
+    apiKeyEnmascarada: 'bg••••4f2a',
+    slot: 1,
+    activa: true,
+    modoPosicion: 'cobertura',
+    modoMargen: 'aislado',
+    altaEn: '2026-08-01T00:00:00.000Z'
+  };
+
+  const escribirV3 = async (): Promise<void> => {
+    await writeFile(
+      ruta,
+      JSON.stringify({
+        version: 3,
+        grupos: [{ id: 'g1', nombre: 'A', orden: 0, colapsado: false }],
+        cuentas: [cuentaV3]
+      }),
+      'utf8'
+    );
+  };
+
+  it('carga sin `accountMode` y la deja clasica, con holdMode sin saber', async () => {
+    await escribirV3();
+
+    const registro = await RegistroCuentas.cargar(ruta);
+    const cuenta = registro.listarCuentas()[0];
+
+    expect(cuenta?.accountMode).toBe('classic');
+    /* `null` es «no se ha leido». Solo lo informa V3. */
+    expect(cuenta?.holdMode).toBeNull();
+    /* Y no se pierde nada de lo que ya traia. */
+    expect(cuenta?.uidPadre).toBe('1513226215');
+  });
+
+  it('al guardar reescribe en version 4, sin conversion por las bravas', async () => {
+    await escribirV3();
+
+    const registro = await RegistroCuentas.cargar(ruta);
+    await registro.guardar();
+
+    const archivo = JSON.parse(await readFile(ruta, 'utf8')) as {
+      version: number;
+      cuentas: { accountMode: string; holdMode: string | null }[];
+    };
+
+    expect(archivo.version).toBe(4);
+    expect(archivo.cuentas[0]?.accountMode).toBe('classic');
+    expect(archivo.cuentas[0]?.holdMode).toBeNull();
+  });
+
+  it('la deteccion asciende la cuenta a UTA y eso si se persiste', async () => {
+    await escribirV3();
+
+    const registro = await RegistroCuentas.cargar(ruta);
+
+    expect(registro.actualizarModos('c1', { accountMode: 'uta', holdMode: 'hedge_mode' })).toBe(
+      true
+    );
+    expect(registro.cuenta('c1')?.accountMode).toBe('uta');
+    expect(registro.cuenta('c1')?.holdMode).toBe('hedge_mode');
+  });
+
+  it('un `null` de la deteccion NO degrada una cuenta ya conocida como UTA', async () => {
+    /*
+     * `null` significa «la deteccion no concluyo» —un corte de red, un 429—, no
+     * «ya no es UTA». Pisar `uta` con `classic` ahi dejaria a esa subcuenta
+     * enrutando a una superficie que la rechaza hasta la siguiente verificacion
+     * buena. El caso de vuelta ni siquiera existe: Bitget no permite regresar de
+     * UTA a clasica.
+     */
+    await escribirV3();
+
+    const registro = await RegistroCuentas.cargar(ruta);
+    registro.actualizarModos('c1', { accountMode: 'uta', holdMode: 'hedge_mode' });
+
+    expect(registro.actualizarModos('c1', { accountMode: null, holdMode: null })).toBe(false);
+    expect(registro.cuenta('c1')?.accountMode).toBe('uta');
+    expect(registro.cuenta('c1')?.holdMode).toBe('hedge_mode');
+  });
+});
+
 describe('persistencia', () => {
   it('sobrevive a un reinicio', async () => {
     const registro = await RegistroCuentas.cargar(ruta);

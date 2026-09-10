@@ -12,24 +12,59 @@
  */
 import type {
   AltaCuenta,
+  AltaMadre,
   CuentaPanel,
   EstadoApp,
   EstadoVault,
   FilaCuenta,
+  MadreIpc,
+  MovimientoTraspasoIpc,
+  ResultadoMovimientoIpc,
+  ResultadoReparto,
+  ResultadoTraspaso,
   ResultadoAlta,
+  ResultadoAltaMadre,
   ResultadoBaja,
   ResultadoPrueba,
-  ResultadoVault
+  ResultadoVault,
+  SaldosPantalla
 } from '@shared/ipc-contract';
 import { PLAN_VIGENCIA_MS } from '@shared/constants';
-import type { Cuenta, Decimal as Cantidad, EstadoConexion, Job, Lado, Lote, PosicionMonitor } from '@shared/types';
+import type {
+  AccountMode,
+  Cuenta,
+  Decimal as Cantidad,
+  EstadoConexion,
+  HoldMode,
+  Job,
+  Lado,
+  Lote,
+  PosicionMonitor
+} from '@shared/types';
 import Decimal from 'decimal.js';
 import { ErrorBitget } from '../bitget/errors';
 import type { ModoMargenApi } from '../bitget/rest/endpoints/ordenes';
 import { MERCADOS, type ClaveMercado } from '../bitget/mercado';
 import type { ClienteBitget } from '../bitget/rest/client';
 import type { Credencial } from '../bitget/rest/signer';
+import { randomUUID } from 'node:crypto';
+import { dirname, join } from 'node:path';
 import { verificarCredencial, type ResultadoVerificacion } from '../bitget/verificacion';
+import { obtenerCuentasFuturos, obtenerInfoCuenta } from '../bitget/rest/endpoints/cuenta';
+import {
+  buscarTraspaso,
+  obtenerSaldosSubcuentas,
+  traspasarEntreSubcuentas
+} from '../bitget/rest/endpoints/subcuentas';
+import { MONEDA_TRASPASOS, resumirSaldos } from '../domain/saldos-subcuentas';
+import { planificarTraspaso, type PlanTraspaso } from '../domain/plan-traspaso';
+import {
+  planificarRecogida,
+  planificarReparto,
+  type ModoReparto,
+  type PlanReparto
+} from '../domain/plan-reparto';
+import { RegistroTraspasos } from '../storage/registro-traspasos';
 import {
   activosDeRanuras,
   catalogoCompleto,
@@ -45,9 +80,14 @@ import {
 } from '../storage/ranuras-activos';
 import type { CuentaSocket, FuentePool } from '../bitget/ws/pool';
 import { AlmacenPosiciones, type Deriva } from '../domain/almacen-posiciones';
-import type { CuentaBarrible, FuenteBarrido, ResultadoLectura } from '../execution/barrido-posiciones';
+import type {
+  CuentaBarrible,
+  FuenteBarrido,
+  ResultadoLectura
+} from '../execution/barrido-posiciones';
 import { RegistroConexiones } from '../domain/estado-conexion';
 import { ErrorRegistro, RegistroCuentas } from '../domain/registro-cuentas';
+import type { ParametrosKdf } from '../security/kdf';
 import {
   ErrorPlan,
   MotorLotes,
@@ -69,6 +109,13 @@ export interface RutasSesion {
   cuentas: string;
   /** `activos.json`: que activo tiene el operador en cada una de las ocho casillas. */
   activos: string;
+  /**
+   * `traspasos/movimientos.jsonl`: el registro de lo que se ha movido.
+   *
+   * Opcional para no obligar a cada prueba a declararlo; cuando falta se deriva
+   * de la carpeta del vault, que es donde vive el resto del estado.
+   */
+  traspasos?: string;
 }
 
 export interface OpcionesSesion {
@@ -76,6 +123,20 @@ export interface OpcionesSesion {
   mercado?: ClaveMercado;
   /** Se inyecta en las pruebas; en produccion lo construye la propia sesion. */
   motor?: MotorLotes;
+  /**
+   * Coste de scrypt al **crear** el almacen. Solo para pruebas.
+   *
+   * En produccion no se pasa y manda el valor real -N = 2^17, medio segundo y
+   * 128 MB por derivacion-, que es lo que hace inviable la fuerza bruta sobre un
+   * `vault.enc` robado. Bajarlo aqui seria debilitar el almacen; el motivo de
+   * que exista la puerta es otro: las pruebas de integracion crean un almacen
+   * por caso, y con el coste real cada una gasta segundos en criptografia que ya
+   * cubre `test/unit/vault.test.ts`. Con varias suites en paralelo eso no solo
+   * era lento: agotaba el limite de tiempo de vitest de forma intermitente.
+   *
+   * Mismo patron que `OpcionesVault.parametrosKdf`, del que es la continuacion.
+   */
+  parametrosKdf?: Partial<Omit<ParametrosKdf, 'algoritmo'>>;
   ahora?: () => number;
   /**
    * Espera entre lecturas de la posicion recien abierta. Se inyecta en las
@@ -200,6 +261,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
   private readonly mercado: ClaveMercado;
   private readonly motor: MotorLotes;
   private readonly ahoraMs: () => number;
+  private readonly parametrosKdf: Partial<Omit<ParametrosKdf, 'algoritmo'>> | undefined;
   private readonly dormir: (ms: number) => Promise<void>;
   /**
    * Planes calculados y aun sin ejecutar.
@@ -238,6 +300,16 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
    */
   private readonly planesTp = new Map<string, PlanTakeProfit>();
   private readonly planesMargen = new Map<string, PlanMargen>();
+  /**
+   * Traspasos calculados y aun sin enviar, con el momento en que se calcularon.
+   *
+   * Caducan como los demas planes: un traspaso aprobado hace diez minutos se
+   * calculo sobre saldos que ya no son los de ahora.
+   */
+  private readonly planesTraspaso = new Map<string, { plan: PlanTraspaso; creadoMs: number }>();
+  /** Repartos y recogidas calculados y sin enviar. Caducan como los demás. */
+  private readonly planesReparto = new Map<string, { plan: PlanReparto; creadoMs: number }>();
+  private readonly traspasos: RegistroTraspasos;
   private readonly planesQuitarTp = new Map<string, PlanQuitarTakeProfit>();
   private readonly planesApalancamiento = new Map<string, PlanApalancamiento>();
   /**
@@ -267,6 +339,19 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
    * no «todas las que hubo»- y por eso no crece.
    */
   private ultimosObjetivos = new Set<string>();
+  /**
+   * Subcuentas que Bitget declara **en mitad del cambio** a UTA.
+   *
+   * Vive en memoria y no en `cuentas.json` a proposito: es un estado transitorio
+   * -`accountMode` en `upgrading` o `switching`- que termina solo. Persistirlo
+   * dejaria una cuenta bloqueada para siempre si el panel se cierra mientras
+   * dura el cambio, y para saber que ya termino hay que preguntar a Bitget de
+   * todas formas.
+   *
+   * Mientras esta aqui, la subcuenta no se opera: la superficie que responde hoy
+   * puede dejar de hacerlo a mitad de una orden.
+   */
+  private readonly enTransicion = new Set<string>();
   /** Sockets vivos, para la barra superior. Lo rellena el pool. */
   private sockets = 0;
   private vault: Vault | null = null;
@@ -296,9 +381,13 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
 
   constructor(rutas: RutasSesion, cliente: ClienteBitget, opciones: OpcionesSesion = {}) {
     this.rutas = rutas;
+    this.traspasos = new RegistroTraspasos(
+      rutas.traspasos ?? join(dirname(rutas.vault), 'traspasos', 'movimientos.jsonl')
+    );
     this.cliente = cliente;
     this.mercado = opciones.mercado ?? 'simulado';
     this.ahoraMs = opciones.ahora ?? Date.now;
+    this.parametrosKdf = opciones.parametrosKdf;
     this.dormir =
       opciones.dormir ??
       ((ms) =>
@@ -361,7 +450,13 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
 
   /** Crea el almacen la primera vez que se usa el panel. */
   async crear(contrasena: string): Promise<ResultadoVault> {
-    return this.abrirCon(() => Vault.crear(this.rutas.vault, contrasena));
+    return this.abrirCon(() =>
+      Vault.crear(
+        this.rutas.vault,
+        contrasena,
+        this.parametrosKdf === undefined ? {} : { parametrosKdf: this.parametrosKdf }
+      )
+    );
   }
 
   async abrir(contrasena: string): Promise<ResultadoVault> {
@@ -467,6 +562,8 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         apiKeyEnmascarada: cuenta.apiKeyEnmascarada,
         estado: estado?.estado ?? 'desconectada',
         motivo: estado?.motivo ?? null,
+        accountMode: cuenta.accountMode,
+        enTransicion: this.enTransicion.has(cuenta.id),
         altaEn: cuenta.altaEn
       };
     });
@@ -553,11 +650,10 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
    */
   cuentasBarribles(): CuentaBarrible[] {
     if (this.vault === null || this.registro === null || this.vault.estaCerrado) return [];
-    const vault = this.vault;
 
     const salida: CuentaBarrible[] = [];
     for (const cuenta of this.registro.listarCuentas()) {
-      const credencial = vault.credencialDe(cuenta.id);
+      const credencial = this.credencialSellada(cuenta.id);
       if (credencial === null) continue;
 
       const estado = this.conexiones.estado(cuenta.id);
@@ -566,6 +662,41 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
       salida.push({ cuentaId: cuenta.id, credencial });
     }
     return salida;
+  }
+
+  /**
+   * La credencial de una subcuenta, sellada con la superficie que le toca.
+   *
+   * ==========================================================================
+   * El unico sitio por el que una credencial sale del vault
+   * ==========================================================================
+   * Es el punto donde se decide si esa subcuenta hablara V2 o V3, y por eso
+   * todo lo que necesite credenciales pasa por aqui en vez de llamar a
+   * `vault.credencialDe` directamente: una credencial sin sellar habla V2 por
+   * defecto, de modo que un camino que se saltara este metodo mandaria una
+   * cuenta UTA a la superficie clasica y la veria caerse sin explicacion.
+   *
+   * El sello sale del registro, que es donde lo dejo la ultima deteccion. No se
+   * consulta a Bitget aqui: esto se llama en cada ciclo del barrido y de cada
+   * lote, y una peticion por llamada seria una tormenta.
+   */
+  private credencialSellada(cuentaId: string): Credencial | null {
+    if (this.vault === null || this.registro === null) return null;
+
+    const credencial = this.vault.credencialDe(cuentaId);
+    if (credencial === null) return null;
+
+    const cuenta = this.registro.cuenta(cuentaId);
+    return {
+      ...credencial,
+      superficie: cuenta?.accountMode === 'uta' ? 'v3' : 'v2',
+      /*
+       * Decide si `posSide` viaja en el cuerpo de las peticiones de V3.
+       * `null` -no detectado- se resuelve enviandolo, que es el lado seguro:
+       * omitirlo en una cuenta de cobertura deja que Bitget elija el lado.
+       */
+      holdMode: cuenta?.holdMode ?? null
+    };
   }
 
   /**
@@ -638,14 +769,13 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
    */
   cuentasCalientes(): CuentaSocket[] {
     if (this.vault === null || this.registro === null || this.vault.estaCerrado) return [];
-    const vault = this.vault;
 
     const salida: CuentaSocket[] = [];
     const puestas = new Set<string>();
 
     const anadir = (cuentaId: string): void => {
       if (puestas.has(cuentaId)) return;
-      const credencial = vault.credencialDe(cuentaId);
+      const credencial = this.credencialSellada(cuentaId);
       if (credencial === null) return;
       puestas.add(cuentaId);
       salida.push({ cuentaId, credencial });
@@ -678,7 +808,10 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
    * sacaria de un lote de apertura que habria funcionado. Quien decide si una
    * credencial vale sigue siendo la verificacion REST.
    */
-  alRechazarCredencial(cuentaId: string, detalle: { codigo: string | null; mensaje: string | null }): void {
+  alRechazarCredencial(
+    cuentaId: string,
+    detalle: { codigo: string | null; mensaje: string | null }
+  ): void {
     console.warn(
       `[PCB] socket rechazado en ${cuentaId}: ${detalle.codigo ?? 'sin codigo'} ` +
         `${detalle.mensaje ?? ''}`.trimEnd() +
@@ -959,7 +1092,15 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     const cuenta = this.registro.cuenta(cuentaId);
     if (cuenta === undefined) return null;
 
-    const credencial = this.vault.credencialDe(cuentaId);
+    /*
+     * En mitad del cambio a UTA no se opera. Sale como objetivo descartado -que
+     * es lo que significa `null` aqui- y no como fallo del lote: la cuenta esta
+     * bien, solo que Bitget la esta moviendo de modelo y la superficie que
+     * responde ahora puede dejar de hacerlo a mitad de la orden.
+     */
+    if (this.enTransicion.has(cuentaId)) return null;
+
+    const credencial = this.credencialSellada(cuentaId);
     if (credencial === null) return null;
 
     /*
@@ -987,6 +1128,33 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         ? { apalancamiento: this.apalancamientos.get(cuentaId) as ApalancamientoCuenta }
         : {})
     };
+  }
+
+  /**
+   * El motor descubrio que esta cuenta estaba en la superficie contraria.
+   *
+   * ==========================================================================
+   * Se persiste, y por eso el lote no vuelve a tropezar
+   * ==========================================================================
+   * Ocurre cuando el titular migra su cuenta a UTA entre dos usos del panel: lo
+   * guardado dice `classic`, Bitget ya solo habla V3, y la primera casilla
+   * falla. El motor lo comprueba contra `account/settings`, corrige y reenvia
+   * —ver `MotorLotes.corregirSuperficie`—.
+   *
+   * Guardarlo aqui es lo que hace que la correccion valga para algo mas que esa
+   * casilla: sin esto, las otras 99 del mismo lote volverian a fallar una por
+   * una, cada una gastando su propia deteccion, y el barrido y el socket
+   * seguirian yendo a la API equivocada hasta que alguien revalidara la
+   * credencial a mano.
+   *
+   * El aviso a la pantalla solo sale si algo cambio de verdad: `actualizarModos`
+   * devuelve `false` cuando ya estaba asi, y reescribir el archivo de cuentas en
+   * cada casilla de un lote de trescientas seria una tormenta de escrituras.
+   */
+  alCorregirModo(cuentaId: string, modo: AccountMode, holdMode: HoldMode | null): void {
+    if (this.registro === null) return;
+    if (!this.registro.actualizarModos(cuentaId, { accountMode: modo, holdMode })) return;
+    this.anunciar();
   }
 
   /** Avisa del avance de un lote en curso. Lo consume el evento `lote:progreso`. */
@@ -1032,7 +1200,9 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
    * orden puede haber entrado y haber fallado la maniobra siguiente.
    */
   private avisarCuentasTocadas(lote: Lote): void {
-    const ids = [...new Set(lote.jobs.filter((j) => j.estado !== 'omitida').map((j) => j.cuentaId))];
+    const ids = [
+      ...new Set(lote.jobs.filter((j) => j.estado !== 'omitida').map((j) => j.cuentaId))
+    ];
     if (ids.length === 0) return;
     for (const oyente of this.oyentesCuentasTocadas) oyente(ids);
   }
@@ -1709,7 +1879,9 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
             'TP',
             j.estado,
             j.ordenId,
-            j.estado === 'fallo' && !motivo.includes(SIN_PROTECCION) ? `${motivo} ${SIN_PROTECCION}` : motivo
+            j.estado === 'fallo' && !motivo.includes(SIN_PROTECCION)
+              ? `${motivo} ${SIN_PROTECCION}`
+              : motivo
           )
         );
 
@@ -1829,7 +2001,8 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
 
       for (
         let intento = 1;
-        intento < INTENTOS_POSICION && planMargen.descartes.some((d) => d.motivo === 'sin-posicion');
+        intento < INTENTOS_POSICION &&
+        planMargen.descartes.some((d) => d.motivo === 'sin-posicion');
         intento += 1
       ) {
         await this.dormir(ESPERA_POSICION_MS);
@@ -1883,7 +2056,9 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
          * lleva.
          */
         if (j.estado === 'exito') {
-          this.posiciones.anotarAporte(j.cuentaId, plan.simbolo, j.lado, { margenAdicional: cantidad });
+          this.posiciones.anotarAporte(j.cuentaId, plan.simbolo, j.lado, {
+            margenAdicional: cantidad
+          });
         }
       }
     }
@@ -1968,7 +2143,13 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     /* Antes de gastar dos peticiones del cupo en una credencial que no cabría. */
     const estorbo = registro.comprobarCabida(grupoNombre, etiqueta, alta.casilla);
     if (estorbo !== null) {
-      return { ok: false, veredicto: null, motivo: estorbo.message, advertencias: [], cuenta: null };
+      return {
+        ok: false,
+        veredicto: null,
+        motivo: estorbo.message,
+        advertencias: [],
+        cuenta: null
+      };
     }
 
     /*
@@ -1991,7 +2172,9 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
 
     let verificacion: ResultadoVerificacion;
     try {
-      verificacion = await verificarCredencial(this.cliente, credencial, { mercado: MERCADOS[this.mercado] });
+      verificacion = await verificarCredencial(this.cliente, credencial, {
+        mercado: MERCADOS[this.mercado]
+      });
     } catch (e) {
       /*
        * Solo llega aqui un fallo de red o un limite de peticiones: la
@@ -2015,7 +2198,10 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         ok: false,
         veredicto: verificacion.veredicto,
         motivo: verificacion.motivo,
-        advertencias: verificacion.advertencias.map((a) => ({ codigo: a.codigo, mensaje: a.mensaje })),
+        advertencias: verificacion.advertencias.map((a) => ({
+          codigo: a.codigo,
+          mensaje: a.mensaje
+        })),
         cuenta: null
       };
     }
@@ -2067,7 +2253,14 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         credencialId: publica.id,
         apiKeyEnmascarada: publica.apiKeyEnmascarada,
         modoPosicion: verificacion.modoPosicion ?? 'unilateral',
-        modoMargen: verificacion.modoMargen ?? 'cruzado'
+        modoMargen: verificacion.modoMargen ?? 'cruzado',
+        /*
+         * `undefined` -no `'classic'`- cuando la deteccion no concluyo, para que
+         * `agregar` aplique su propio defecto en vez de escribir un modo que
+         * nadie ha comprobado.
+         */
+        ...(verificacion.accountMode === null ? {} : { accountMode: verificacion.accountMode }),
+        holdMode: verificacion.holdMode
       });
     } catch (e) {
       if (!(e instanceof ErrorRegistro)) throw e;
@@ -2090,7 +2283,10 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
       ok: true,
       veredicto: 'valida',
       motivo: null,
-      advertencias: verificacion.advertencias.map((a) => ({ codigo: a.codigo, mensaje: a.mensaje })),
+      advertencias: verificacion.advertencias.map((a) => ({
+        codigo: a.codigo,
+        mensaje: a.mensaje
+      })),
       cuenta: {
         id: cuenta.id,
         etiqueta: cuenta.etiqueta,
@@ -2100,6 +2296,9 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         apiKeyEnmascarada: cuenta.apiKeyEnmascarada,
         estado: 'conectada',
         motivo: null,
+        accountMode: cuenta.accountMode,
+        /* Un alta en transicion no llega aqui: sale `rechazada` antes. */
+        enTransicion: false,
         altaEn: cuenta.altaEn
       }
     };
@@ -2182,7 +2381,9 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
 
     let verificacion: ResultadoVerificacion;
     try {
-      verificacion = await verificarCredencial(this.cliente, credencial, { mercado: MERCADOS[this.mercado] });
+      verificacion = await verificarCredencial(this.cliente, credencial, {
+        mercado: MERCADOS[this.mercado]
+      });
     } catch (e) {
       /* Fallo de transporte: es la red la que falla, no la credencial. */
       const estado = this.conexiones.registrarFallo(cuentaId, e);
@@ -2199,6 +2400,13 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     this.anotarSaldo(cuentaId, verificacion);
 
     /*
+     * Se apunta o se levanta en cada verificacion, que es la unica lectura
+     * fresca que hay: el cambio a UTA termina por su cuenta y nadie avisa.
+     */
+    if (verificacion.enTransicion) this.enTransicion.add(cuentaId);
+    else this.enTransicion.delete(cuentaId);
+
+    /*
      * Modo de posicion y de margen, tal como estan **ahora** en Bitget.
      *
      * Se capturaban solo en el alta, y el operador puede cambiarlos desde la web
@@ -2211,7 +2419,18 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     if (
       registro.actualizarModos(cuentaId, {
         modoPosicion: verificacion.modoPosicion,
-        modoMargen: verificacion.modoMargen
+        modoMargen: verificacion.modoMargen,
+        /*
+         * Con que API habla, segun la deteccion que acaba de hacer la
+         * verificacion. Es la revalidacion periodica la que se entera de que una
+         * subcuenta paso a UTA por su cuenta -el operador la actualiza en Bitget
+         * y el panel no se entera de ninguna otra forma-, asi que este es el
+         * camino por el que una cuenta migrada deja de estar muda.
+         *
+         * `null` -deteccion no concluida- lo ignora `actualizarModos`.
+         */
+        accountMode: verificacion.accountMode,
+        holdMode: verificacion.holdMode
       })
     ) {
       /*
@@ -2262,6 +2481,745 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
    */
   operativa(): boolean {
     return this.vault !== null && this.registro !== null && !this.vault.estaCerrado;
+  }
+
+  /* ---------------- cuentas madre y saldos ---------------- */
+
+  /**
+   * Da de alta la credencial de una cuenta madre.
+   *
+   * No pasa por `verificarCredencial`: esa comprueba que la cuenta pueda operar
+   * la estrategia -modo cobertura, margen aislado, apalancamiento- y una cuenta
+   * madre no opera nada. Exigirle eso la rechazaria por no cumplir requisitos
+   * que no le corresponden.
+   *
+   * A cambio se le hace la comprobacion que si le corresponde, y que es
+   * funcional: **preguntarle por sus subcuentas**. Una clave valida de una
+   * cuenta que no es madre de nadie responde `00000` con la lista vacia, y sin
+   * este aviso el operador se quedaria mirando una pantalla de saldos en blanco
+   * sin saber que la culpa es de la clave. Es exactamente lo que ocurrio el
+   * 03/09/2026 con la clave del `.env`: valida, con permisos de sobra, y de una
+   * cuenta distinta a la madre de las subcuentas del panel.
+   */
+  async agregarMadre(alta: AltaMadre): Promise<ResultadoAltaMadre> {
+    const { vault } = this.exigirAbierta();
+
+    const etiqueta = alta.etiqueta.trim();
+    if (etiqueta === '') {
+      return {
+        ok: false,
+        motivo: 'Falta el nombre de la cuenta principal.',
+        advertencias: [],
+        madre: null
+      };
+    }
+
+    /* Se recortan los tres, la passphrase incluida. Mismo motivo que en `agregar`. */
+    const credencial: Credencial = {
+      apiKey: alta.apiKey.trim(),
+      secretKey: alta.secretKey.trim(),
+      passphrase: alta.passphrase.trim()
+    };
+
+    let info;
+    try {
+      info = await obtenerInfoCuenta(this.cliente, credencial);
+    } catch (e) {
+      return {
+        ok: false,
+        motivo:
+          e instanceof ErrorBitget
+            ? `No se pudo comprobar la credencial: ${e.message}`
+            : 'No se pudo comprobar la credencial: no hay conexion con Bitget.',
+        advertencias: [],
+        madre: null
+      };
+    }
+
+    const advertencias: { codigo: string; mensaje: string }[] = [];
+    const permisos = info.datos.authorities;
+    const ips = (info.datos.ips ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+
+    /* Prueba funcional: ¿es madre de alguien? */
+    let subcuentasVistas: number;
+    try {
+      const saldos = await obtenerSaldosSubcuentas(
+        this.cliente,
+        credencial,
+        MERCADOS[this.mercado].productType
+      );
+      subcuentasVistas = saldos.datos.length;
+    } catch (e) {
+      /*
+       * Un fallo aqui no invalida la clave -puede ser la lista blanca de IP, que
+       * en los endpoints de subcuentas si se aplica- pero tiene que decirse: sin
+       * esta lectura la pantalla de saldos no tiene nada que pintar.
+       */
+      return {
+        ok: false,
+        motivo:
+          e instanceof ErrorBitget
+            ? `La clave autentica, pero no puede leer las subcuentas: ${e.message}`
+            : 'La clave autentica, pero no se pudo leer la lista de subcuentas.',
+        advertencias: [],
+        madre: null
+      };
+    }
+
+    if (subcuentasVistas === 0) {
+      advertencias.push({
+        codigo: 'sin-subcuentas',
+        mensaje:
+          'Esta clave es valida, pero Bitget no le reporta ninguna subcuenta. Comprueba que sea ' +
+          'la API Key de la cuenta principal de la que cuelgan tus subcuentas: la pantalla de ' +
+          'saldos se vera vacia mientras no lo sea.'
+      });
+    }
+
+    if (ips.length === 0) {
+      advertencias.push({
+        codigo: 'sin-ip-ligada',
+        mensaje:
+          'La API Key no tiene IP ligada. Funciona, pero esta clave puede mover saldo entre tus ' +
+          'cuentas: si se filtrara, seria utilizable desde cualquier sitio.'
+      });
+    }
+
+    const madre = vault.agregarMadre({
+      uidMadre: info.datos.userId,
+      etiqueta,
+      apiKey: credencial.apiKey,
+      secretKey: credencial.secretKey,
+      passphrase: credencial.passphrase,
+      permisos: {
+        verificadoEn: new Date().toISOString(),
+        authorities: permisos,
+        ipsPermitidas: ips
+      }
+    });
+    await vault.guardar();
+    this.anunciar();
+
+    return {
+      ok: true,
+      motivo: null,
+      advertencias,
+      madre: {
+        id: madre.id,
+        uidMadre: madre.uidMadre,
+        etiqueta: madre.etiqueta,
+        apiKeyEnmascarada: madre.apiKeyEnmascarada,
+        altaEn: madre.altaEn,
+        subcuentasVistas
+      }
+    };
+  }
+
+  /** Cuentas madre registradas, sin secretos. */
+  listarMadres(): MadreIpc[] {
+    if (this.vault === null || this.vault.estaCerrado) return [];
+    return this.vault.listarMadres().map((m) => ({
+      id: m.id,
+      uidMadre: m.uidMadre,
+      etiqueta: m.etiqueta,
+      apiKeyEnmascarada: m.apiKeyEnmascarada,
+      altaEn: m.altaEn,
+      subcuentasVistas: null
+    }));
+  }
+
+  /**
+   * Baja de una cuenta madre. **Exige la contrasena de paso**, como la de una
+   * subcuenta: es la credencial mas poderosa del almacen, y borrarla sin freno
+   * seria mas facil que borrar cualquiera de las que solo operan.
+   */
+  async eliminarMadre(uidMadre: string, contrasenaPaso: string): Promise<ResultadoBaja> {
+    const { vault } = this.exigirAbierta();
+
+    if (!(await vault.comprobarPaso(contrasenaPaso))) return 'paso-incorrecto';
+
+    if (!vault.eliminarMadre(uidMadre)) return 'no-estaba';
+
+    await vault.guardar();
+    this.anunciar();
+    return 'borrada';
+  }
+
+  /**
+   * Saldos de las subcuentas de una cuenta madre.
+   *
+   * Una sola peticion a Bitget, cruzada con las cuentas que el panel tiene dadas
+   * de alta. Ver `resumirSaldos` para por que se muestran las dos listas y no su
+   * interseccion.
+   *
+   * Sin `uidMadre` usa la unica madre registrada. Con varias, hay que decir cual:
+   * la alternativa -elegir por orden- seria enseñar los saldos de una cuenta
+   * mientras el operador cree estar mirando los de otra.
+   */
+  async saldosSubcuentas(uidMadre?: string): Promise<SaldosPantalla> {
+    const { vault, registro } = this.exigirAbierta();
+
+    const credencial = vault.credencialMadre(uidMadre);
+    if (credencial === null) {
+      const cuantas = vault.cantidadMadres;
+      throw new Error(
+        cuantas === 0
+          ? 'No hay ninguna cuenta principal registrada. Da de alta su API Key para ver los saldos.'
+          : 'Hay varias cuentas principales registradas: indica de cual quieres ver los saldos.'
+      );
+    }
+
+    const madre = vault.listarMadres().find((m) => (uidMadre ? m.uidMadre === uidMadre : true));
+    const uid = madre?.uidMadre ?? uidMadre ?? '';
+
+    const saldos = await obtenerSaldosSubcuentas(
+      this.cliente,
+      credencial,
+      MERCADOS[this.mercado].productType
+    );
+
+    /*
+     * El saldo de la propia madre, que `sub-account-assets` no trae.
+     *
+     * Ese endpoint reporta a la madre el saldo de **sus subcuentas** y nunca el
+     * suyo, asi que la cuenta desde la que se reparte era la unica de la
+     * pantalla sin cifra: aparecia en el desplegable de traspaso sin importe y
+     * en la confirmacion como «saldo desconocido». Se lee aparte, con su propia
+     * credencial, del mismo endpoint que usa el panel para los saldos de
+     * futuros. Preguntado por el operador el 05/09/2026.
+     *
+     * Si falla no se rompe la pantalla: se queda en `null` -«no se sabe»- y todo
+     * sigue funcionando como antes. Un saldo de menos es molesto; una pantalla
+     * de saldos que no carga por una peticion secundaria, mucho peor.
+     */
+    const disponibleMadre: Cantidad | null = await obtenerCuentasFuturos(
+      this.cliente,
+      credencial,
+      MERCADOS[this.mercado].productType
+    ).then(
+      (propio) => propio.datos.find((c) => c.marginCoin === MONEDA_TRASPASOS)?.available ?? null,
+      () => null
+    );
+
+    /*
+     * Solo las cuentas de esta madre. Cruzar con todas mezclaria en la misma
+     * pantalla subcuentas de dos cuentas principales distintas, y un traspaso
+     * entre ellas es justo lo que el contrato excluye.
+     *
+     * Las cuentas dadas de alta antes de que existiera `uidPadre` lo traen
+     * vacio; se incluyen igual porque dejarlas fuera las haria desaparecer de la
+     * pantalla sin motivo visible, y el cruce por UID ya las coloca bien.
+     */
+    const cuentas = registro.listarCuentas().filter((c) => c.uidPadre === uid || c.uidPadre === '');
+
+    const resumen = resumirSaldos(saldos.datos, cuentas);
+
+    return {
+      uidMadre: uid,
+      etiquetaMadre: madre?.etiqueta ?? '',
+      disponibleMadre,
+      moneda: MONEDA_TRASPASOS,
+      obtenidoEn: new Date().toISOString(),
+      ...resumen
+    };
+  }
+
+  /* ---------------- traspaso entre subcuentas ---------------- */
+
+  /**
+   * Calcula el traspaso y comprueba que se pueda hacer. **No envía nada.**
+   *
+   * Vuelve a leer los saldos antes de calcular, y no reutiliza los que la
+   * pantalla tenga en la mano: el máximo transferible cambia en cuanto se abre o
+   * se cierra una posición, y validar contra un número de hace un minuto
+   * autorizaría lo que Bitget ya no admite.
+   */
+  async planificarTraspaso(peticion: {
+    uidOrigen: string;
+    uidDestino: string;
+    importe: string;
+    /*
+     * `| undefined` explicito: con `exactOptionalPropertyTypes` un objeto que
+     * trae la propiedad valiendo `undefined` -lo que devuelve Zod al parsear un
+     * campo opcional ausente- no encaja en un `?:` a secas.
+     */
+    uidMadre?: string | undefined;
+  }): Promise<PlanTraspaso> {
+    this.exigirAbierta();
+
+    const hoja = await this.saldosSubcuentas(peticion.uidMadre);
+    const id = randomUUID().replace(/-/g, '').slice(0, 12);
+
+    const plan = planificarTraspaso(
+      {
+        uidOrigen: peticion.uidOrigen,
+        uidDestino: peticion.uidDestino,
+        importe: peticion.importe,
+        uidMadre: hoja.uidMadre,
+        etiquetaMadre: hoja.etiquetaMadre,
+        disponibleMadre: hoja.disponibleMadre,
+        moneda: hoja.moneda,
+        /*
+         * Derivado del id del plan, no aleatorio: dos envíos del mismo plan
+         * producen el mismo identificador, y eso es lo que hace que un reenvío
+         * accidental sea rechazado por Bitget en vez de mover el dinero dos
+         * veces. Mismo criterio que `clientOidDe` en el motor de lotes.
+         */
+        clientOid: `pcbtr${id}`,
+        id,
+        ahora: new Date(this.ahoraMs()).toISOString()
+      },
+      hoja.filas.map((f) => ({
+        uid: f.uid,
+        cuentaId: f.cuentaId,
+        etiqueta: f.etiqueta,
+        disponible: f.disponible,
+        maxTransferible: f.maxTransferible,
+        equity: f.equity,
+        soloEnBitget: f.soloEnBitget,
+        sinDatos: f.sinDatos
+      }))
+    );
+
+    this.purgarPlanesTraspaso();
+    this.planesTraspaso.set(plan.id, { plan, creadoMs: this.ahoraMs() });
+    return plan;
+  }
+
+  private purgarPlanesTraspaso(): void {
+    for (const [id, guardado] of this.planesTraspaso) {
+      if (this.ahoraMs() - guardado.creadoMs > PLAN_VIGENCIA_MS) this.planesTraspaso.delete(id);
+    }
+  }
+
+  /**
+   * Envía un traspaso ya aprobado. **Aquí se mueve el dinero.**
+   *
+   * ==========================================================================
+   * El orden de estas cuatro cosas no es negociable
+   * ==========================================================================
+   *   1. Se comprueba la contraseña de paso.
+   *   2. Se anota el intento **en disco**.
+   *   3. Se envía.
+   *   4. Se anota el desenlace.
+   *
+   * El paso 2 va antes del 3 a propósito: si el proceso muere entre el envío y
+   * la respuesta, la intención ya está escrita y el traspaso queda señalado como
+   * pendiente en vez de desaparecer. Si esa escritura falla, **no se envía**:
+   * mover dinero sin dejar rastro es peor que no moverlo.
+   *
+   * Y lo que no se hace nunca: reenviar por iniciativa propia. Un envío sin
+   * respuesta se resuelve mirando el saldo, no repitiendo el movimiento.
+   */
+  async ejecutarTraspaso(planId: string, contrasenaPaso: string): Promise<ResultadoTraspaso> {
+    const { vault } = this.exigirAbierta();
+
+    this.purgarPlanesTraspaso();
+    const guardado = this.planesTraspaso.get(planId);
+    if (guardado === undefined) {
+      throw new ErrorPlan(
+        'plan-desconocido',
+        'Ese traspaso ya no está vigente. Vuelve a revisarlo antes de enviarlo.'
+      );
+    }
+    const { plan } = guardado;
+
+    /*
+     * La contraseña de paso, la misma que exige enviar órdenes. El contrato pide
+     * «el mismo mecanismo de confirmación que ya aplica a la apertura de
+     * posiciones», y esto mueve dinero igual que aquella.
+     */
+    if (!(await vault.comprobarPaso(contrasenaPaso))) {
+      return { ok: false, motivo: 'paso-incorrecto', mensaje: null, transferId: null, plan };
+    }
+
+    const credencial = vault.credencialMadre(plan.uidMadre);
+    if (credencial === null) {
+      return {
+        ok: false,
+        motivo: 'sin-credencial',
+        mensaje: 'Ya no hay credencial guardada para esa cuenta principal.',
+        transferId: null,
+        plan
+      };
+    }
+
+    /* Paso 2: en disco antes de salir a la red. Si esto falla, no se envía. */
+    await this.traspasos.anotarIntento({
+      clientOid: plan.clientOid,
+      uidMadre: plan.uidMadre,
+      uidOrigen: plan.origen.uid,
+      etiquetaOrigen: plan.origen.etiqueta,
+      uidDestino: plan.destino.uid,
+      etiquetaDestino: plan.destino.etiqueta,
+      importe: plan.importe,
+      moneda: plan.moneda
+    });
+
+    /*
+     * El plan se retira antes de enviar, no después.
+     *
+     * Así una segunda pulsación del botón no llega ni a intentarlo: encuentra el
+     * plan ausente y responde «ya no está vigente». Sin esto, dos envíos del
+     * mismo plan producirían dos intentos anotados —el `clientOid` los haría
+     * rechazar en Bitget, pero el registro contaría una historia confusa.
+     */
+    this.planesTraspaso.delete(planId);
+
+    try {
+      const respuesta = await traspasarEntreSubcuentas(this.cliente, credencial, {
+        uidOrigen: plan.origen.uid,
+        uidDestino: plan.destino.uid,
+        importe: plan.importe,
+        clientOid: plan.clientOid,
+        moneda: plan.moneda
+      });
+
+      const transferId = respuesta.datos.transferId ?? null;
+      await this.traspasos.anotarResuelta({
+        clientOid: plan.clientOid,
+        resultado: 'exito',
+        transferId
+      });
+      this.anunciar();
+
+      return { ok: true, motivo: null, mensaje: null, transferId, plan };
+    } catch (e) {
+      const err = e instanceof ErrorBitget ? e : null;
+      const desenlace = await this.resolverEnvio(plan.clientOid, plan.moneda, credencial, err);
+
+      if (desenlace.estado === 'entro') {
+        return {
+          ok: true,
+          motivo: null,
+          mensaje: null,
+          transferId: desenlace.transferId,
+          plan
+        };
+      }
+
+      if (desenlace.estado === 'indeterminado') {
+        return {
+          ok: false,
+          motivo: 'indeterminado',
+          mensaje: desenlace.mensaje,
+          transferId: null,
+          plan
+        };
+      }
+
+      return { ok: false, motivo: 'rechazado', mensaje: desenlace.mensaje, transferId: null, plan };
+    }
+  }
+
+  /**
+   * Que hacer cuando un envio de dinero termina en excepcion.
+   *
+   * ==========================================================================
+   * «No respondio» no es «no entro»
+   * ==========================================================================
+   * `errors.ts` separa el rechazo -Bitget contesto que no- del **indeterminado**:
+   * se envio y no hubo respuesta. Tratarlos igual es el error caro, y no por
+   * pulcritud: si al operador se le dice «fallo», replanificara, y un plan nuevo
+   * lleva un `clientOid` **nuevo**. La proteccion contra duplicados del envio
+   * original deja de aplicar y el mismo dinero se mueve dos veces.
+   *
+   * Ante un indeterminado se consulta a Bitget por el `clientOid`. Y se respeta
+   * la asimetria: **encontrarlo demuestra que entro; no encontrarlo no demuestra
+   * nada** -Bitget puede tardar en registrarlo, o la consulta puede fallar-. Por
+   * eso el caso sin respuesta clara no se cierra: se queda como `pendiente` en el
+   * registro, sin linea de resuelta, que es exactamente lo que significa.
+   */
+  private async resolverEnvio(
+    clientOid: string,
+    moneda: string,
+    credencial: { apiKey: string; secretKey: string; passphrase: string },
+    err: ErrorBitget | null
+  ): Promise<
+    | { estado: 'entro'; transferId: string | null; mensaje: null }
+    | { estado: 'rechazado'; mensaje: string }
+    | { estado: 'indeterminado'; mensaje: string }
+  > {
+    const mensaje = err?.message ?? 'No se pudo enviar el traspaso.';
+
+    if (err?.clase !== 'indeterminada') {
+      await this.traspasos.anotarResuelta({
+        clientOid,
+        resultado: 'fallo',
+        codigoBitget: err?.codigo ?? null,
+        mensaje
+      });
+      return { estado: 'rechazado', mensaje };
+    }
+
+    try {
+      const encontrado = (
+        await buscarTraspaso(this.cliente, credencial, { clientOid, moneda })
+      ).datos.find((r) => r.clientOid === clientOid);
+
+      if (encontrado !== undefined) {
+        const transferId = encontrado.transferId ?? null;
+        await this.traspasos.anotarResuelta({ clientOid, resultado: 'exito', transferId });
+        this.anunciar();
+        return { estado: 'entro', transferId, mensaje: null };
+      }
+    } catch {
+      /* La consulta tampoco respondio. Sigue sin saberse, que ya es la respuesta. */
+    }
+
+    /*
+     * Sin linea de resuelta a proposito: el registro lo deja como `pendiente`,
+     * y esa es la verdad. Anotar «fallo» aqui seria afirmar que no entro.
+     */
+    return {
+      estado: 'indeterminado',
+      mensaje:
+        'El traspaso se envió y Bitget no confirmó si entró. Queda registrado como pendiente: ' +
+        'comprueba los saldos antes de repetirlo, porque volver a enviarlo lo movería dos veces.'
+    };
+  }
+
+  /* ---------------- reparto y recogida masiva (Fase 4) ---------------- */
+
+  /**
+   * Calcula un reparto de la madre hacia varias subcuentas. **No envía nada.**
+   *
+   * Relee los saldos, igual que el traspaso suelto y por lo mismo: el nivel al
+   * que hay que igualar depende de lo que cada subcuenta tenga **ahora**.
+   */
+  async planificarReparto(peticion: {
+    destinos: readonly string[];
+    total: string;
+    modo: ModoReparto;
+    uidMadre?: string | undefined;
+  }): Promise<PlanReparto> {
+    this.exigirAbierta();
+
+    const hoja = await this.saldosSubcuentas(peticion.uidMadre);
+    const id = randomUUID().replace(/-/g, '').slice(0, 12);
+
+    const plan = planificarReparto(
+      {
+        id,
+        uidMadre: hoja.uidMadre,
+        etiquetaMadre: hoja.etiquetaMadre || 'Cuenta principal',
+        moneda: hoja.moneda,
+        ahora: new Date(this.ahoraMs()).toISOString(),
+        destinos: peticion.destinos,
+        total: peticion.total,
+        modo: peticion.modo
+      },
+      hoja.filas
+    );
+
+    this.purgarPlanesReparto();
+    this.planesReparto.set(plan.id, { plan, creadoMs: this.ahoraMs() });
+    return plan;
+  }
+
+  /** Calcula la devolución del saldo de varias subcuentas a la madre. No envía nada. */
+  async planificarRecogida(peticion: {
+    origenes: readonly string[];
+    uidMadre?: string | undefined;
+  }): Promise<PlanReparto> {
+    this.exigirAbierta();
+
+    const hoja = await this.saldosSubcuentas(peticion.uidMadre);
+    const id = randomUUID().replace(/-/g, '').slice(0, 12);
+
+    const plan = planificarRecogida(
+      {
+        id,
+        uidMadre: hoja.uidMadre,
+        etiquetaMadre: hoja.etiquetaMadre || 'Cuenta principal',
+        moneda: hoja.moneda,
+        ahora: new Date(this.ahoraMs()).toISOString(),
+        origenes: peticion.origenes
+      },
+      hoja.filas
+    );
+
+    this.purgarPlanesReparto();
+    this.planesReparto.set(plan.id, { plan, creadoMs: this.ahoraMs() });
+    return plan;
+  }
+
+  private purgarPlanesReparto(): void {
+    for (const [id, guardado] of this.planesReparto) {
+      if (this.ahoraMs() - guardado.creadoMs > PLAN_VIGENCIA_MS) this.planesReparto.delete(id);
+    }
+  }
+
+  /**
+   * Envía un reparto o una recogida ya aprobados. **Aquí se mueve el dinero.**
+   *
+   * ==========================================================================
+   * Uno detrás de otro, y un fallo no detiene a los demás
+   * ==========================================================================
+   * Los traspasos salen **en serie**, no en paralelo. Con cien subcuentas el
+   * paralelo ahorraría segundos y a cambio dejaría cien movimientos de dinero en
+   * vuelo a la vez contra un endpoint cuyo límite de peticiones no está
+   * verificado. Aquí los segundos no valen ese riesgo.
+   *
+   * Si uno falla, los demás siguen: es la misma regla que las seis operaciones
+   * -«falla esa cuenta, el lote continúa»- y por el mismo motivo. Abortar a la
+   * mitad dejaría un reparto hecho a medias sin que nadie hubiera decidido cuál
+   * era la mitad buena.
+   *
+   * **Sin rollback.** Deshacer los traspasos que ya entraron porque uno falló
+   * sería mover dinero por iniciativa propia, que es justo lo que el contrato
+   * prohíbe. Se informa de qué entró y qué no, y decide el operador.
+   */
+  async ejecutarReparto(planId: string, contrasenaPaso: string): Promise<ResultadoReparto> {
+    const { vault } = this.exigirAbierta();
+
+    this.purgarPlanesReparto();
+    const guardado = this.planesReparto.get(planId);
+    if (guardado === undefined) {
+      throw new ErrorPlan(
+        'plan-desconocido',
+        'Ese reparto ya no está vigente. Vuelve a revisarlo antes de enviarlo.'
+      );
+    }
+    const { plan } = guardado;
+
+    if (!(await vault.comprobarPaso(contrasenaPaso))) {
+      return {
+        ok: false,
+        motivo: 'paso-incorrecto',
+        plan,
+        resultados: [],
+        enviados: 0,
+        fallidos: 0,
+        indeterminados: 0
+      };
+    }
+
+    const credencial = vault.credencialMadre(plan.uidMadre);
+    if (credencial === null) {
+      return {
+        ok: false,
+        motivo: 'sin-credencial',
+        plan,
+        resultados: [],
+        enviados: 0,
+        fallidos: 0,
+        indeterminados: 0
+      };
+    }
+
+    /* Se retira antes de enviar: una segunda pulsación no repite el reparto. */
+    this.planesReparto.delete(planId);
+
+    const resultados: ResultadoMovimientoIpc[] = [];
+    let enviados = 0;
+    let fallidos = 0;
+    /* Enviados sin respuesta: ni exito ni fallo. Ver `resolverEnvio`. */
+    let indeterminados = 0;
+
+    for (const m of plan.movimientos) {
+      /* En disco antes de salir a la red, uno por uno. */
+      await this.traspasos.anotarIntento({
+        clientOid: m.clientOid,
+        uidMadre: plan.uidMadre,
+        uidOrigen: m.uidOrigen,
+        etiquetaOrigen: m.etiquetaOrigen,
+        uidDestino: m.uidDestino,
+        etiquetaDestino: m.etiquetaDestino,
+        importe: m.importe,
+        moneda: plan.moneda
+      });
+
+      try {
+        const respuesta = await traspasarEntreSubcuentas(this.cliente, credencial, {
+          uidOrigen: m.uidOrigen,
+          uidDestino: m.uidDestino,
+          importe: m.importe,
+          clientOid: m.clientOid,
+          moneda: plan.moneda
+        });
+
+        const transferId = respuesta.datos.transferId ?? null;
+        await this.traspasos.anotarResuelta({
+          clientOid: m.clientOid,
+          resultado: 'exito',
+          transferId
+        });
+        resultados.push({
+          clientOid: m.clientOid,
+          etiquetaOrigen: m.etiquetaOrigen,
+          etiquetaDestino: m.etiquetaDestino,
+          importe: m.importe,
+          ok: true,
+          mensaje: null
+        });
+        enviados += 1;
+      } catch (e) {
+        const err = e instanceof ErrorBitget ? e : null;
+        const desenlace = await this.resolverEnvio(m.clientOid, plan.moneda, credencial, err);
+
+        /* Un envio sin respuesta que la consulta confirma cuenta como enviado. */
+        if (desenlace.estado === 'entro') {
+          resultados.push({
+            clientOid: m.clientOid,
+            etiquetaOrigen: m.etiquetaOrigen,
+            etiquetaDestino: m.etiquetaDestino,
+            importe: m.importe,
+            ok: true,
+            mensaje: null
+          });
+          enviados += 1;
+          continue;
+        }
+
+        resultados.push({
+          clientOid: m.clientOid,
+          etiquetaOrigen: m.etiquetaOrigen,
+          etiquetaDestino: m.etiquetaDestino,
+          importe: m.importe,
+          ok: false,
+          mensaje: desenlace.mensaje
+        });
+        /*
+         * Los indeterminados se cuentan aparte de los fallos. Un lote «18
+         * enviados · 2 sin confirmar» pide comprobar dos saldos; uno que los
+         * llamara fallidos invitaria a reenviarlos, y reenviar lo que quiza
+         * entro es como se mueve el dinero dos veces.
+         */
+        if (desenlace.estado === 'indeterminado') indeterminados += 1;
+        else fallidos += 1;
+      }
+    }
+
+    this.anunciar();
+    return {
+      ok: fallidos === 0 && indeterminados === 0,
+      motivo: null,
+      plan,
+      resultados,
+      enviados,
+      fallidos,
+      indeterminados
+    };
+  }
+
+  /**
+   * Traspasos enviados de los que no se sabe el desenlace.
+   *
+   * Es la lista que hay que mirar antes de repetir nada: cada uno de estos pudo
+   * entrar o no, y volver a enviarlo -con un plan nuevo, y por tanto con otro
+   * `clientOid`- movería el dinero dos veces.
+   */
+  async traspasosPendientes(): Promise<MovimientoTraspasoIpc[]> {
+    return this.traspasos.pendientes();
+  }
+
+  /** Historial de traspasos, lo más reciente primero. */
+  async historialTraspasos(limite = 100): Promise<MovimientoTraspasoIpc[]> {
+    return this.traspasos.listar(limite);
   }
 
   /* ---------------- estado global ---------------- */

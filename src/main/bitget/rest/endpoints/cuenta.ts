@@ -9,7 +9,14 @@
 import type { z } from 'zod';
 import { z as zod } from 'zod';
 import type { ClienteBitget, RespuestaRest } from '../client';
-import type { Credencial } from '../signer';
+import { noDisponibleEnV3 } from '../../superficie';
+import { superficieDe, type Credencial } from '../signer';
+import {
+  ajustarMargenV3,
+  estadoSimboloV3,
+  fijarApalancamientoV3,
+  obtenerCuentasFuturosV3
+} from './cuenta-v3';
 
 /* ---------- /api/v2/spot/account/info ---------- */
 
@@ -61,11 +68,27 @@ export const esquemaCuentasFuturos = zod.array(
 
 export type CuentasFuturos = z.infer<typeof esquemaCuentasFuturos>;
 
+/**
+ * El saldo de futuros, por moneda de margen.
+ *
+ * En UTA no existe una cuenta de futuros aparte —ese es el sentido de
+ * «unificada»— y el saldo vive en `/api/v3/account/assets`. `obtenerCuentasFuturosV3`
+ * le da esta misma forma para que el barrido y la pantalla de saldos no
+ * distingan, igual que en las cinco funciones de la Fase C.
+ *
+ * `marginCoin` solo se usa como ultimo recurso, para nombrar una fila que llegue
+ * sin moneda. Quien llama filtra por la suya justo despues.
+ */
 export function obtenerCuentasFuturos(
   cliente: ClienteBitget,
   credencial: Credencial,
-  productType = 'USDT-FUTURES'
+  productType = 'USDT-FUTURES',
+  marginCoin = 'USDT'
 ): Promise<RespuestaRest<CuentasFuturos>> {
+  if (superficieDe(credencial) === 'v3') {
+    return obtenerCuentasFuturosV3(cliente, credencial, marginCoin);
+  }
+
   return cliente.peticionFirmada(
     credencial,
     {
@@ -122,9 +145,22 @@ export type CuentaSimbolo = z.infer<typeof esquemaCuentaSimbolo>;
  *  - **Es idempotente por naturaleza.** Fijar 150x dos veces deja 150x. Un
  *    reenvio accidental no tiene consecuencia, a diferencia de una orden.
  *
- * `holdSide` es opcional. En margen aislado Bitget guarda un apalancamiento por
- * lado y hay que indicarlo; en cruzado hay uno solo y el lado se ignora. Se
- * manda siempre para no depender de esa diferencia.
+ * --------------------------------------------------------------------------
+ * `holdSide` va **solo en margen aislado**
+ * --------------------------------------------------------------------------
+ * En aislado Bitget guarda un apalancamiento por lado -`isolatedLongLever` e
+ * `isolatedShortLever`- y hay que decir cual se fija. En cruzado hay uno solo
+ * -`crossedMarginLeverage`- y el lado no pinta nada.
+ *
+ * Se mandaba siempre, «para no depender de esa diferencia», y esa es la causa
+ * de la incidencia del 05/09/2026: una cuenta cruzada aceptaba la peticion
+ * -codigo 00000, sin error- y seguia con su apalancamiento de antes, porque lo
+ * que se estaba fijando era el del lado aislado, que en cruzado no se aplica.
+ * El panel lo daba por bueno leyendo `longLeverage` de la respuesta, asi que el
+ * informe decia «Apalancamiento 150x» sobre una cuenta que seguia a 10x.
+ *
+ * `lado: null` es «esta cuenta no lo necesita». Quien llama decide, y comprueba
+ * como quedo: ver `MotorLotes.ejecutarApalancamiento`.
  *
  * Fuera de rango responde `400172 · Leverage ratio exceeded the set limit`. El
  * panel lo comprueba antes contra `maxLever` del catalogo para no gastar una
@@ -149,9 +185,20 @@ export function fijarApalancamiento(
     productType: string;
     marginCoin: string;
     apalancamiento: number;
-    lado: 'long' | 'short';
+    /** El lado, o `null` en cruzado: alli hay un solo apalancamiento. */
+    lado: 'long' | 'short' | null;
   }
 ): Promise<RespuestaRest<ApalancamientoFijado>> {
+  if (superficieDe(credencial) === 'v3') {
+    return fijarApalancamientoV3(cliente, credencial, {
+      simbolo: datos.simbolo,
+      /* `productType` y `category` son el mismo valor con otro nombre. */
+      category: datos.productType,
+      apalancamiento: datos.apalancamiento,
+      lado: datos.lado
+    });
+  }
+
   return cliente.peticionFirmada(
     credencial,
     {
@@ -162,7 +209,7 @@ export function fijarApalancamiento(
         productType: datos.productType,
         marginCoin: datos.marginCoin,
         leverage: String(datos.apalancamiento),
-        holdSide: datos.lado
+        ...(datos.lado === null ? {} : { holdSide: datos.lado })
       },
       idempotente: false
     },
@@ -207,6 +254,26 @@ export function fijarModoMargen(
     modoMargen: 'isolated' | 'crossed';
   }
 ): Promise<RespuestaRest<ApalancamientoFijado>> {
+  /*
+   * En UTA el modo de margen deja de ser por simbolo y se declara a nivel de
+   * cuenta o posicion, asi que este endpoint no tiene equivalente conocido.
+   *
+   * Fallar aqui es lo correcto y no una limitacion que se pueda ignorar: el
+   * motor solo llama a esta funcion cuando el modo real **difiere** del que el
+   * operador aprobo. Dejar pasar el fallo abriria la posicion en un modo
+   * distinto del confirmado, que es el fallo del 25/08/2026 por la puerta de
+   * atras. La casilla queda como fallo sin haber enviado ninguna orden.
+   */
+  if (superficieDe(credencial) === 'v3') {
+    return Promise.reject(
+      noDisponibleEnV3(
+        'Cambiar el modo de margen de un activo',
+        `Ponga ${datos.simbolo} en margen ${datos.modoMargen === 'isolated' ? 'aislado' : 'cruzado'} ` +
+          'desde Bitget, o elija en el panel el modo que la cuenta ya tiene.'
+      )
+    );
+  }
+
   return cliente.peticionFirmada(
     credencial,
     {
@@ -256,6 +323,15 @@ export function ajustarMargen(
     lado: 'long' | 'short';
   }
 ): Promise<RespuestaRest<unknown>> {
+  if (superficieDe(credencial) === 'v3') {
+    return ajustarMargenV3(cliente, credencial, {
+      simbolo: datos.simbolo,
+      category: datos.productType,
+      cantidad: datos.cantidad,
+      lado: datos.lado
+    });
+  }
+
   return cliente.peticionFirmada(
     credencial,
     {
@@ -274,13 +350,47 @@ export function ajustarMargen(
   );
 }
 
-export function obtenerCuentaSimbolo(
+export async function obtenerCuentaSimbolo(
   cliente: ClienteBitget,
   credencial: Credencial,
   simbolo: string,
   productType = 'USDT-FUTURES',
   marginCoin = 'USDT'
 ): Promise<RespuestaRest<CuentaSimbolo>> {
+  /*
+   * En V3 no hay un endpoint por simbolo: la lista entera viene dentro de
+   * `account/settings`. Se lee de ahi y se le da esta forma.
+   *
+   * Dos campos salen vacios a proposito, y conviene saberlo antes de usarlos:
+   * `available` y `accountEquity` **no** estan en esa respuesta —viven en
+   * `account/assets`— y esta funcion solo la llama hoy quien busca el
+   * apalancamiento. Si algun dia alguien lee el saldo de aqui en una cuenta UTA,
+   * leera cadena vacia; la fuente correcta es `obtenerActivosCuenta`.
+   */
+  if (superficieDe(credencial) === 'v3') {
+    const estado = await estadoSimboloV3(cliente, credencial, simbolo, productType);
+    /*
+     * `symbolConfigList` trae **un** apalancamiento por simbolo, no uno por
+     * lado. Se copia en los tres campos para que quien elija rama —cruzado o
+     * aislado, long o short— encuentre el mismo numero, que es el que aplica.
+     */
+    const lev = estado?.leverage ?? null;
+    return {
+      datos: {
+        marginCoin,
+        available: '',
+        accountEquity: '',
+        marginMode: estado?.marginMode ?? '',
+        posMode: credencial.holdMode ?? '',
+        isolatedLongLever: lev,
+        isolatedShortLever: lev,
+        crossedMarginLeverage: lev
+      },
+      duracionMs: 0,
+      codigo: '00000'
+    };
+  }
+
   return cliente.peticionFirmada(
     credencial,
     {

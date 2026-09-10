@@ -8,7 +8,14 @@
  *
  * Ver docs/02-arquitectura.html y docs/03-modelo-de-datos.md.
  */
-import type { Decimal, EstadoConexion, Lado, Lote, PosicionMonitor } from './types';
+import type {
+  AccountMode,
+  Decimal,
+  EstadoConexion,
+  Lado,
+  Lote,
+  PosicionMonitor
+} from './types';
 
 /* ---------- estado del sistema ---------- */
 
@@ -39,6 +46,21 @@ export interface InfoSistema {
 }
 
 export type EstadoVault = 'sin-inicializar' | 'bloqueado' | 'desbloqueado';
+
+/**
+ * Resultado de traer las credenciales de una instalacion anterior.
+ *
+ * `cancelado` no es un fallo: el operador cerro el selector de carpeta. Se
+ * distingue para que la pantalla no enseñe un error donde no lo hubo.
+ */
+export interface ResultadoImportacionIpc {
+  cancelado: boolean;
+  ok: boolean;
+  motivo: string | null;
+  mensaje: string;
+  /** Cuantas subcuentas traia el registro importado, si venia. */
+  cuentas: number | null;
+}
 
 export interface EstadoApp {
   vault: EstadoVault;
@@ -92,6 +114,18 @@ export interface FilaCuenta {
   estado: EstadoConexion;
   /** Texto para el operador cuando el estado no es `conectada`. */
   motivo: string | null;
+  /**
+   * Con que API habla la subcuenta: `classic` (V2) o `uta` (V3).
+   *
+   * Va a la pantalla porque una subcuenta que se actualiza a UTA deja de
+   * responder a la API clasica **sin avisar a nadie**, y sin este dato el
+   * operador solo veria una fila caida sin motivo aparente. Es el unico sitio
+   * del panel donde la diferencia entre las dos superficies se hace visible; en
+   * todo lo demas se operan igual.
+   */
+  accountMode: AccountMode;
+  /** `true` mientras Bitget declara la cuenta a mitad del cambio a UTA. */
+  enTransicion: boolean;
   altaEn: string;
 }
 
@@ -198,6 +232,226 @@ export interface CuentaPanel {
   id: string;
   nombre: string;
   subcuentas: SubcuentaPanel[];
+}
+
+/* ---------- cuentas madre y traspasos ---------- */
+
+/**
+ * Alta de la credencial de una cuenta principal.
+ *
+ * No lleva `uid`: lo dice Bitget al verificarla, igual que en el alta de una
+ * subcuenta. Pedirselo al operador seria pedirle un dato que puede equivocar y
+ * que ya esta disponible.
+ */
+export interface AltaMadre {
+  etiqueta: string;
+  apiKey: string;
+  secretKey: string;
+  passphrase: string;
+}
+
+/** Una cuenta principal registrada. Nunca lleva secretos. */
+export interface MadreIpc {
+  id: string;
+  uidMadre: string;
+  etiqueta: string;
+  apiKeyEnmascarada: string;
+  altaEn: string;
+  /**
+   * Subcuentas que Bitget reporto al darla de alta.
+   *
+   * `null` cuando no se ha vuelto a comprobar -al listar, sin gastar una
+   * peticion-. Cero al alta es la senal de que la clave no es de la madre que
+   * el operador cree.
+   */
+  subcuentasVistas: number | null;
+}
+
+export interface ResultadoAltaMadre {
+  ok: boolean;
+  motivo: string | null;
+  advertencias: AvisoCredencial[];
+  madre: MadreIpc | null;
+}
+
+/** Una subcuenta en la pantalla de saldos. */
+export interface FilaSaldoIpc {
+  uid: string;
+  cuentaId: string | null;
+  etiqueta: string;
+  /** `null` significa «no se sabe», nunca «cero». */
+  disponible: Decimal | null;
+  /** Lo que de verdad puede salir: el saldo menos lo comprometido en posiciones. */
+  maxTransferible: Decimal | null;
+  equity: Decimal | null;
+  /** La reporta Bitget, pero no esta dada de alta en el panel. */
+  soloEnBitget: boolean;
+  /** Esta en el panel, pero la madre no la reporto. */
+  sinDatos: boolean;
+}
+
+/** Lo que la pantalla de saldos necesita para pintarse entera. */
+export interface SaldosPantalla {
+  uidMadre: string;
+  etiquetaMadre: string;
+  /**
+   * Saldo de futuros de la **propia cuenta principal**, o `null` si no se pudo leer.
+   *
+   * No sale de `sub-account-assets` -ahi la madre no se reporta a si misma- sino
+   * de `mix/account/accounts` firmado con su propia credencial. Es una peticion
+   * mas por refresco, y la paga con creces: es la cuenta desde la que se reparte,
+   * y sin este dato era la unica de la pantalla sin cifra.
+   */
+  disponibleMadre: Decimal | null;
+  moneda: string;
+  /** Cuando se leyo. La pantalla lo enseña: un saldo sin hora es un saldo que miente. */
+  obtenidoEn: string;
+  filas: FilaSaldoIpc[];
+  totalDisponible: Decimal;
+  totalTransferible: Decimal;
+  conDatos: number;
+}
+
+/* ---------- traspaso entre subcuentas (Fase 3) ---------- */
+
+/** Una punta del traspaso, tal como se enseña en la confirmación. */
+export interface PuntaTraspasoIpc {
+  uid: string;
+  etiqueta: string;
+  /** Saldo antes del movimiento. Vacío si no se conoce. */
+  antes: Decimal;
+  /** Cómo queda si sale bien. Vacío si no se conoce el de partida. */
+  despues: Decimal;
+}
+
+/**
+ * Un traspaso calculado y pendiente de aprobar. **Todavía no se ha enviado.**
+ *
+ * Es lo que el operador ve antes de decidir: origen, destino, importe y cómo
+ * quedan los dos saldos. El renderer devuelve solo el `id`, nunca los números:
+ * si los devolviera, la pantalla podría enviar un importe distinto del que se
+ * aprobó.
+ */
+export interface PlanTraspasoIpc {
+  id: string;
+  uidMadre: string;
+  origen: PuntaTraspasoIpc;
+  destino: PuntaTraspasoIpc;
+  importe: Decimal;
+  moneda: string;
+  /** Lo máximo que Bitget deja salir del origen ahora mismo. */
+  maxTransferible: Decimal;
+  clientOid: string;
+  creadoEn: string;
+}
+
+/**
+ * Por que no salio un traspaso.
+ *
+ * `indeterminado` no es un fallo: se envio y Bitget no confirmo si entro. La
+ * diferencia manda en lo que puede hacer el operador -ante un rechazo puede
+ * repetir; ante esto tiene que comprobar el saldo antes, porque un plan nuevo
+ * lleva un `clientOid` nuevo y reenviarlo moveria el dinero dos veces-.
+ */
+export type MotivoFalloTraspaso =
+  | 'paso-incorrecto'
+  | 'sin-credencial'
+  | 'rechazado'
+  | 'indeterminado';
+
+export interface ResultadoTraspaso {
+  ok: boolean;
+  motivo: MotivoFalloTraspaso | null;
+  /** Texto en castellano cuando el exchange lo rechaza. */
+  mensaje: string | null;
+  /** Identificador del movimiento en Bitget. Lo único con lo que reclamar. */
+  transferId: string | null;
+  plan: PlanTraspasoIpc;
+}
+
+/** Un traspaso del historial, tal como quedó registrado. */
+export interface MovimientoTraspasoIpc {
+  clientOid: string;
+  ts: string;
+  uidOrigen: string;
+  etiquetaOrigen: string;
+  uidDestino: string;
+  etiquetaDestino: string;
+  importe: Decimal;
+  moneda: string;
+  /**
+   * `pendiente` es el estado importante: se envió y no se supo el desenlace.
+   * No es un fallo —el dinero pudo salir— y por eso nunca se reintenta solo.
+   */
+  resultado: 'exito' | 'fallo' | 'pendiente';
+  transferId: string | null;
+  mensaje: string | null;
+  resueltoEn: string | null;
+}
+
+/* ---------- reparto y recogida masiva (Fase 4) ---------- */
+
+export type ModoRepartoIpc = 'iguales' | 'igualar';
+
+/** Un traspaso de la lista, ya calculado y pendiente de aprobar. */
+export interface MovimientoRepartoIpc {
+  uidOrigen: string;
+  etiquetaOrigen: string;
+  uidDestino: string;
+  etiquetaDestino: string;
+  importe: Decimal;
+  /** Saldo de la subcuenta antes y después. La madre no lleva estos dos. */
+  antes: Decimal;
+  despues: Decimal;
+}
+
+/** Una subcuenta que se queda fuera, y por qué. Se enseña: no desaparece. */
+export interface DescarteRepartoIpc {
+  uid: string;
+  etiqueta: string;
+  motivo: string;
+  mensaje: string;
+}
+
+/**
+ * Un reparto o una recogida, calculados y **sin enviar**.
+ *
+ * `total` es la suma exacta de los importes de `movimientos`, no lo que el
+ * operador escribió: si alguna subcuenta se descarta, el total que se enseña es
+ * el que de verdad va a moverse.
+ */
+export interface PlanRepartoIpc {
+  id: string;
+  uidMadre: string;
+  tipo: 'reparto' | 'recogida';
+  modo: ModoRepartoIpc | null;
+  moneda: string;
+  total: Decimal;
+  movimientos: MovimientoRepartoIpc[];
+  descartes: DescarteRepartoIpc[];
+  creadoEn: string;
+}
+
+/** Cómo fue cada uno de los traspasos del lote. */
+export interface ResultadoMovimientoIpc {
+  clientOid: string;
+  etiquetaOrigen: string;
+  etiquetaDestino: string;
+  importe: Decimal;
+  ok: boolean;
+  mensaje: string | null;
+}
+
+export interface ResultadoReparto {
+  /** `true` solo si **todos** salieron. Con uno fallido, es `false`. */
+  ok: boolean;
+  motivo: 'paso-incorrecto' | 'sin-credencial' | null;
+  plan: PlanRepartoIpc;
+  resultados: ResultadoMovimientoIpc[];
+  enviados: number;
+  fallidos: number;
+  /** Enviados sin confirmacion. Se cuentan aparte: no son fallos. */
+  indeterminados: number;
 }
 
 /* ---------- apertura de operaciones ---------- */
@@ -608,6 +862,13 @@ export interface PeticionesIpc {
    * al operador que esta en un panel que no es.
    */
   'sistema:numero-panel': (numero: number) => Promise<void>;
+  /**
+   * Trae las credenciales de una carpeta de datos anterior.
+   *
+   * Sin parametros a proposito: el selector de carpeta lo abre el proceso
+   * principal, asi que el renderer no puede señalar una ruta. Ver el manejador.
+   */
+  'credenciales:importar': () => Promise<ResultadoImportacionIpc>;
   'vault:estado': () => Promise<EstadoVault>;
   'vault:crear': (contrasena: string) => Promise<ResultadoVault>;
   'vault:abrir': (contrasena: string) => Promise<ResultadoVault>;
@@ -644,10 +905,7 @@ export interface PeticionesIpc {
    */
   'mercado:catalogo': () => Promise<ActivoIpc[]>;
   /** Pone un activo en una casilla, o la vacia con `null`. Devuelve las ocho. */
-  'mercado:fijar-ranura': (
-    indice: number,
-    simbolo: string | null
-  ) => Promise<(ActivoIpc | null)[]>;
+  'mercado:fijar-ranura': (indice: number, simbolo: string | null) => Promise<(ActivoIpc | null)[]>;
   /** Precio de marca de cada activo, el mismo con el que se dimensiona. */
   'mercado:precios': () => Promise<Record<string, string>>;
   /** ¿Hay contrasena de paso configurada? */
@@ -689,10 +947,7 @@ export interface PeticionesIpc {
    */
   /** Calcula a que precio queda el Take Profit de cada posicion. No coloca nada. */
   'tp:planificar': (peticion: PeticionTakeProfitIpc) => Promise<PlanTakeProfitIpc>;
-  'tp:ejecutar': (
-    planId: string,
-    soloEstos?: { cuentaId: string; lado: Lado }[]
-  ) => Promise<Lote>;
+  'tp:ejecutar': (planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]) => Promise<Lote>;
   /** Calcula como queda el margen de cada posicion. No mueve nada. */
   'margen:planificar': (peticion: PeticionMargenIpc) => Promise<PlanMargenIpc>;
   'margen:ejecutar': (
@@ -719,6 +974,53 @@ export interface PeticionesIpc {
    * solo evita el hueco entre que se abre el panel y llega el primer empujon.
    */
   'monitor:instantanea': () => Promise<PosicionMonitor[]>;
+
+  /*
+   * Traspasos entre subcuentas. Fase 2: solo lectura.
+   *
+   * `saldos:leer` es la unica de las tres que sale a Bitget, y gasta una
+   * peticion de un cupo de 1 cada 10 s por UID: se llama al abrir la pantalla y
+   * al refrescar a mano, nunca en un intervalo.
+   */
+  'madres:listar': () => Promise<MadreIpc[]>;
+  'madres:agregar': (alta: AltaMadre) => Promise<ResultadoAltaMadre>;
+  'madres:eliminar': (uidMadre: string, contrasenaPaso: string) => Promise<ResultadoBaja>;
+  'saldos:leer': (uidMadre?: string) => Promise<SaldosPantalla>;
+
+  /*
+   * Traspaso, Fase 3. Aqui se mueve dinero.
+   *
+   * En dos pasos, como las seis operaciones: `planificar` calcula y no envia
+   * nada, `ejecutar` envia lo ya aprobado identificandolo por su `id`. La
+   * pantalla nunca manda importes al ejecutar -solo el id-, de modo que no
+   * puede enviarse algo distinto de lo que se aprobo.
+   */
+  'traspaso:planificar': (peticion: {
+    uidOrigen: string;
+    uidDestino: string;
+    importe: string;
+    uidMadre?: string;
+  }) => Promise<PlanTraspasoIpc>;
+  /** Exige la contrasena de paso, como la apertura de posiciones. */
+  'traspaso:ejecutar': (planId: string, contrasenaPaso: string) => Promise<ResultadoTraspaso>;
+  'traspaso:historial': (limite?: number) => Promise<MovimientoTraspasoIpc[]>;
+
+  /*
+   * Reparto y recogida masiva. Mismo esquema de dos pasos: planificar no envia
+   * nada y ejecutar manda la lista entera, uno detras de otro.
+   */
+  'reparto:planificar': (peticion: {
+    destinos: string[];
+    total: string;
+    modo: ModoRepartoIpc;
+    uidMadre?: string;
+  }) => Promise<PlanRepartoIpc>;
+  'recogida:planificar': (peticion: {
+    origenes: string[];
+    uidMadre?: string;
+  }) => Promise<PlanRepartoIpc>;
+  /** Exige la contrasena de paso, como todo lo que mueve dinero. */
+  'reparto:ejecutar': (planId: string, contrasenaPaso: string) => Promise<ResultadoReparto>;
 }
 
 export type CanalPeticion = keyof PeticionesIpc;
@@ -757,6 +1059,7 @@ export interface ApiPcb {
   sistemaInfo(): Promise<InfoSistema>;
   sistemaEstado(): Promise<EstadoApp>;
   sistemaFijarNumeroPanel(numero: number): Promise<void>;
+  credencialesImportar(): Promise<ResultadoImportacionIpc>;
   vaultEstado(): Promise<EstadoVault>;
   vaultCrear(contrasena: string): Promise<ResultadoVault>;
   vaultAbrir(contrasena: string): Promise<ResultadoVault>;
@@ -790,6 +1093,26 @@ export interface ApiPcb {
     soloEstos?: { cuentaId: string; lado: Lado }[]
   ): Promise<Lote>;
   monitorInstantanea(): Promise<PosicionMonitor[]>;
+  madresListar(): Promise<MadreIpc[]>;
+  madresAgregar(alta: AltaMadre): Promise<ResultadoAltaMadre>;
+  madresEliminar(uidMadre: string, contrasenaPaso: string): Promise<ResultadoBaja>;
+  saldosLeer(uidMadre?: string): Promise<SaldosPantalla>;
+  traspasoPlanificar(peticion: {
+    uidOrigen: string;
+    uidDestino: string;
+    importe: string;
+    uidMadre?: string;
+  }): Promise<PlanTraspasoIpc>;
+  traspasoEjecutar(planId: string, contrasenaPaso: string): Promise<ResultadoTraspaso>;
+  traspasoHistorial(limite?: number): Promise<MovimientoTraspasoIpc[]>;
+  repartoPlanificar(peticion: {
+    destinos: string[];
+    total: string;
+    modo: ModoRepartoIpc;
+    uidMadre?: string;
+  }): Promise<PlanRepartoIpc>;
+  recogidaPlanificar(peticion: { origenes: string[]; uidMadre?: string }): Promise<PlanRepartoIpc>;
+  repartoEjecutar(planId: string, contrasenaPaso: string): Promise<ResultadoReparto>;
   /** Devuelve la funcion para cancelar la suscripcion. */
   suscribir<C extends CanalEvento>(canal: C, cb: (dato: EventosIpc[C]) => void): () => void;
 }

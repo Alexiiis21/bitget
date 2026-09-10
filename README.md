@@ -15,6 +15,12 @@ REST y el pool de sockets están construidos y probados, así que al abrir el pa
 ven. Lo que no está hecho es la fase: ni se ha revisado contra el uso real, ni entra en la
 validación en curso. Que se vea funcionando no significa que esté entregado.
 
+**Traspaso de saldo entre subcuentas (requerimiento adicional): fases 1 a 4 construidas.** Pantalla
+de saldos, traspaso con confirmación previa y registro, y reparto y recogida masiva. La lectura de
+saldos está verificada contra la API real; **el traspaso todavía no ha movido dinero de verdad** y
+esa prueba física es lo que queda antes de darlo por entregado. Alcance y condiciones en
+[`docs/presupuesto-traspaso-subcuentas.md`](docs/presupuesto-traspaso-subcuentas.md).
+
 ## Requisitos
 
 - **Node.js ≥ 22.19**
@@ -132,6 +138,14 @@ filtró lógica hacia el renderer.
 | [`docs/cliente/entrega-mercado-real.md`](docs/cliente/entrega-mercado-real.md) | Los dos binarios del cliente, cómo se generan y cómo se distinguen |
 | [`docs/cotizacion-traspasos-entre-subcuentas.md`](docs/cotizacion-traspasos-entre-subcuentas.md) | Propuesta inicial: traspaso de saldo entre subcuentas, con las preguntas y pruebas contra la API |
 | [`docs/presupuesto-traspaso-subcuentas.md`](docs/presupuesto-traspaso-subcuentas.md) | Presupuesto formal por fases de la misma función — el que rige — y su cruce con lo ya cambiado en `verificacion.ts` |
+| [`docs/00-traspasos-fase-1.md`](docs/00-traspasos-fase-1.md) | Fase 1 de traspasos: permisos verificados en vivo, los dos endpoints de Bitget que hacen falta, diseño del flujo y de la pantalla de saldos |
+| [`docs/00-traspasos-fase-2.md`](docs/00-traspasos-fase-2.md) | Fase 2 de traspasos: pantalla de saldos por subcuenta, con el disponible y el máximo transferible real |
+| [`docs/00-traspasos-fase-3.md`](docs/00-traspasos-fase-3.md) | Fase 3 de traspasos: ejecución con confirmación previa y registro. **Probada contra Bitget el 05/09/2026** |
+| [`docs/00-traspasos-fase-4.md`](docs/00-traspasos-fase-4.md) | Fase 4 de traspasos: reparto y recogida masiva. **Probada contra Bitget el 05/09/2026** |
+| [`docs/00-entrega-v0.7.0.md`](docs/00-entrega-v0.7.0.md) | Nota de entrega del binario v0.7.0 (mercado real) con los traspasos |
+| [`docs/00-entrega-v0.8.1.md`](docs/00-entrega-v0.8.1.md) | Nota de entrega del binario v0.8.1 (mercado real): traspaso probado con dinero real, apalancamiento corregido, importación de credenciales al cambiar de versión |
+| [`docs/00-entrega-v0.9.0-uta.md`](docs/00-entrega-v0.9.0-uta.md) | **Nota de entrega del binario v0.9.0** (mercado real): convivencia V2/V3, qué funciona en cuentas UTA y qué no, y **el procedimiento de validación contra una subcuenta UTA real** |
+| [`docs/00-uta-fase-1-equivalencias.md`](docs/00-uta-fase-1-equivalencias.md) | Mapa técnico V2↔V3: inventario de las 21 rutas, traducción de parámetros, códigos de error, huecos sin equivalente y riesgos abiertos |
 | [`docs/01-stack-tecnologico.md`](docs/01-stack-tecnologico.md) | Stack, hallazgos sobre la API de Bitget, pool de sockets, cola de ejecución |
 | [`docs/02-arquitectura.html`](docs/02-arquitectura.html) | Arquitectura técnica, flujo de una operación, estados de un lote |
 | [`docs/03-modelo-de-datos.md`](docs/03-modelo-de-datos.md) | Esquema de cada archivo, cifrado, órdenes indeterminadas |

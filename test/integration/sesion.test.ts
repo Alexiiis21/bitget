@@ -21,6 +21,14 @@ import {
   type ExchangeSimulado
 } from '../mock-exchange/servidor';
 
+/*
+ * scrypt barato: estas pruebas crean un almacen por caso y lo que ejercitan es
+ * la sesion, no la dureza del cifrado -que cubre test/unit/vault.test.ts-. Con
+ * el coste real, varias suites en paralelo agotaban el limite de tiempo de
+ * vitest de forma intermitente.
+ */
+const KDF_PRUEBAS = { N: 16, r: 1, p: 1 };
+
 const MAESTRA = 'contrasena-de-prueba';
 /** La contrasena de paso, la misma que exigen abrir, cerrar y dar de baja. */
 const PASO = 'bg1';
@@ -92,7 +100,7 @@ beforeEach(async () => {
 
   exchange = await iniciarExchangeSimulado();
   cliente = new ClienteBitget({ host: exchange.url });
-  sesion = new Sesion({ vault: rutaVault, cuentas: rutaCuentas, activos: rutaActivos }, cliente);
+  sesion = new Sesion({ vault: rutaVault, cuentas: rutaCuentas, activos: rutaActivos }, cliente, { parametrosKdf: KDF_PRUEBAS });
 });
 
 afterEach(async () => {
@@ -240,6 +248,20 @@ describe('alta de una subcuenta', () => {
    * El tope se comprueba antes de salir a la red: rechazar despues costaria dos
    * peticiones del cupo para acabar diciendo que no, y dejaria la credencial ya
    * cifrada en memoria sin cuenta a la que pertenecer.
+   *
+   * --------------------------------------------------------------------------
+   * Plazo propio: es la prueba mas pesada de la suite
+   * --------------------------------------------------------------------------
+   * Da de alta quince cuentas madre, y cada alta deriva una clave -el KDF esta
+   * calibrado para tardar- y verifica contra el exchange simulado. Sola tarda
+   * ~4,7 s contra el plazo por defecto de 5 s, asi que en una ejecucion
+   * completa -cincuenta y un archivos repartidos entre los nucleos- lo rebasaba
+   * de forma intermitente.
+   *
+   * El plazo mide la velocidad de la maquina, no la regla de negocio que esta
+   * prueba afirma. Se le da margen suficiente en vez de recortar el bucle:
+   * quince altas **son** el caso que se quiere probar, porque el tope se alcanza
+   * con quince.
    */
   it('rechaza una cuenta principal de mas sin preguntar a Bitget', async () => {
     await sesion.crear(MAESTRA);
@@ -256,7 +278,7 @@ describe('alta de una subcuenta', () => {
     expect(r.motivo).toContain(`${CUENTAS_MADRE_MAX} cuentas principales`);
     expect(exchange.peticiones).toHaveLength(peticionesAntes);
     expect(sesion.cuentasPanel()).toHaveLength(CUENTAS_MADRE_MAX);
-  });
+  }, 30_000);
 
   /*
    * La casilla la elige el operador en el formulario -de 1 a 20- y la subcuenta
@@ -921,6 +943,7 @@ describe('planificar y ejecutar una apertura', () => {
     const cuentaId = await conUnaCuenta();
     let reloj = Date.now();
     const otra = new Sesion({ vault: rutaVault, cuentas: rutaCuentas, activos: rutaActivos }, cliente, {
+      parametrosKdf: KDF_PRUEBAS,
       ahora: () => reloj
     });
     await otra.abrir(MAESTRA);

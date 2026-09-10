@@ -146,6 +146,51 @@ describe('el margen se comprueba antes que nada', () => {
       expect(r.motivo).toBe('margen-invalido');
     }
   });
+
+  /*
+   * Incidencia del 05/09/2026: `new Decimal('.')` lanza, el error subia hasta
+   * el manejador de `apertura:planificar` y se llevaba el lote entero. Esta
+   * funcion no lanza: rechaza con su motivo, que es lo que permite que las
+   * demas casillas sigan.
+   */
+  it('lo que no es un numero se rechaza, no revienta', () => {
+    for (const margen of ['.', '..', '1.2.3', 'abc', '1e', ' ']) {
+      const r = dimensionarApertura({ ...base, margenInicial: margen });
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.motivo).toBe('margen-invalido');
+    }
+  });
+
+  /*
+   * Un margen adicional ilegible **no es cero**: tomarlo por cero abriria la
+   * posicion sin el colchon que el operador escribio y aprobo.
+   */
+  it('un margen adicional ilegible no se toma por cero: no abre', () => {
+    const r = dimensionarApertura({ ...base, margenAdicional: '.' });
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.motivo).toBe('margen-invalido');
+    expect(r.mensaje).toContain('adicional');
+  });
+
+  it('un precio ilegible se rechaza como precio, no como excepcion', () => {
+    const r = dimensionarApertura({ ...base, precio: '.' });
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.motivo).toBe('precio-invalido');
+  });
+
+  /* Un saldo ilegible cuenta como cero: no abre, que es el error inofensivo. */
+  it('un saldo ilegible no abre', () => {
+    const r = dimensionarApertura({ ...base, saldoDisponible: '.' });
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.motivo).toBe('margen-insuficiente');
+  });
 });
 
 describe('lo que impone el simbolo', () => {

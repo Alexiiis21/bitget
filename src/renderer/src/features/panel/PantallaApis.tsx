@@ -1,6 +1,7 @@
 import { useId, useState, type CSSProperties } from 'react';
 import { NOMBRES_CUENTA_MADRE, SUBCUENTAS_POR_GRUPO } from '@shared/constants';
-import { BOTON_PRIMARIO, DISTINTIVO_API, FUENTE, T } from '@/lib/tokens';
+import type { Account, ApiKeyRow } from '@shared/domain/panel-view';
+import { BOTON_PRIMARIO, DISTINTIVO_API, DISTINTIVO_MODO, FUENTE, T } from '@/lib/tokens';
 import { usarPanel } from '@/store/panel';
 import { EsqueletoFilas, EstadoVacio } from './Esqueleto';
 import type { FormularioApiKey } from './tipos';
@@ -202,6 +203,171 @@ function Detectado({
   );
 }
 
+/* ---------------- la lista, repartida en bloques ---------------- */
+
+/**
+ * Un bloque de la lista: una cuenta principal con sus subcuentas.
+ *
+ * --------------------------------------------------------------------------
+ * Por que la lista va en bloques y no seguida
+ * --------------------------------------------------------------------------
+ * Lo pidio el operador el 05/09/2026, la primera vez que dio de alta una
+ * segunda cuenta principal: el registro devuelve las fichas en el orden en que
+ * se guardaron, asi que una subcuenta de la B queda entre dos de la A y no hay
+ * forma de ver de un vistazo que tiene cada cuenta principal. Con las quince
+ * cuentas llenas son trescientas filas seguidas, que es justo donde ese orden
+ * deja de ser un detalle.
+ *
+ * El orden dentro del bloque es el de la **casilla** —la de la matriz—, no el
+ * de alta ni el del nombre: es el numero que el operador tiene memorizado y con
+ * el que busca. La casilla no viaja en `ApiKeyRow`, asi que sale de la matriz;
+ * lo que no este en ella —una ficha recien dada de alta, antes del refresco—
+ * cae al final del bloque en vez de desaparecer.
+ */
+interface BloqueApis {
+  nombre: string;
+  filas: ApiKeyRow[];
+}
+
+/** Donde va cada cuenta principal en la lista. Las de fuera de A–O, al final. */
+const ORDEN_MADRE = new Map(NOMBRES_CUENTA_MADRE.map((n, i) => [n, i]));
+
+/** La casilla de cada subcuenta, tal como la ordena la matriz. */
+function casillasDe(cuentas: readonly Account[]): Map<string, number> {
+  const casillas = new Map<string, number>();
+  for (const cuenta of cuentas) {
+    for (const sub of cuenta.subAccounts) casillas.set(sub.id, sub.slot);
+  }
+  return casillas;
+}
+
+function agruparPorCuenta(
+  filas: readonly ApiKeyRow[],
+  casillas: ReadonlyMap<string, number>
+): BloqueApis[] {
+  const bloques = new Map<string, ApiKeyRow[]>();
+  for (const fila of filas) {
+    const suyas = bloques.get(fila.accountName);
+    if (suyas === undefined) bloques.set(fila.accountName, [fila]);
+    else suyas.push(fila);
+  }
+
+  /* Sin casilla conocida, al final del bloque: `MAX_SAFE_INTEGER` y no `Infinity`
+     porque la resta de dos infinitos es `NaN` y desordenaría el bloque entero. */
+  const casilla = (id: string): number => casillas.get(id) ?? Number.MAX_SAFE_INTEGER;
+  const posicion = (nombre: string): number => ORDEN_MADRE.get(nombre) ?? NOMBRES_CUENTA_MADRE.length;
+
+  return [...bloques.entries()]
+    .sort(([a], [b]) => posicion(a) - posicion(b) || a.localeCompare(b, 'es'))
+    .map(([nombre, suyas]) => ({
+      nombre,
+      filas: [...suyas].sort(
+        (x, y) =>
+          casilla(x.id) - casilla(y.id) ||
+          x.subAccountLabel.localeCompare(y.subAccountLabel, 'es', { numeric: true })
+      )
+    }));
+}
+
+/**
+ * La cabecera de un bloque. Se pliega, y por lo mismo que existe el bloque.
+ *
+ * Con varias cuentas principales llenas, llegar a la ultima significa pasar por
+ * las anteriores; plegado, cada cuenta principal ocupa una linea y sigue
+ * diciendo lo unico que hay que saber de un vistazo: cuantas subcuentas tiene y
+ * cuantas responden.
+ */
+function BandaBloque({
+  bloque,
+  plegado,
+  alPlegar
+}: {
+  bloque: BloqueApis;
+  plegado: boolean;
+  alPlegar: () => void;
+}) {
+  const conectadas = bloque.filas.filter((f) => f.status === 'ok').length;
+  const total = bloque.filas.length;
+
+  return (
+    <div
+      onClick={alPlegar}
+      title={`Plegar o desplegar las ${total} subcuentas de la cuenta principal ${bloque.nombre}`}
+      /* `minWidth` como el de las filas: sin él la banda se quedaría corta en
+         cuanto la tabla se desplace en horizontal, y las filas pasarían por debajo. */
+      style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: ANCHO_MINIMO, padding: '7px 18px', background: T.banda, borderBottom: `1px solid ${T.borde}`, cursor: 'pointer', userSelect: 'none' }}
+    >
+      <span style={{ width: 10, display: 'flex', justifyContent: 'center', fontSize: 10, lineHeight: 1, color: T.marcaTexto }}>
+        {plegado ? '▶' : '▼'}
+      </span>
+      <span style={{ fontSize: 12.5, fontWeight: 700, letterSpacing: '.12em', color: T.marcaTexto, whiteSpace: 'nowrap' }}>
+        CUENTA PRINCIPAL {bloque.nombre}
+      </span>
+      <span style={{ fontSize: 11, fontWeight: 600, color: T.texto3, fontFamily: FUENTE.mono, whiteSpace: 'nowrap' }}>
+        {total} {total === 1 ? 'subcuenta' : 'subcuentas'} · {conectadas} conectadas
+      </span>
+    </div>
+  );
+}
+
+function FilaApi({ fila }: { fila: ApiKeyRow }) {
+  const probarApi = usarPanel((s) => s.probarApi);
+  const pedirBajaApi = usarPanel((s) => s.pedirBajaApi);
+  const distintivo = DISTINTIVO_API[fila.status];
+  /* La transición manda sobre el modelo: es lo que impide operar la cuenta. */
+  const modo = DISTINTIVO_MODO[fila.inTransition ? 'transicion' : fila.accountMode];
+
+  return (
+    <div style={{ display: 'grid', minWidth: ANCHO_MINIMO, gridTemplateColumns: REJILLA, gap: 12, alignItems: 'center', padding: '11px 18px', borderBottom: `1px solid ${T.bordeSuave}` }}>
+      <div style={{ ...recorte, fontSize: 13.5, fontWeight: 600, color: T.texto }}>{fila.subAccountLabel}</div>
+      <div style={{ fontSize: 12.5, fontWeight: 600, color: T.marcaTexto, fontFamily: FUENTE.mono }}>{fila.accountName}</div>
+      <div style={{ ...recorte, fontSize: 12.5, fontFamily: FUENTE.mono, color: T.texto2 }}>{fila.maskedKey || '— sin credenciales —'}</div>
+      {/* El UID no se enmascara: no sirve para firmar y es lo que identifica la cuenta. */}
+      <div style={{ ...recorte, fontSize: 12.5, fontFamily: FUENTE.mono, color: T.texto2 }} title={fila.parentUid === '' ? undefined : `Cuenta principal ${fila.parentUid}`}>
+        {fila.uid === '' ? '—' : fila.uid}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 9px', borderRadius: 20, fontSize: 11.5, fontWeight: 600, whiteSpace: 'nowrap', background: distintivo.fondo, color: distintivo.texto }}>
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: distintivo.punto, display: 'block' }} />
+          {distintivo.etiqueta}
+        </span>
+        {/*
+          * Con qué API habla la cuenta.
+          *
+          * Va aquí, pegado al estado, y no en una columna propia: es el dato que
+          * explica un estado raro. Una subcuenta que el titular actualiza a UTA
+          * deja de responder a la API clásica sin previo aviso, y sin este
+          * distintivo la fila solo se vería caída.
+          */}
+        {fila.maskedKey !== '' && (
+          <span
+            title={modo.pista}
+            style={{ display: 'inline-flex', alignItems: 'center', padding: '3px 7px', borderRadius: 20, fontSize: 10.5, fontWeight: 700, letterSpacing: '.04em', whiteSpace: 'nowrap', background: modo.fondo, color: modo.texto }}
+          >
+            {modo.etiqueta}
+          </span>
+        )}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, minWidth: 0 }}>
+        <button type="button" className="pcb-boton-claro" onClick={() => void probarApi(fila.id)} style={{ ...botonFila, border: `1px solid ${T.bordeFuerte}`, color: T.texto }}>
+          Probar
+        </button>
+        {/*
+          * «Eliminar» abre la confirmación; no borra.
+          *
+          * Borraba en el acto hasta el 31/08/2026. Ahora la baja pide
+          * la contraseña de paso —la de abrir y cerrar—, que es lo
+          * único que separa un clic de más de perder la credencial de
+          * una subcuenta. Ver `DialogoBajaApi`.
+          */}
+        <button type="button" className="pcb-boton-peligro" onClick={() => void pedirBajaApi(fila.id)} title="Pide la contraseña de paso: la baja borra la credencial y no se puede deshacer" style={{ ...botonFila, border: '1px solid #f0d6d2', color: T.corto }}>
+          Eliminar
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function PantallaApis() {
   const abierta = usarPanel((s) => s.apisAbierto);
   const apiKeys = usarPanel((s) => s.apiKeys);
@@ -210,14 +376,23 @@ export function PantallaApis() {
   const escribirFormulario = usarPanel((s) => s.escribirFormulario);
   const guardarApi = usarPanel((s) => s.guardarApi);
   const ultimaValidacion = usarPanel((s) => s.ultimaValidacion);
-  const probarApi = usarPanel((s) => s.probarApi);
-  const pedirBajaApi = usarPanel((s) => s.pedirBajaApi);
   const carga = usarPanel((s) => s.cargaApis);
   const motivo = usarPanel((s) => s.motivoApis);
   const refrescarApis = usarPanel((s) => s.refrescarApis);
+  const cuentas = usarPanel((s) => s.cuentas);
+  /* Qué bloques están plegados. Vacío = todos abiertos, que es como se entra. */
+  const [plegados, fijarPlegados] = useState<ReadonlySet<string>>(new Set());
 
   if (!abierta) return null;
   const conectadas = apiKeys.filter((a) => a.status === 'ok').length;
+  const bloques = agruparPorCuenta(apiKeys, casillasDe(cuentas));
+
+  const alternarBloque = (nombre: string): void =>
+    fijarPlegados((antes) => {
+      const ahora = new Set(antes);
+      if (!ahora.delete(nombre)) ahora.add(nombre);
+      return ahora;
+    });
 
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 75, background: T.fondo, display: 'flex', flexDirection: 'column' }}>
@@ -288,42 +463,17 @@ export function PantallaApis() {
               />
             )}
 
-            {apiKeys.map((fila) => {
-              const distintivo = DISTINTIVO_API[fila.status];
-              return (
-                <div key={fila.id} style={{ display: 'grid', minWidth: ANCHO_MINIMO, gridTemplateColumns: REJILLA, gap: 12, alignItems: 'center', padding: '11px 18px', borderBottom: `1px solid ${T.bordeSuave}` }}>
-                  <div style={{ ...recorte, fontSize: 13.5, fontWeight: 600, color: T.texto }}>{fila.subAccountLabel}</div>
-                  <div style={{ fontSize: 12.5, fontWeight: 600, color: T.marcaTexto, fontFamily: FUENTE.mono }}>{fila.accountName}</div>
-                  <div style={{ ...recorte, fontSize: 12.5, fontFamily: FUENTE.mono, color: T.texto2 }}>{fila.maskedKey || '— sin credenciales —'}</div>
-                  {/* El UID no se enmascara: no sirve para firmar y es lo que identifica la cuenta. */}
-                  <div style={{ ...recorte, fontSize: 12.5, fontFamily: FUENTE.mono, color: T.texto2 }} title={fila.parentUid === '' ? undefined : `Cuenta principal ${fila.parentUid}`}>
-                    {fila.uid === '' ? '—' : fila.uid}
-                  </div>
-                  <div style={{ minWidth: 0 }}>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 9px', borderRadius: 20, fontSize: 11.5, fontWeight: 600, whiteSpace: 'nowrap', background: distintivo.fondo, color: distintivo.texto }}>
-                      <span style={{ width: 6, height: 6, borderRadius: '50%', background: distintivo.punto, display: 'block' }} />
-                      {distintivo.etiqueta}
-                    </span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, minWidth: 0 }}>
-                    <button type="button" className="pcb-boton-claro" onClick={() => void probarApi(fila.id)} style={{ ...botonFila, border: `1px solid ${T.bordeFuerte}`, color: T.texto }}>
-                      Probar
-                    </button>
-                    {/*
-                      * «Eliminar» abre la confirmación; no borra.
-                      *
-                      * Borraba en el acto hasta el 31/08/2026. Ahora la baja pide
-                      * la contraseña de paso —la de abrir y cerrar—, que es lo
-                      * único que separa un clic de más de perder la credencial de
-                      * una subcuenta. Ver `DialogoBajaApi`.
-                      */}
-                    <button type="button" className="pcb-boton-peligro" onClick={() => void pedirBajaApi(fila.id)} title="Pide la contraseña de paso: la baja borra la credencial y no se puede deshacer" style={{ ...botonFila, border: '1px solid #f0d6d2', color: T.corto }}>
-                      Eliminar
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
+            {bloques.map((bloque) => (
+              <div key={bloque.nombre}>
+                <BandaBloque
+                  bloque={bloque}
+                  plegado={plegados.has(bloque.nombre)}
+                  alPlegar={() => alternarBloque(bloque.nombre)}
+                />
+                {!plegados.has(bloque.nombre) &&
+                  bloque.filas.map((fila) => <FilaApi key={fila.id} fila={fila} />)}
+              </div>
+            ))}
           </div>
         </div>
 

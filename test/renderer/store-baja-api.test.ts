@@ -30,7 +30,9 @@ const FILA: ApiKeyRow = {
   uid: '5476143701',
   parentUid: '1513226215',
   status: 'ok',
-  reason: null
+  reason: null,
+  accountMode: 'classic',
+  inTransition: false
 };
 
 vi.mock('@/services/panel-service', () => ({

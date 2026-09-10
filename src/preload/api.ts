@@ -1,11 +1,21 @@
 import { ipcRenderer } from 'electron';
 import type {
   AltaCuenta,
+  AltaMadre,
   ApiPcb,
   CanalEvento,
+  MadreIpc,
+  MovimientoTraspasoIpc,
+  PlanRepartoIpc,
+  PlanTraspasoIpc,
+  ResultadoAltaMadre,
+  ResultadoReparto,
+  ResultadoTraspaso,
+  SaldosPantalla,
   CuentaPanel,
   EstadoApp,
   EstadoVault,
+  ResultadoImportacionIpc,
   EventosIpc,
   FilaCuenta,
   InfoSistema,
@@ -36,6 +46,10 @@ export const api: ApiPcb = {
   sistemaFijarNumeroPanel: (numero) =>
     ipcRenderer.invoke('sistema:numero-panel', numero) as Promise<void>,
 
+  /* Sin argumentos: la carpeta la elige el operador en un dialogo del proceso principal. */
+  credencialesImportar: () =>
+    ipcRenderer.invoke('credenciales:importar') as Promise<ResultadoImportacionIpc>,
+
   vaultEstado: () => ipcRenderer.invoke('vault:estado') as Promise<EstadoVault>,
   vaultCrear: (contrasena) =>
     ipcRenderer.invoke('vault:crear', contrasena) as Promise<ResultadoVault>,
@@ -62,7 +76,8 @@ export const api: ApiPcb = {
   mercadoPrecios: () => ipcRenderer.invoke('mercado:precios') as Promise<Record<string, string>>,
 
   pasoHay: () => ipcRenderer.invoke('paso:hay') as Promise<boolean>,
-  pasoComprobar: (contrasena) => ipcRenderer.invoke('paso:comprobar', contrasena) as Promise<boolean>,
+  pasoComprobar: (contrasena) =>
+    ipcRenderer.invoke('paso:comprobar', contrasena) as Promise<boolean>,
   pasoFijar: (contrasena) => ipcRenderer.invoke('paso:fijar', contrasena) as Promise<void>,
 
   aperturaPlanificar: (peticion) =>
@@ -91,6 +106,25 @@ export const api: ApiPcb = {
     ipcRenderer.invoke('apalancamiento:ejecutar', planId, soloEstos) as Promise<Lote>,
 
   monitorInstantanea: () => ipcRenderer.invoke('monitor:instantanea') as Promise<PosicionMonitor[]>,
+
+  madresListar: () => ipcRenderer.invoke('madres:listar') as Promise<MadreIpc[]>,
+  madresAgregar: (alta: AltaMadre) =>
+    ipcRenderer.invoke('madres:agregar', alta) as Promise<ResultadoAltaMadre>,
+  madresEliminar: (uidMadre, contrasenaPaso) =>
+    ipcRenderer.invoke('madres:eliminar', uidMadre, contrasenaPaso) as Promise<ResultadoBaja>,
+  saldosLeer: (uidMadre) => ipcRenderer.invoke('saldos:leer', uidMadre) as Promise<SaldosPantalla>,
+  traspasoPlanificar: (peticion) =>
+    ipcRenderer.invoke('traspaso:planificar', peticion) as Promise<PlanTraspasoIpc>,
+  traspasoEjecutar: (planId, contrasenaPaso) =>
+    ipcRenderer.invoke('traspaso:ejecutar', planId, contrasenaPaso) as Promise<ResultadoTraspaso>,
+  traspasoHistorial: (limite) =>
+    ipcRenderer.invoke('traspaso:historial', limite) as Promise<MovimientoTraspasoIpc[]>,
+  repartoPlanificar: (peticion) =>
+    ipcRenderer.invoke('reparto:planificar', peticion) as Promise<PlanRepartoIpc>,
+  recogidaPlanificar: (peticion) =>
+    ipcRenderer.invoke('recogida:planificar', peticion) as Promise<PlanRepartoIpc>,
+  repartoEjecutar: (planId, contrasenaPaso) =>
+    ipcRenderer.invoke('reparto:ejecutar', planId, contrasenaPaso) as Promise<ResultadoReparto>,
 
   suscribir<C extends CanalEvento>(canal: C, cb: (dato: EventosIpc[C]) => void): () => void {
     const escucha = (_e: unknown, dato: EventosIpc[C]): void => cb(dato);

@@ -40,8 +40,6 @@ import { createHmac, randomInt } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 
 const HOST = 'https://api.bitget.com';
-/* Bitget acepta como maximo 5 elementos por peticion en el alta en lote. */
-const LOTE_MAXIMO = 5;
 /* Tope de subcuentas de una cuenta estandar. Ver docs de Bitget. */
 const TOPE_BITGET = 20;
 
@@ -199,6 +197,18 @@ function sufijo(indice) {
  * Bitget rechaza un nombre repetido, y devuelve los existentes en forma de
  * correo -`pcbsubaa@algo.com`-, asi que la colision se busca por como empieza
  * el nombre y no por igualdad exacta.
+ *
+ * --------------------------------------------------------------------------
+ * Por que se generan mas nombres de los que se piden
+ * --------------------------------------------------------------------------
+ * Hay nombres ocupados que **no aparecen en la lista de subcuentas**: un alta
+ * que falla a medias deja el nombre reservado y la subcuenta sin crear. Paso el
+ * 04/09/2026 con `pcbsubaa`..`pcbsubaj`, quemados por dos intentos fallidos del
+ * endpoint de lote; despues, esos diez nombres eran irrecuperables aunque la
+ * lista dijera que habia hueco.
+ *
+ * No hay forma de consultarlos: solo se descubren al intentarlo. Asi que se
+ * planean nombres de sobra y `crear` va tirando del siguiente cuando uno cae.
  */
 function planear(cantidad, nombresOcupados) {
   const ocupados = nombresOcupados.map((n) => String(n ?? '').toLowerCase());
@@ -226,38 +236,96 @@ function planear(cantidad, nombresOcupados) {
   return plan;
 }
 
-async function crear(plan) {
+/**
+ * Da de alta las subcuentas y sus claves, una por una.
+ *
+ * ==========================================================================
+ * Por que en dos pasos y no en lote
+ * ==========================================================================
+ * Habia aqui una sola llamada a `/api/v2/user/batch-create-subaccount-and-apikey`,
+ * que hacia las dos cosas de golpe. **Ese endpoint devuelve `40725 · service
+ * return an error`** contra la API real (comprobado el 04/09/2026, dos veces, con
+ * la clave madre correcta y la IP ya ligada). No es un problema de permisos ni de
+ * datos: los mismos nombres y los mismos permisos entran sin queja por los
+ * endpoints individuales.
+ *
+ * Asi que se hace lo que si funciona:
+ *
+ *   1. `POST /api/v2/user/create-virtual-subaccount`         crea la subcuenta
+ *   2. `POST /api/v2/user/create-virtual-subaccount-apikey`  crea su clave
+ *
+ * Cuesta dos peticiones por subcuenta en vez de una por cada cinco. Sobre veinte
+ * subcuentas son cuarenta peticiones y unos segundos: irrelevante para algo que
+ * se hace una vez.
+ *
+ * --------------------------------------------------------------------------
+ * Tres detalles de la API que cuestan un rato si no se saben
+ * --------------------------------------------------------------------------
+ *  - **`subaAccountUid`**, con esa errata, es como Bitget devuelve el UID al
+ *    crear la subcuenta. Leer `subAccountUid` -lo razonable- da `undefined` y el
+ *    paso 2 falla sin decir por que.
+ *  - **El nombre son 8 letras exactas, sin digitos.** Cualquier otra cosa da
+ *    `40055 · subName must be an English letter with a length of 8`.
+ *  - **La clave se pide sin `ipList`.** Se comprobo que Bitget las acepta sin IP
+ *    (`ipList: [""]`), y es lo que conviene: la clave **madre** si necesita IP
+ *    ligada -Bitget lo exige para gestionar subcuentas-, pero atar tambien las
+ *    veinte de operacion significaria que el dia que cambie la IP domestica se
+ *    cae el panel entero, no solo los traspasos.
+ */
+async function crear(candidatos, cuantas) {
   const creadas = [];
 
-  for (let i = 0; i < plan.length; i += LOTE_MAXIMO) {
-    const lote = plan.slice(i, i + LOTE_MAXIMO);
-    const numero = Math.floor(i / LOTE_MAXIMO) + 1;
-    process.stdout.write(`  lote ${numero} (${lote.length} subcuentas)... `);
+  for (const p of candidatos) {
+    if (creadas.length >= cuantas) break;
+    process.stdout.write(`  ${String(creadas.length + 1).padStart(2)}/${cuantas} ${p.subAccountName}... `);
 
-    const datos = await peticion('POST', '/api/v2/user/batch-create-subaccount-and-apikey', lote);
+    const alta = await peticion('POST', '/api/v2/user/create-virtual-subaccount', {
+      subAccountList: [p.subAccountName]
+    });
 
-    for (const r of datos ?? []) {
-      const original = lote.find((p) => p.label === r.label);
-      creadas.push({
-        subAccountUid: r.subAccountUid,
-        subAccountName: r.subAccountName,
-        /*
-         * Bitget devuelve el nombre enmascarado -`pcb****@virtual-bitget.com`-,
-         * asi que se guarda tambien el que se pidio. Sin el, el importador no
-         * puede distinguir una subcuenta de otra por el nombre.
-         */
-        nombreSolicitado: original?.subAccountName ?? null,
-        label: r.label,
-        apiKey: r.subAccountApiKey,
-        secretKey: r.secretKey,
-        passphrase: original?.passphrase ?? null,
-        permList: r.permList
-      });
+    /* `subaAccountUid`: la errata es de Bitget. Se aceptan las dos por si la arreglan. */
+    const creada = alta?.successList?.[0];
+    const uid = creada?.subaAccountUid ?? creada?.subAccountUid ?? null;
+
+    if (uid === null) {
+      /*
+       * Bitget responde `00000 success` con el nombre en `failureList` y **sin
+       * motivo**. En la practica solo pasa por una razon: el nombre ya esta
+       * cogido. Se dice asi, y se sigue con el siguiente.
+       */
+      const fallo = alta?.failureList?.[0];
+      console.log(fallo === undefined ? 'FALLO (respuesta sin uid)' : 'nombre ocupado, siguiente');
+      await new Promise((r) => setTimeout(r, 400));
+      continue;
     }
+
+    const clave = await peticion('POST', '/api/v2/user/create-virtual-subaccount-apikey', {
+      subAccountUid: String(uid),
+      passphrase: p.passphrase,
+      label: p.label,
+      permList: p.permList
+    });
+
+    creadas.push({
+      subAccountUid: String(uid),
+      subAccountName: creada?.subaAccountName ?? creada?.subAccountName ?? null,
+      /*
+       * Bitget devuelve el nombre enmascarado -`pcb****@virtual-bitget.com`-,
+       * asi que se guarda tambien el que se pidio. Sin el, el importador no
+       * puede distinguir una subcuenta de otra por el nombre.
+       */
+      nombreSolicitado: p.subAccountName,
+      label: p.label,
+      /* `subAccountApiKey`, no `apiKey`: otro nombre que no es el que se espera. */
+      apiKey: clave?.subAccountApiKey ?? null,
+      secretKey: clave?.secretKey ?? null,
+      passphrase: p.passphrase,
+      permList: clave?.permList ?? p.permList
+    });
     console.log('ok');
 
-    /* Un segundo entre lotes: el alta de subcuentas tiene su propio limite. */
-    if (i + LOTE_MAXIMO < plan.length) await new Promise((r) => setTimeout(r, 1_100));
+    /* El alta de subcuentas tiene su propio limite de peticiones. */
+    if (creadas.length < cuantas) await new Promise((r) => setTimeout(r, 700));
   }
 
   return creadas;
@@ -312,10 +380,17 @@ async function principal() {
     aCrear = capacidad;
   }
 
-  const plan = planear(aCrear, existentes.map((s) => s.subAccountName));
+  /*
+   * Se planean nombres de sobra -el doble, y al menos diez mas- porque los
+   * ocupados invisibles solo se descubren al intentarlos. `crear` para en cuanto
+   * completa `aCrear`; el resto son repuesto que normalmente no se usa.
+   */
+  const plan = planear(aCrear * 2 + 10, existentes.map((s) => s.subAccountName));
 
-  console.log(`\nSe crearian ${plan.length} subcuentas con permiso [contract_trade]:\n`);
-  for (const p of plan) console.log(`  ${p.subAccountName}`);
+  /* `aCrear`, no `plan.length`: el plan lleva nombres de repuesto detras. */
+  console.log(`\nSe crearian ${aCrear} subcuentas con permiso [contract_trade]:\n`);
+  for (const p of plan.slice(0, aCrear)) console.log(`  ${p.subAccountName}`);
+  console.log(`\n  (+${plan.length - aCrear} nombres de repuesto por si alguno esta ocupado)`);
 
   if (!crearDeVerdad) {
     console.log('\nSimulacion. No se ha creado nada.');
@@ -324,7 +399,7 @@ async function principal() {
   }
 
   console.log('\nCreando...\n');
-  const creadas = await crear(plan);
+  const creadas = await crear(plan, aCrear);
 
   await writeFile(salida, JSON.stringify(creadas, null, 2), 'utf8');
 

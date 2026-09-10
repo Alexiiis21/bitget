@@ -34,6 +34,7 @@ import type {
   ApiKeyRow,
   Asset,
   Balance,
+  BalanceSheet,
   BatchPlan,
   BatchResult,
   BatchTarget,
@@ -43,6 +44,16 @@ import type {
   LeverageRequest,
   MarginRequest,
   OpenRequest,
+  ParentAccount,
+  ParentAccountInput,
+  ParentValidationResult,
+  SpreadMode,
+  SpreadPlan,
+  SpreadResult,
+  TransferPlan,
+  TransferRecord,
+  TransferResult,
+  ImportResult,
   PositionSnapshot,
   SystemInfo,
   TpRequest,
@@ -158,6 +169,87 @@ export interface PanelService {
    * borrar en otro deja una rendija entre las dos llamadas—.
    */
   deleteApiKey(id: string, stepPassword: string): Promise<DeleteOutcome>;
+  /* ---- cuentas madre y saldos (traspasos, Fase 2) ---- */
+
+  /** Cuentas principales registradas, sin secretos. */
+  listParentAccounts(): Promise<ParentAccount[]>;
+  /**
+   * Da de alta la API Key de una cuenta principal.
+   *
+   * Avisa -sin rechazarla- cuando Bitget no le reporta ninguna subcuenta: es
+   * una clave valida de una cuenta que no es madre de nadie, y sin el aviso la
+   * pantalla de saldos se veria vacia sin explicacion.
+   */
+  registerParentAccount(input: ParentAccountInput): Promise<ParentValidationResult>;
+  /** Da de baja una cuenta principal. Exige la contraseña de paso. */
+  deleteParentAccount(uid: string, stepPassword: string): Promise<DeleteOutcome>;
+  /**
+   * Saldos de las subcuentas de una cuenta principal, en una sola petición.
+   *
+   * Sin `parentUid` usa la única registrada. **No es un flujo en vivo**: Bitget
+   * limita este endpoint a una petición cada 10 s por cuenta, así que se llama al
+   * abrir la pantalla y al refrescar a mano, nunca en un intervalo.
+   */
+  getBalanceSheet(parentUid?: string): Promise<BalanceSheet>;
+
+  /**
+   * Calcula un traspaso y comprueba que se pueda hacer. **No envía nada.**
+   *
+   * Relee los saldos: el máximo transferible cambia en cuanto se abre o cierra
+   * una posición, y validar contra una copia guardada autorizaría lo que Bitget
+   * ya no admite.
+   */
+  planTransfer(input: {
+    fromUid: string;
+    toUid: string;
+    amount: string;
+    parentUid?: string;
+  }): Promise<TransferPlan>;
+  /**
+   * Envía un traspaso ya aprobado. **Aquí se mueve el dinero.**
+   *
+   * Exige la contraseña de paso, la misma que la apertura de posiciones, y solo
+   * viaja el `id` del plan: los importes ya se aprobaron.
+   */
+  executeTransfer(planId: string, stepPassword: string): Promise<TransferResult>;
+  /** Historial de traspasos, lo más reciente primero. */
+  listTransfers(limit?: number): Promise<TransferRecord[]>;
+
+  /**
+   * Calcula un reparto de la cuenta principal hacia varias subcuentas.
+   *
+   * `iguales` da la misma cantidad a cada una; `igualar` las deja al mismo
+   * nivel de saldo, sin quitarle nada a la que ya esté por encima. **No envía
+   * nada**: devuelve la lista para aprobarla.
+   */
+  planSpread(input: {
+    toUids: string[];
+    total: string;
+    mode: SpreadMode;
+    parentUid?: string;
+  }): Promise<SpreadPlan>;
+  /** Calcula la devolución del saldo de varias subcuentas a la principal. */
+  planCollect(input: { fromUids: string[]; parentUid?: string }): Promise<SpreadPlan>;
+  /**
+   * Envía un reparto o una recogida ya aprobados. **Aquí se mueve el dinero.**
+   *
+   * Los traspasos salen uno detrás de otro y un fallo no detiene a los demás:
+   * el resultado dice cuáles entraron y cuáles no. No hay rollback.
+   */
+  executeSpread(planId: string, stepPassword: string): Promise<SpreadResult>;
+
+  /** `true` si este panel todavía no tiene almacén: es su primer arranque. */
+  isFirstRun(): Promise<boolean>;
+
+  /**
+   * Trae las credenciales de una instalación anterior. **Copia; no mueve.**
+   *
+   * Solo tiene sentido en el primer arranque, y por eso la pantalla de
+   * desbloqueo únicamente la ofrece entonces: con un almacén ya creado, el
+   * proceso principal la rechaza en lugar de sobrescribirlo.
+   */
+  importCredentials(): Promise<ImportResult>;
+
   unlockVault(masterPassword: string): Promise<UnlockResult>;
   /** Confirma la maestra sin dar acceso: para acciones sensibles con la sesión ya abierta. */
   verifyMasterPassword(masterPassword: string): Promise<boolean>;

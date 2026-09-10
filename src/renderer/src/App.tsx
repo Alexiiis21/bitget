@@ -14,6 +14,7 @@ import { MatrizCuentas } from '@/features/panel/MatrizCuentas';
 import { ModalDetalleSubcuenta } from '@/features/panel/ModalDetalleSubcuenta';
 import { PanelResultadoLote } from '@/features/panel/PanelResultadoLote';
 import { PantallaApis } from '@/features/panel/PantallaApis';
+import { PantallaSaldos } from '@/features/panel/PantallaSaldos';
 
 /**
  * Composición del panel — diseño aprobado v2.
@@ -59,7 +60,16 @@ export default function App() {
       <Encabezado />
 
       <div style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', overflow: 'hidden' }}>
-        <div style={{ order: 1, flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div
+          style={{
+            order: 1,
+            flex: '1 1 auto',
+            minWidth: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden'
+          }}
+        >
           <PanelResultadoLote />
           <MatrizCuentas />
         </div>
@@ -69,6 +79,7 @@ export default function App() {
       </div>
 
       <PantallaApis />
+      <PantallaSaldos />
       {/* Va sobre la pantalla de API keys, que es desde donde se pide la baja. */}
       <DialogoBajaApi />
       <BuscadorActivos />

@@ -18,7 +18,13 @@
  *
  * Cuesta 60 bytes y convierte un susto en un mensaje claro.
  */
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual
+} from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { registrarSecreto } from './redact';
@@ -26,7 +32,20 @@ import { borrar, derivarClave, nuevosParametros, type ParametrosKdf } from './kd
 import { escribirAtomico, existe, rotarRespaldo } from '../storage/atomic-write';
 
 const FORMATO = 'pcb-vault';
-const VERSION_ACTUAL = 1;
+/**
+ * Version 2: el almacen guarda tambien credenciales de **cuenta madre**.
+ *
+ * v1 -> v2  se anadio `madres`, la clave de una cuenta principal con la que se
+ *           leen los saldos de sus subcuentas y -en la Fase 3- se traspasa
+ *           entre ellas. Un almacen v1 se abre sin problema: no trae el campo y
+ *           se carga como lista vacia. La primera escritura lo deja en v2.
+ *
+ * El sentido contrario **no** se permite, y por eso sube la version: un
+ * ejecutable v1 que abriera un almacen con `madres` lo reescribiria sin ese
+ * campo, y la credencial de la madre desapareceria sin que nadie lo notase
+ * hasta necesitarla. Prefiere negarse a abrir. docs/03-modelo-de-datos.md 15.
+ */
+const VERSION_ACTUAL = 2;
 const ALGORITMO = 'aes-256-gcm';
 /** Texto que cifra el verificador. Su contenido da igual; que sea fijo, no. */
 const TESTIGO = 'pcb-ok';
@@ -80,6 +99,39 @@ export const esquemaCredencialGuardada = z.object({
 export type CredencialGuardada = z.infer<typeof esquemaCredencialGuardada>;
 
 /**
+ * Credencial de una cuenta **madre**.
+ *
+ * Es de otra especie que las de arriba y por eso vive en su propia lista, no
+ * mezclada con ellas: no opera un simbolo, no tiene modo de posicion ni de
+ * margen, y no le corresponde ninguna fila del panel. Su unico oficio es leer
+ * los saldos de sus subcuentas y, cuando llegue la Fase 3, mover saldo entre
+ * ellas. Meterla en `credenciales` obligaria a inventarle una `cuentaId` que no
+ * existe y a que todo lo que recorre esa lista tuviera que saltarsela.
+ *
+ * Se indexa por `uidMadre` -el UID que Bitget da a la cuenta principal- y no por
+ * un identificador propio, porque es la unica forma de reconocer que la clave
+ * que acaban de pegar es la de una madre que ya estaba: al rotar una key, el
+ * UID es lo que no cambia.
+ *
+ * Es una **lista** aunque hoy haya una sola cuenta madre. El modelo de datos ya
+ * contempla varios grupos -«Cuenta Madre 1», «Cuenta Madre 2»- y descubrir mas
+ * tarde que hacen falta dos costaria una migracion del almacen; en cambio una
+ * lista con un elemento no cuesta nada. docs/00-traspasos-fase-1.md 3.1.
+ */
+export const esquemaCredencialMadre = z.object({
+  id: z.string(),
+  uidMadre: z.string(),
+  etiqueta: z.string(),
+  apiKey: z.string(),
+  secretKey: z.string(),
+  passphrase: z.string(),
+  altaEn: z.string(),
+  permisos: esquemaPermisos.nullable()
+});
+
+export type CredencialMadreGuardada = z.infer<typeof esquemaCredencialMadre>;
+
+/**
  * La contrasena de paso, guardada como derivacion y nunca en claro.
  *
  * Vive **dentro del payload cifrado** y no en un archivo aparte, y eso es una
@@ -112,7 +164,9 @@ const esquemaPayload = z.object({
   version: z.number().int().positive(),
   credenciales: z.array(esquemaCredencialGuardada),
   /** Ausente en almacenes creados antes de que existiera la contrasena de paso. */
-  paso: esquemaPaso.nullish()
+  paso: esquemaPaso.nullish(),
+  /** Ausente en almacenes v1, anteriores a la funcion de traspasos. */
+  madres: z.array(esquemaCredencialMadre).nullish()
 });
 
 /* ---------- errores ---------- */
@@ -156,6 +210,26 @@ export interface CredencialPublica {
   permisos: z.infer<typeof esquemaPermisos> | null;
 }
 
+/** Datos de alta de una credencial de cuenta madre. */
+export interface AltaCredencialMadre {
+  uidMadre: string;
+  etiqueta: string;
+  apiKey: string;
+  secretKey: string;
+  passphrase: string;
+  permisos?: z.infer<typeof esquemaPermisos> | null;
+}
+
+/** Vista sin secretos de una cuenta madre. Es lo unico que cruza el IPC. */
+export interface CredencialMadrePublica {
+  id: string;
+  uidMadre: string;
+  etiqueta: string;
+  apiKeyEnmascarada: string;
+  altaEn: string;
+  permisos: z.infer<typeof esquemaPermisos> | null;
+}
+
 /* ---------- el almacen ---------- */
 
 export interface OpcionesVault {
@@ -175,6 +249,7 @@ export class Vault {
   private clave: Buffer | null;
   private kdf: ParametrosKdf;
   private credenciales: CredencialGuardada[];
+  private madres: CredencialMadreGuardada[];
   private paso: PasoGuardado | null;
   private cerrado = false;
 
@@ -183,18 +258,21 @@ export class Vault {
     clave: Buffer,
     kdf: ParametrosKdf,
     credenciales: CredencialGuardada[],
-    paso: PasoGuardado | null = null
+    paso: PasoGuardado | null = null,
+    madres: CredencialMadreGuardada[] = []
   ) {
     this.ruta = ruta;
     this.clave = clave;
     this.kdf = kdf;
     this.credenciales = credenciales;
+    this.madres = madres;
     this.paso = paso;
     for (const c of credenciales) this.marcarSecretos(c);
+    for (const m of madres) this.marcarSecretos(m);
   }
 
   /** Registra los secretos para que ningun log pueda escupirlos. */
-  private marcarSecretos(c: CredencialGuardada): void {
+  private marcarSecretos(c: { secretKey: string; passphrase: string }): void {
     registrarSecreto(c.secretKey);
     registrarSecreto(c.passphrase);
   }
@@ -292,7 +370,14 @@ export class Vault {
     }
     borrar(claro);
 
-    return new Vault(ruta, clave, archivo.kdf, payload.credenciales, payload.paso ?? null);
+    return new Vault(
+      ruta,
+      clave,
+      archivo.kdf,
+      payload.credenciales,
+      payload.paso ?? null,
+      payload.madres ?? []
+    );
   }
 
   /**
@@ -354,6 +439,97 @@ export class Vault {
 
   get cantidad(): number {
     return this.credenciales.length;
+  }
+
+  /* ---- cuentas madre ---- */
+
+  /** Listado de cuentas madre sin secretos. Es lo unico que puede cruzar el IPC. */
+  listarMadres(): CredencialMadrePublica[] {
+    this.exigirAbierto();
+    return this.madres.map((m) => ({
+      id: m.id,
+      uidMadre: m.uidMadre,
+      etiqueta: m.etiqueta,
+      apiKeyEnmascarada: enmascarar(m.apiKey),
+      altaEn: m.altaEn,
+      permisos: m.permisos
+    }));
+  }
+
+  /**
+   * Credencial completa de una cuenta madre, para firmar.
+   *
+   * Sin argumento devuelve la unica que haya. Es el caso real de hoy -una sola
+   * cuenta madre por instancia- y evita que la pantalla tenga que saber su UID
+   * antes de poder preguntar por sus saldos. Con mas de una registrada exige el
+   * UID: elegir una por su orden en la lista seria firmar con la cuenta
+   * equivocada, que aqui significa mover el dinero de otro.
+   */
+  credencialMadre(
+    uidMadre?: string
+  ): { apiKey: string; secretKey: string; passphrase: string } | null {
+    this.exigirAbierto();
+
+    const m =
+      uidMadre === undefined
+        ? this.madres.length === 1
+          ? this.madres[0]
+          : undefined
+        : this.madres.find((x) => x.uidMadre === uidMadre);
+
+    if (m === undefined) return null;
+    return { apiKey: m.apiKey, secretKey: m.secretKey, passphrase: m.passphrase };
+  }
+
+  /**
+   * Da de alta una cuenta madre. Volver a dar de alta el mismo UID la reemplaza,
+   * que es lo que hace falta al rotar la key.
+   */
+  agregarMadre(alta: AltaCredencialMadre): CredencialMadrePublica {
+    this.exigirAbierto();
+
+    const registro: CredencialMadreGuardada = {
+      id: `madre_${randomUUID().slice(0, 8)}`,
+      uidMadre: alta.uidMadre,
+      etiqueta: alta.etiqueta,
+      apiKey: alta.apiKey,
+      secretKey: alta.secretKey,
+      passphrase: alta.passphrase,
+      altaEn: new Date().toISOString(),
+      permisos: alta.permisos ?? null
+    };
+    this.marcarSecretos(registro);
+
+    const indice = this.madres.findIndex((m) => m.uidMadre === alta.uidMadre);
+    if (indice === -1) this.madres.push(registro);
+    else {
+      const [fuera] = this.madres.splice(indice, 1, registro);
+      if (fuera !== undefined) {
+        fuera.secretKey = '';
+        fuera.passphrase = '';
+      }
+    }
+
+    const publica = this.listarMadres().find((m) => m.id === registro.id);
+    if (publica === undefined) throw new Error('No se pudo listar la cuenta madre recien creada');
+    return publica;
+  }
+
+  /** Baja de una cuenta madre por UID. Devuelve `true` si habia algo que borrar. */
+  eliminarMadre(uidMadre: string): boolean {
+    this.exigirAbierto();
+    const indice = this.madres.findIndex((m) => m.uidMadre === uidMadre);
+    if (indice === -1) return false;
+    const [fuera] = this.madres.splice(indice, 1);
+    if (fuera !== undefined) {
+      fuera.secretKey = '';
+      fuera.passphrase = '';
+    }
+    return true;
+  }
+
+  get cantidadMadres(): number {
+    return this.madres.length;
   }
 
   /* ---- alta y baja ---- */
@@ -461,7 +637,12 @@ export class Vault {
     const clave = this.exigirAbierto();
 
     const payload = Buffer.from(
-      JSON.stringify({ version: VERSION_ACTUAL, credenciales: this.credenciales, paso: this.paso }),
+      JSON.stringify({
+        version: VERSION_ACTUAL,
+        credenciales: this.credenciales,
+        paso: this.paso,
+        madres: this.madres
+      }),
       'utf8'
     );
 
@@ -528,7 +709,12 @@ export class Vault {
       c.secretKey = '';
       c.passphrase = '';
     }
+    for (const m of this.madres) {
+      m.secretKey = '';
+      m.passphrase = '';
+    }
     this.credenciales = [];
+    this.madres = [];
     this.cerrado = true;
   }
 

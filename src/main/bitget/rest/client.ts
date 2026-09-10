@@ -26,6 +26,7 @@
 import { Pool } from 'undici';
 import type { z } from 'zod';
 import { esStaging } from '@shared/entorno';
+import { anotarPeticion, cuentaDe, superficieDeRuta } from '../../diagnostico/bitacora';
 import { LimitadorPeticiones, type DiagnosticoLimitador } from '../../execution/rate-limiter';
 import { enmascararApiKey } from '../../security/redact';
 import {
@@ -230,23 +231,36 @@ export class ClienteBitget {
    * La firma se calcula **dentro** del limitador, no antes: si se firmara al
    * encolar, una espera de varios segundos dejaria la marca de tiempo vieja y
    * Bitget rechazaria la peticion por reloj.
+   *
+   * La ruta se le pasa al limitador para que aplique el techo propio de los
+   * endpoints que lo tienen -V3 los publica por endpoint y por UID-. Para una
+   * ruta sin techo declarado, que son casi todas, no cambia nada.
    */
   async peticionFirmada<E extends z.ZodType>(
     credencial: Credencial,
     peticion: PeticionRest,
     esquema: E
   ): Promise<RespuestaRest<z.infer<E>>> {
-    return this.limitador.ejecutar(credencial.apiKey, () => {
-      const firmable: PeticionFirmable = {
-        metodo: peticion.metodo,
-        ruta: peticion.ruta,
-        ...(peticion.consulta === undefined ? {} : { consulta: peticion.consulta }),
-        ...(peticion.cuerpo === undefined ? {} : { cuerpo: peticion.cuerpo })
-      };
+    return this.limitador.ejecutar(
+      credencial.apiKey,
+      () => {
+        const firmable: PeticionFirmable = {
+          metodo: peticion.metodo,
+          ruta: peticion.ruta,
+          ...(peticion.consulta === undefined ? {} : { consulta: peticion.consulta }),
+          ...(peticion.cuerpo === undefined ? {} : { cuerpo: peticion.cuerpo })
+        };
 
-      const firmada = firmarPeticion(credencial, firmable, () => this.ahora());
-      return this.enviar(firmada, peticion.idempotente, esquema);
-    });
+        const firmada = firmarPeticion(credencial, firmable, () => this.ahora());
+        return this.enviar(
+          firmada,
+          peticion.idempotente,
+          esquema,
+          cuentaDe(credencial.apiKey)
+        );
+      },
+      peticion.ruta
+    );
   }
 
   /**
@@ -267,7 +281,62 @@ export class ClienteBitget {
 
   /* ---------- nucleo ---------- */
 
+  /**
+   * Envia y **anota**. Es el unico sitio por el que pasa toda peticion.
+   *
+   * La bitacora se engancha aqui y no en cada endpoint por lo mismo que el
+   * limitador: un punto que hay que acordarse de invocar es un punto que algun
+   * dia no se invoca, y entonces falta justo la linea que hacia falta. Ver
+   * `diagnostico/bitacora.ts`.
+   *
+   * Anotar no puede cambiar el resultado: el error se relanza tal cual y la
+   * escritura no se espera.
+   */
   private async enviar<E extends z.ZodType>(
+    firmada: {
+      metodo: MetodoHttp;
+      rutaCompleta: string;
+      cuerpo: string;
+      cabeceras: Record<string, string>;
+    },
+    idempotente: boolean,
+    esquema: E,
+    cuenta = 'publica'
+  ): Promise<RespuestaRest<z.infer<E>>> {
+    const arranque = this.relojLocal();
+
+    const anotar = (
+      httpStatus: number | null,
+      codigo: string | null,
+      mensaje: string | null
+    ): void => {
+      anotarPeticion({
+        metodo: firmada.metodo,
+        ruta: firmada.rutaCompleta,
+        superficie: superficieDeRuta(firmada.rutaCompleta),
+        cuenta,
+        httpStatus,
+        codigo,
+        ms: this.relojLocal() - arranque,
+        mensaje
+      });
+    };
+
+    try {
+      const r = await this.enviarSinAnotar(firmada, idempotente, esquema);
+      anotar(200, r.codigo, null);
+      return r;
+    } catch (e) {
+      if (e instanceof ErrorBitget) {
+        anotar(e.httpStatus, e.codigo, e.mensajeOriginal ?? e.message);
+      } else {
+        anotar(null, null, e instanceof Error ? e.message : String(e));
+      }
+      throw e;
+    }
+  }
+
+  private async enviarSinAnotar<E extends z.ZodType>(
     firmada: {
       metodo: MetodoHttp;
       rutaCompleta: string;

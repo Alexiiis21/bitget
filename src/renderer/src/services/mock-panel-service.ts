@@ -24,6 +24,7 @@ import type {
   ApiKeyStatus,
   Asset,
   Balance,
+  BalanceSheet,
   BatchFailure,
   BatchPlan,
   BatchResult,
@@ -34,12 +35,26 @@ import type {
   LeverageRequest,
   MarginRequest,
   OpenRequest,
+  ParentAccount,
+  ParentAccountInput,
+  ParentValidationResult,
   PlanDiscard,
   PlanEntry,
   PlanKind,
   Position,
   PositionSnapshot,
   Side,
+  SubAccountBalance,
+  SpreadMode,
+  SpreadMove,
+  SpreadMoveResult,
+  SpreadPlan,
+  SpreadResult,
+  SpreadSkip,
+  TransferPlan,
+  TransferRecord,
+  TransferResult,
+  ImportResult,
   SystemInfo,
   TpRequest,
   UnlockResult,
@@ -58,20 +73,132 @@ import { CASILLAS_POR_CUENTA, HISTORIAL_MAXIMO } from '@/lib/tokens';
  * que importa: elegir un activo que **no** está en las ocho casillas.
  */
 const CATALOGO: Asset[] = [
-  { id: 'BTC', symbol: 'BTCUSDT', label: 'BTC/USDT', priceDecimals: 1, maxLeverage: 150, minLeverage: 1, tradable: true },
-  { id: 'ETH', symbol: 'ETHUSDT', label: 'ETH/USDT', priceDecimals: 2, maxLeverage: 150, minLeverage: 1, tradable: true },
-  { id: 'SOL', symbol: 'SOLUSDT', label: 'SOL/USDT', priceDecimals: 3, maxLeverage: 100, minLeverage: 1, tradable: true },
-  { id: 'PEPE', symbol: 'PEPEUSDT', label: 'PEPE/USDT', priceDecimals: 8, maxLeverage: 75, minLeverage: 1, tradable: true },
-  { id: 'PAXG', symbol: 'PAXGUSDT', label: 'PAXG/USDT', priceDecimals: 2, maxLeverage: 50, minLeverage: 1, tradable: true },
-  { id: 'ADA', symbol: 'ADAUSDT', label: 'ADA/USDT', priceDecimals: 4, maxLeverage: 75, minLeverage: 1, tradable: true },
-  { id: 'AVAX', symbol: 'AVAXUSDT', label: 'AVAX/USDT', priceDecimals: 3, maxLeverage: 75, minLeverage: 1, tradable: true },
-  { id: 'BNB', symbol: 'BNBUSDT', label: 'BNB/USDT', priceDecimals: 2, maxLeverage: 100, minLeverage: 1, tradable: true },
-  { id: 'DOGE', symbol: 'DOGEUSDT', label: 'DOGE/USDT', priceDecimals: 5, maxLeverage: 75, minLeverage: 1, tradable: true },
-  { id: 'LINK', symbol: 'LINKUSDT', label: 'LINK/USDT', priceDecimals: 3, maxLeverage: 75, minLeverage: 1, tradable: true },
-  { id: 'SUI', symbol: 'SUIUSDT', label: 'SUI/USDT', priceDecimals: 4, maxLeverage: 75, minLeverage: 1, tradable: true },
-  { id: 'TRX', symbol: 'TRXUSDT', label: 'TRX/USDT', priceDecimals: 5, maxLeverage: 50, minLeverage: 1, tradable: true },
-  { id: 'WIF', symbol: 'WIFUSDT', label: 'WIF/USDT', priceDecimals: 4, maxLeverage: 50, minLeverage: 1, tradable: false },
-  { id: 'XRP', symbol: 'XRPUSDT', label: 'XRP/USDT', priceDecimals: 4, maxLeverage: 125, minLeverage: 1, tradable: true }
+  {
+    id: 'BTC',
+    symbol: 'BTCUSDT',
+    label: 'BTC/USDT',
+    priceDecimals: 1,
+    maxLeverage: 150,
+    minLeverage: 1,
+    tradable: true
+  },
+  {
+    id: 'ETH',
+    symbol: 'ETHUSDT',
+    label: 'ETH/USDT',
+    priceDecimals: 2,
+    maxLeverage: 150,
+    minLeverage: 1,
+    tradable: true
+  },
+  {
+    id: 'SOL',
+    symbol: 'SOLUSDT',
+    label: 'SOL/USDT',
+    priceDecimals: 3,
+    maxLeverage: 100,
+    minLeverage: 1,
+    tradable: true
+  },
+  {
+    id: 'PEPE',
+    symbol: 'PEPEUSDT',
+    label: 'PEPE/USDT',
+    priceDecimals: 8,
+    maxLeverage: 75,
+    minLeverage: 1,
+    tradable: true
+  },
+  {
+    id: 'PAXG',
+    symbol: 'PAXGUSDT',
+    label: 'PAXG/USDT',
+    priceDecimals: 2,
+    maxLeverage: 50,
+    minLeverage: 1,
+    tradable: true
+  },
+  {
+    id: 'ADA',
+    symbol: 'ADAUSDT',
+    label: 'ADA/USDT',
+    priceDecimals: 4,
+    maxLeverage: 75,
+    minLeverage: 1,
+    tradable: true
+  },
+  {
+    id: 'AVAX',
+    symbol: 'AVAXUSDT',
+    label: 'AVAX/USDT',
+    priceDecimals: 3,
+    maxLeverage: 75,
+    minLeverage: 1,
+    tradable: true
+  },
+  {
+    id: 'BNB',
+    symbol: 'BNBUSDT',
+    label: 'BNB/USDT',
+    priceDecimals: 2,
+    maxLeverage: 100,
+    minLeverage: 1,
+    tradable: true
+  },
+  {
+    id: 'DOGE',
+    symbol: 'DOGEUSDT',
+    label: 'DOGE/USDT',
+    priceDecimals: 5,
+    maxLeverage: 75,
+    minLeverage: 1,
+    tradable: true
+  },
+  {
+    id: 'LINK',
+    symbol: 'LINKUSDT',
+    label: 'LINK/USDT',
+    priceDecimals: 3,
+    maxLeverage: 75,
+    minLeverage: 1,
+    tradable: true
+  },
+  {
+    id: 'SUI',
+    symbol: 'SUIUSDT',
+    label: 'SUI/USDT',
+    priceDecimals: 4,
+    maxLeverage: 75,
+    minLeverage: 1,
+    tradable: true
+  },
+  {
+    id: 'TRX',
+    symbol: 'TRXUSDT',
+    label: 'TRX/USDT',
+    priceDecimals: 5,
+    maxLeverage: 50,
+    minLeverage: 1,
+    tradable: true
+  },
+  {
+    id: 'WIF',
+    symbol: 'WIFUSDT',
+    label: 'WIF/USDT',
+    priceDecimals: 4,
+    maxLeverage: 50,
+    minLeverage: 1,
+    tradable: false
+  },
+  {
+    id: 'XRP',
+    symbol: 'XRPUSDT',
+    label: 'XRP/USDT',
+    priceDecimals: 4,
+    maxLeverage: 125,
+    minLeverage: 1,
+    tradable: true
+  }
 ];
 
 /**
@@ -146,7 +273,15 @@ interface EstadoInterno {
 }
 
 function accionesVacias(): ActionState {
-  return { tp: false, mg: false, ap: false, oe: false, tpDisplay: '', mgDisplay: '', apDisplay: '' };
+  return {
+    tp: false,
+    mg: false,
+    ap: false,
+    oe: false,
+    tpDisplay: '',
+    mgDisplay: '',
+    apDisplay: ''
+  };
 }
 
 export class MockPanelService implements PanelService {
@@ -155,6 +290,14 @@ export class MockPanelService implements PanelService {
   private readonly posiciones = new Map<string, Position>();
   private readonly historial = new Map<string, ClosedPosition[]>();
   private readonly apiKeys = new Map<string, ApiKeyRow>();
+  /** Cuentas principales dadas de alta, por UID. Vacío hasta que se registre una. */
+  private readonly madres = new Map<string, ParentAccount>();
+  /** Traspasos calculados y sin enviar. Un plan se envía una sola vez. */
+  private readonly planesTraspaso = new Map<string, TransferPlan>();
+  /** Repartos y recogidas calculados y sin enviar. */
+  private readonly planesReparto = new Map<string, SpreadPlan>();
+  /** Historial, lo más reciente primero. */
+  private readonly traspasos: TransferRecord[] = [];
   private readonly precios: Record<string, number> = { ...PRECIO_BASE };
   /** Qué símbolo hay en cada una de las ocho casillas. El operador las edita. */
   private readonly ranuras: (string | null)[] = [...RANURAS_INICIALES];
@@ -281,7 +424,9 @@ export class MockPanelService implements PanelService {
       actions: acciones,
       marginCritical: sinMargenAdicional,
       hasError: conError,
-      errorReason: conError ? (MOTIVOS_ERROR[Math.floor(azar() * MOTIVOS_ERROR.length)] ?? null) : null,
+      errorReason: conError
+        ? (MOTIVOS_ERROR[Math.floor(azar() * MOTIVOS_ERROR.length)] ?? null)
+        : null,
       openedAt: new Date(Date.now() - Math.floor(azar() * 6) * 3_600_000).toISOString()
     });
   }
@@ -324,7 +469,16 @@ export class MockPanelService implements PanelService {
   private static readonly UID_PADRE_DEMO = '1513226215';
 
   private generarApiKeys(): void {
-    const estados: ApiKeyStatus[] = ['ok', 'ok', 'error', 'ok', 'ok', 'ok', 'conectando', 'sin-api'];
+    const estados: ApiKeyStatus[] = [
+      'ok',
+      'ok',
+      'error',
+      'ok',
+      'ok',
+      'ok',
+      'conectando',
+      'sin-api'
+    ];
     let n = 0;
     for (const cuenta of this.cuentas) {
       for (const sub of cuenta.subAccounts.slice(0, 4)) {
@@ -339,7 +493,15 @@ export class MockPanelService implements PanelService {
           uid: estado === 'sin-api' ? '' : `54761437${String(n).padStart(2, '0')}`,
           parentUid: estado === 'sin-api' ? '' : MockPanelService.UID_PADRE_DEMO,
           status: estado,
-          reason: estado === 'error' ? 'Bitget rechazó la firma: revise Secret Key y Passphrase.' : null
+          reason:
+            estado === 'error' ? 'Bitget rechazó la firma: revise Secret Key y Passphrase.' : null,
+          /*
+           * Una de cada cuatro sale como UTA, y una como en transición, para que
+           * los datos de demostración enseñen los tres casos: sin al menos una
+           * fila de cada, el distintivo no se puede revisar sin cuentas reales.
+           */
+          accountMode: n % 4 === 3 ? 'uta' : 'classic',
+          inTransition: n % 8 === 5
         });
       }
     }
@@ -350,7 +512,12 @@ export class MockPanelService implements PanelService {
   async getSystemInfo(): Promise<SystemInfo> {
     await latencia(60, 60);
     /* El servicio de demostración no habla con ningún mercado; se anuncia como simulado. */
-    return { appVersion: '0.1.0-demo', panelNumber: this.panelNumero, portable: true, market: 'simulado' };
+    return {
+      appVersion: '0.1.0-demo',
+      panelNumber: this.panelNumero,
+      portable: true,
+      market: 'simulado'
+    };
   }
 
   async setPanelNumber(numeroPanel: number): Promise<void> {
@@ -388,7 +555,9 @@ export class MockPanelService implements PanelService {
     if (symbol !== null) {
       const activo = CATALOGO.find((a) => a.symbol === symbol);
       if (activo === undefined) {
-        throw new Error(`Bitget no ofrece ${symbol} en este mercado. No se cambió ninguna casilla.`);
+        throw new Error(
+          `Bitget no ofrece ${symbol} en este mercado. No se cambió ninguna casilla.`
+        );
       }
       const ocupada = this.ranuras.findIndex((s, i) => s === symbol && i !== index);
       if (ocupada !== -1) {
@@ -406,7 +575,9 @@ export class MockPanelService implements PanelService {
 
   /** Los símbolos guardados, traducidos a activos. `null` es casilla vacía. */
   private ranurasResueltas(): (Asset | null)[] {
-    return this.ranuras.map((s) => (s === null ? null : (CATALOGO.find((a) => a.symbol === s) ?? null)));
+    return this.ranuras.map((s) =>
+      s === null ? null : (CATALOGO.find((a) => a.symbol === s) ?? null)
+    );
   }
 
   /** Los activos que hay ahora en las casillas, sin los huecos. */
@@ -443,7 +614,10 @@ export class MockPanelService implements PanelService {
   private publicarPrecios(): void {
     const instantanea: Record<string, Decimal> = {};
     for (const activo of this.activosEnRanuras()) {
-      instantanea[activo.id] = dec(this.precios[activo.id] ?? PRECIO_BASE[activo.id] ?? 0, activo.priceDecimals);
+      instantanea[activo.id] = dec(
+        this.precios[activo.id] ?? PRECIO_BASE[activo.id] ?? 0,
+        activo.priceDecimals
+      );
     }
     for (const cb of this.oyentesPrecios) cb(instantanea);
   }
@@ -815,9 +989,7 @@ export class MockPanelService implements PanelService {
       `${req.initialMargin} USDT de margen por casilla · ${req.leverage}x · ` +
         `${req.marginMode === 'isolated' ? 'AISLADO' : 'CRUZADO'} · ` +
         `${req.orderType === 'limit' ? `límite ${req.limitPrice ?? '—'}` : 'a mercado'}` +
-        (req.takeProfitPercent === null
-          ? ''
-          : ` · Take Profit ${req.takeProfitPercent}%`) +
+        (req.takeProfitPercent === null ? '' : ` · Take Profit ${req.takeProfitPercent}%`) +
         (req.additionalMargin === null
           ? ''
           : ` · margen adicional ${req.additionalMargin} USDT por casilla`),
@@ -940,7 +1112,15 @@ export class MockPanelService implements PanelService {
   async registerApiKey(input: ApiKeyInput): Promise<ValidationResult> {
     await latencia(400, 500);
     if (input.apiKey.length < 8 || input.secretKey.length < 8 || input.passphrase.length < 1) {
-      return { ok: false, verdict: 'invalida', reason: 'Bitget no aceptó la credencial.', warnings: [], latencyMs: 180, uid: null, parentUid: null };
+      return {
+        ok: false,
+        verdict: 'invalida',
+        reason: 'Bitget no aceptó la credencial.',
+        warnings: [],
+        latencyMs: 180,
+        uid: null,
+        parentUid: null
+      };
     }
 
     /*
@@ -977,7 +1157,9 @@ export class MockPanelService implements PanelService {
       uid,
       parentUid: MockPanelService.UID_PADRE_DEMO,
       status: 'ok',
-      reason: null
+      reason: null,
+      accountMode: 'classic',
+      inTransition: false
     });
 
     return {
@@ -995,13 +1177,37 @@ export class MockPanelService implements PanelService {
     await latencia(220, 260);
     const fila = this.apiKeys.get(id);
     if (!fila) {
-      return { ok: false, verdict: 'invalida', reason: 'Credencial no encontrada.', warnings: [], latencyMs: 0, uid: null, parentUid: null };
+      return {
+        ok: false,
+        verdict: 'invalida',
+        reason: 'Credencial no encontrada.',
+        warnings: [],
+        latencyMs: 0,
+        uid: null,
+        parentUid: null
+      };
     }
 
     if (fila.status === 'error') {
-      return { ok: false, verdict: 'invalida', reason: fila.reason ?? 'Bitget rechazó la credencial.', warnings: [], latencyMs: 210, uid: fila.uid, parentUid: fila.parentUid };
+      return {
+        ok: false,
+        verdict: 'invalida',
+        reason: fila.reason ?? 'Bitget rechazó la credencial.',
+        warnings: [],
+        latencyMs: 210,
+        uid: fila.uid,
+        parentUid: fila.parentUid
+      };
     }
-    return { ok: true, verdict: 'valida', reason: null, warnings: [], latencyMs: 140, uid: fila.uid, parentUid: fila.parentUid };
+    return {
+      ok: true,
+      verdict: 'valida',
+      reason: null,
+      warnings: [],
+      latencyMs: 140,
+      uid: fila.uid,
+      parentUid: fila.parentUid
+    };
   }
 
   /*
@@ -1016,6 +1222,549 @@ export class MockPanelService implements PanelService {
     if (!this.apiKeys.has(id)) return 'no-estaba';
     this.apiKeys.delete(id);
     return 'borrada';
+  }
+
+  /* ---------------- cuentas madre y saldos ---------------- */
+
+  async listParentAccounts(): Promise<ParentAccount[]> {
+    await latencia(120, 100);
+    return [...this.madres.values()];
+  }
+
+  async registerParentAccount(input: ParentAccountInput): Promise<ParentValidationResult> {
+    await latencia(400, 400);
+
+    if (input.apiKey.length < 8 || input.secretKey.length < 8 || input.passphrase.length < 1) {
+      return { ok: false, reason: 'Bitget no aceptó la credencial.', warnings: [], parent: null };
+    }
+
+    /*
+     * El caso que de verdad importa ensayar aquí: una clave válida de una cuenta
+     * que no es madre de nadie. Es lo que ocurrió contra la API real el
+     * 03/09/2026, y la pantalla tiene que saber pintarlo.
+     */
+    const sinSubcuentas = input.apiKey.includes('vacia');
+    const uid = sinSubcuentas ? '7514542716' : '1513226215';
+
+    const madre: ParentAccount = {
+      id: `madre_${this.madres.size + 1}`,
+      uid,
+      name: input.name,
+      maskedKey: `${input.apiKey.slice(0, 2)}••••${input.apiKey.slice(-4)}`,
+      addedAt: new Date().toISOString(),
+      subAccountsSeen: sinSubcuentas ? 0 : (this.cuentas[0]?.subAccounts.length ?? 0)
+    };
+    this.madres.set(uid, madre);
+
+    return {
+      ok: true,
+      reason: null,
+      warnings: sinSubcuentas
+        ? [
+            {
+              code: 'sin-subcuentas',
+              message:
+                'Esta clave es válida, pero Bitget no le reporta ninguna subcuenta. Comprueba que ' +
+                'sea la API Key de la cuenta principal de la que cuelgan tus subcuentas.'
+            }
+          ]
+        : [],
+      parent: madre
+    };
+  }
+
+  async deleteParentAccount(uid: string, stepPassword: string): Promise<DeleteOutcome> {
+    await latencia(100, 100);
+    if (this.pasoActual === '' || stepPassword !== this.pasoActual) return 'paso-incorrecto';
+    if (!this.madres.has(uid)) return 'no-estaba';
+    this.madres.delete(uid);
+    return 'borrada';
+  }
+
+  async getBalanceSheet(parentUid?: string): Promise<BalanceSheet> {
+    await latencia(500, 400);
+
+    const madre =
+      parentUid === undefined ? [...this.madres.values()][0] : this.madres.get(parentUid);
+
+    if (madre === undefined) {
+      throw new Error(
+        'No hay ninguna cuenta principal registrada. Da de alta su API Key para ver los saldos.'
+      );
+    }
+
+    const subcuentas = this.cuentas[0]?.subAccounts ?? [];
+
+    const rows: SubAccountBalance[] = subcuentas.map((s, i) => {
+      /* Una de cada siete sin datos, y una de cada cinco con margen retenido. */
+      const sinDatos = i % 7 === 3;
+      const disponible = Number.parseFloat(s.balance);
+      /*
+       * El caso que la pantalla tiene que saber contar: hay saldo, pero parte
+       * está comprometida en posiciones abiertas y no puede salir.
+       */
+      const transferible = i % 5 === 0 ? disponible * 0.6 : disponible;
+
+      return {
+        uid: `54761437${String(10 + i).padStart(2, '0')}`,
+        subAccountId: s.id,
+        label: s.label,
+        available: sinDatos ? null : dec(disponible, 2),
+        maxTransferable: sinDatos ? null : dec(transferible, 2),
+        equity: sinDatos ? null : dec(disponible, 2),
+        onlyInBitget: false,
+        noData: sinDatos
+      };
+    });
+
+    /* Y una que Bitget reporta pero el panel no tiene dada de alta. */
+    rows.push({
+      uid: '9999888877',
+      subAccountId: null,
+      label: '9999888877',
+      available: dec(250, 2),
+      maxTransferable: dec(250, 2),
+      equity: dec(250, 2),
+      onlyInBitget: true,
+      noData: false
+    });
+
+    let totalAvailable = 0;
+    let totalTransferable = 0;
+    let withData = 0;
+    for (const r of rows) {
+      if (r.available !== null) {
+        totalAvailable += Number.parseFloat(r.available);
+        withData += 1;
+      }
+      if (r.maxTransferable !== null) totalTransferable += Number.parseFloat(r.maxTransferable);
+    }
+
+    return {
+      parentUid: madre.uid,
+      parentName: madre.name,
+      /* La madre tiene su propio saldo, de otra petición: es de donde se reparte. */
+      parentAvailable: dec(4820.5, 2),
+      currency: 'USDT',
+      fetchedAt: new Date().toISOString(),
+      rows,
+      totalAvailable: dec(totalAvailable, 2),
+      totalTransferable: dec(totalTransferable, 2),
+      withData
+    };
+  }
+
+  /* ---------------- traspaso ---------------- */
+
+  async planTransfer(input: {
+    fromUid: string;
+    toUid: string;
+    amount: string;
+    parentUid?: string;
+  }): Promise<TransferPlan> {
+    await latencia(350, 250);
+
+    const hoja = await this.getBalanceSheet(input.parentUid);
+
+    /*
+     * La cuenta principal es una punta más, igual que en el panel real: no está
+     * en `rows` —no se reporta a sí misma— y por eso no tiene saldo conocido ni
+     * máximo transferible que comprobar. Ver `plan-traspaso.ts`.
+     */
+    const esMadre = (uid: string): boolean => uid !== '' && uid === hoja.parentUid;
+    const origen = esMadre(input.fromUid)
+      ? null
+      : hoja.rows.find((r) => r.uid === input.fromUid);
+    const destino = esMadre(input.toUid) ? null : hoja.rows.find((r) => r.uid === input.toUid);
+
+    if (origen === undefined)
+      throw new Error('La subcuenta de origen no está en esta cuenta principal.');
+    if (destino === undefined)
+      throw new Error('La subcuenta de destino no está en esta cuenta principal.');
+    if (input.fromUid === input.toUid)
+      throw new Error('El origen y el destino son la misma cuenta.');
+
+    const importe = Number.parseFloat(input.amount);
+    if (!Number.isFinite(importe) || importe <= 0)
+      throw new Error('El importe tiene que ser mayor que cero.');
+
+    if (origen !== null && (origen.maxTransferable === null || origen.available === null)) {
+      throw new Error('No se conoce el saldo de la subcuenta de origen. Actualiza los saldos.');
+    }
+
+    /* El caso que justifica la pantalla: hay saldo, pero no puede salir todo. */
+    const maximo = origen === null ? null : Number.parseFloat(origen.maxTransferable ?? '0');
+    if (origen !== null && maximo !== null && importe > maximo) {
+      throw new Error(
+        `De ${origen.label} solo pueden salir ${dec(maximo, 2)} ${hoja.currency}: ` +
+          'el resto está comprometido en posiciones abiertas.'
+      );
+    }
+
+    /* De la madre también se conoce el saldo: llega en la hoja, de otra petición. */
+    const saldoMadre = hoja.parentAvailable === null ? null : Number.parseFloat(hoja.parentAvailable);
+    const saldoOrigen = origen === null ? saldoMadre : Number.parseFloat(origen.available ?? '0');
+    const saldoDestino =
+      destino === null
+        ? saldoMadre
+        : destino.available === null
+          ? null
+          : Number.parseFloat(destino.available);
+    const nombreMadre = hoja.parentName === '' ? 'Cuenta principal' : hoja.parentName;
+
+    const plan: TransferPlan = {
+      id: `tr_${this.planesTraspaso.size + 1}_${Date.now().toString(36)}`,
+      parentUid: hoja.parentUid,
+      from: {
+        uid: origen?.uid ?? hoja.parentUid,
+        label: origen?.label ?? nombreMadre,
+        before: saldoOrigen === null ? '' : dec(saldoOrigen, 2),
+        after: saldoOrigen === null ? '' : dec(saldoOrigen - importe, 2)
+      },
+      to: {
+        uid: destino?.uid ?? hoja.parentUid,
+        label: destino?.label ?? nombreMadre,
+        before: saldoDestino === null ? '' : dec(saldoDestino, 2),
+        after: saldoDestino === null ? '' : dec(saldoDestino + importe, 2)
+      },
+      amount: dec(importe, 2),
+      currency: hoja.currency,
+      maxTransferable: maximo === null ? '' : dec(maximo, 2),
+      createdAt: new Date().toISOString()
+    };
+
+    this.planesTraspaso.set(plan.id, plan);
+    return plan;
+  }
+
+  async executeTransfer(planId: string, stepPassword: string): Promise<TransferResult> {
+    await latencia(600, 400);
+
+    const plan = this.planesTraspaso.get(planId);
+    if (plan === undefined) throw new Error('Ese traspaso ya no está vigente. Vuelve a revisarlo.');
+
+    if (this.pasoActual === '' || stepPassword !== this.pasoActual) {
+      return { ok: false, failure: 'paso-incorrecto', message: null, transferId: null, plan };
+    }
+
+    /* Un plan se envía una sola vez, como en el panel real. */
+    this.planesTraspaso.delete(planId);
+
+    /* Un importe acabado en .77 se rechaza: así se puede ensayar el fallo. */
+    if (plan.amount.endsWith('.77')) {
+      const message = 'Bitget rechazó el traspaso: fondos insuficientes en la subcuenta de origen.';
+      this.traspasos.unshift({
+        id: `oid_${this.traspasos.length + 1}`,
+        at: new Date().toISOString(),
+        fromLabel: plan.from.label,
+        toLabel: plan.to.label,
+        amount: plan.amount,
+        currency: plan.currency,
+        outcome: 'fallo',
+        transferId: null,
+        message
+      });
+      return { ok: false, failure: 'rechazado', message, transferId: null, plan };
+    }
+
+    const transferId = `bg-${Math.floor(Math.random() * 900000 + 100000)}`;
+    this.traspasos.unshift({
+      id: `oid_${this.traspasos.length + 1}`,
+      at: new Date().toISOString(),
+      fromLabel: plan.from.label,
+      toLabel: plan.to.label,
+      amount: plan.amount,
+      currency: plan.currency,
+      outcome: 'exito',
+      transferId,
+      message: null
+    });
+
+    return { ok: true, failure: null, message: null, transferId, plan };
+  }
+
+  async listTransfers(limit = 100): Promise<TransferRecord[]> {
+    await latencia(120, 100);
+    return this.traspasos.slice(0, limit);
+  }
+
+  /* ---------------- reparto y recogida ---------------- */
+
+  async planSpread(input: {
+    toUids: string[];
+    total: string;
+    mode: SpreadMode;
+    parentUid?: string;
+  }): Promise<SpreadPlan> {
+    await latencia(400, 300);
+
+    const hoja = await this.getBalanceSheet(input.parentUid);
+    const total = Number.parseFloat(input.total);
+    if (!Number.isFinite(total) || total <= 0)
+      throw new Error('El importe tiene que ser mayor que cero.');
+
+    const elegidas = hoja.rows.filter(
+      (r) => input.toUids.includes(r.uid) && !r.noData && r.available !== null
+    );
+    if (elegidas.length === 0)
+      throw new Error('Ninguna de las subcuentas elegidas tiene saldo conocido.');
+
+    const skipped: SpreadSkip[] = hoja.rows
+      .filter((r) => input.toUids.includes(r.uid) && (r.noData || r.available === null))
+      .map((r) => ({
+        uid: r.uid,
+        label: r.label,
+        reason: 'sin-datos',
+        message: 'La cuenta principal no informa de su saldo.'
+      }));
+
+    /*
+     * Partes: iguales, o lo que le falta a cada una para llegar al mismo nivel.
+     *
+     * --------------------------------------------------------------------
+     * El nivel NO es «(suma + total) / n»
+     * --------------------------------------------------------------------
+     * Esa fórmula reparte de más, y bastante: las subcuentas que ya están por
+     * encima del nivel no devuelven su exceso, así que lo que se entrega a las
+     * de abajo supera el total pedido. Aquí se vio repartiendo 48.724 cuando se
+     * habían pedido 5.000, y una demostración que miente sobre cuánto se mueve
+     * es peor que no tenerla.
+     *
+     * Lo correcto es llenar los vasos más bajos hasta un nivel que consuma
+     * exactamente el total: se ordenan de menor a mayor y se prueba a llenar los
+     * `k` primeros, aceptando el nivel que no rebase al siguiente. Es el mismo
+     * cálculo que hace de verdad `main/domain/plan-reparto.ts`, que es quien
+     * manda; esto es su equivalente en la demostración.
+     */
+    let partes: number[];
+    if (input.mode === 'iguales') {
+      partes = elegidas.map(() => total / elegidas.length);
+    } else {
+      const orden = elegidas
+        .map((r, i) => ({ i, saldo: Number.parseFloat(r.available ?? '0') }))
+        .sort((a, b) => a.saldo - b.saldo);
+
+      let nivel: number | null = null;
+      let cuantos = orden.length;
+      let acumulado = 0;
+
+      for (let k = 1; k <= orden.length; k += 1) {
+        acumulado += orden[k - 1]?.saldo ?? 0;
+        const candidato = (acumulado + total) / k;
+        const siguiente = orden[k]?.saldo;
+        if (siguiente === undefined || candidato <= siguiente) {
+          nivel = candidato;
+          cuantos = k;
+          break;
+        }
+      }
+
+      partes = elegidas.map(() => 0);
+      if (nivel !== null) {
+        for (let k = 0; k < cuantos; k += 1) {
+          const e = orden[k];
+          if (e !== undefined) partes[e.i] = Math.max(0, nivel - e.saldo);
+        }
+      }
+    }
+
+    const moves: SpreadMove[] = [];
+    for (const [i, r] of elegidas.entries()) {
+      const parte = partes[i] ?? 0;
+      const saldo = Number.parseFloat(r.available ?? '0');
+      if (parte <= 0) {
+        skipped.push({
+          uid: r.uid,
+          label: r.label,
+          reason: 'ya-por-encima',
+          message: 'Ya está por encima del nivel de las demás: no recibe nada.'
+        });
+        continue;
+      }
+      moves.push({
+        fromUid: hoja.parentUid,
+        fromLabel: hoja.parentName || 'Cuenta principal',
+        toUid: r.uid,
+        toLabel: r.label,
+        amount: dec(parte, 2),
+        before: dec(saldo, 2),
+        after: dec(saldo + parte, 2)
+      });
+    }
+
+    if (moves.length === 0)
+      throw new Error('Con ese importe no le toca nada a ninguna de las elegidas.');
+
+    const plan: SpreadPlan = {
+      id: `sp_${this.planesReparto.size + 1}_${Date.now().toString(36)}`,
+      parentUid: hoja.parentUid,
+      kind: 'reparto',
+      mode: input.mode,
+      currency: hoja.currency,
+      total: dec(
+        moves.reduce((a, m) => a + Number.parseFloat(m.amount), 0),
+        2
+      ),
+      moves,
+      skipped,
+      createdAt: new Date().toISOString()
+    };
+    this.planesReparto.set(plan.id, plan);
+    return plan;
+  }
+
+  async planCollect(input: { fromUids: string[]; parentUid?: string }): Promise<SpreadPlan> {
+    await latencia(400, 300);
+
+    const hoja = await this.getBalanceSheet(input.parentUid);
+    const moves: SpreadMove[] = [];
+    const skipped: SpreadSkip[] = [];
+
+    for (const r of hoja.rows.filter((x) => input.fromUids.includes(x.uid))) {
+      const transferible = r.maxTransferable === null ? null : Number.parseFloat(r.maxTransferable);
+      if (r.noData || transferible === null) {
+        skipped.push({
+          uid: r.uid,
+          label: r.label,
+          reason: 'sin-datos',
+          message: 'La cuenta principal no informa de su saldo.'
+        });
+        continue;
+      }
+      if (transferible <= 0) {
+        skipped.push({
+          uid: r.uid,
+          label: r.label,
+          reason: 'importe-cero',
+          message: 'No tiene saldo transferible.'
+        });
+        continue;
+      }
+      const saldo = Number.parseFloat(r.available ?? r.maxTransferable ?? '0');
+      moves.push({
+        fromUid: r.uid,
+        fromLabel: r.label,
+        toUid: hoja.parentUid,
+        toLabel: hoja.parentName || 'Cuenta principal',
+        amount: dec(transferible, 2),
+        before: dec(saldo, 2),
+        after: dec(saldo - transferible, 2)
+      });
+    }
+
+    if (moves.length === 0)
+      throw new Error('Ninguna de las elegidas tiene saldo que se pueda mover.');
+
+    const plan: SpreadPlan = {
+      id: `sp_${this.planesReparto.size + 1}_${Date.now().toString(36)}`,
+      parentUid: hoja.parentUid,
+      kind: 'recogida',
+      mode: null,
+      currency: hoja.currency,
+      total: dec(
+        moves.reduce((a, m) => a + Number.parseFloat(m.amount), 0),
+        2
+      ),
+      moves,
+      skipped,
+      createdAt: new Date().toISOString()
+    };
+    this.planesReparto.set(plan.id, plan);
+    return plan;
+  }
+
+  async executeSpread(planId: string, stepPassword: string): Promise<SpreadResult> {
+    await latencia(900, 600);
+
+    const plan = this.planesReparto.get(planId);
+    if (plan === undefined) throw new Error('Ese reparto ya no está vigente. Vuelve a revisarlo.');
+
+    if (this.pasoActual === '' || stepPassword !== this.pasoActual) {
+      return {
+        ok: false,
+        failure: 'paso-incorrecto',
+        plan,
+        results: [],
+        sent: 0,
+        failed: 0,
+        unconfirmed: 0
+      };
+    }
+
+    this.planesReparto.delete(planId);
+
+    /*
+     * La demostración enseña los tres desenlaces, no dos.
+     *
+     * Uno de cada cinco es rechazado y uno de cada siete queda **sin confirmar**
+     * —enviado, sin respuesta de Bitget—. Ese tercer caso está aquí a propósito:
+     * es el que el operador tiene que aprender a distinguir, porque un rechazo se
+     * puede repetir y un «sin confirmar» hay que comprobarlo antes, o el dinero
+     * se mueve dos veces.
+     */
+    let unconfirmed = 0;
+    const results: SpreadMoveResult[] = plan.moves.map((m, i) => {
+      const dudoso = i % 7 === 5;
+      const ok = !dudoso && i % 5 !== 3;
+      if (dudoso) unconfirmed += 1;
+
+      const message = ok
+        ? null
+        : dudoso
+          ? 'Se envió y Bitget no confirmó si entró. Comprueba el saldo antes de repetirlo.'
+          : 'Bitget rechazó el traspaso: fondos insuficientes.';
+
+      this.traspasos.unshift({
+        id: `oid_${this.traspasos.length + 1}_${i}`,
+        at: new Date().toISOString(),
+        fromLabel: m.fromLabel,
+        toLabel: m.toLabel,
+        amount: m.amount,
+        currency: plan.currency,
+        outcome: ok ? 'exito' : dudoso ? 'pendiente' : 'fallo',
+        transferId: ok ? `bg-${Math.floor(Math.random() * 900000 + 100000)}` : null,
+        message
+      });
+      return {
+        id: `mv_${i}`,
+        fromLabel: m.fromLabel,
+        toLabel: m.toLabel,
+        amount: m.amount,
+        ok,
+        message
+      };
+    });
+
+    const failed = results.filter((r) => !r.ok).length - unconfirmed;
+    return {
+      ok: failed === 0 && unconfirmed === 0,
+      failure: null,
+      plan,
+      results,
+      sent: results.length - failed - unconfirmed,
+      failed,
+      unconfirmed
+    };
+  }
+
+  /*
+   * En la demostración el almacén siempre existe: hay cuentas inventadas desde
+   * el primer segundo, así que nunca es un primer arranque y el botón de
+   * importar no llega a ofrecerse. Se implementa igual porque el puerto lo
+   * exige, y devolver lo que de verdad pasa aquí es más honesto que fingir.
+   */
+  async isFirstRun(): Promise<boolean> {
+    return false;
+  }
+
+  async importCredentials(): Promise<ImportResult> {
+    await latencia(200, 150);
+    return {
+      cancelled: false,
+      ok: false,
+      message: 'La demostración no lee carpetas del disco: no hay credenciales que importar.',
+      accounts: null
+    };
   }
 
   async unlockVault(masterPassword: string): Promise<UnlockResult> {

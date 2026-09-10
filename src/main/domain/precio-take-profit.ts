@@ -78,6 +78,23 @@ const rechazo = (motivo: MotivoRechazoTp, mensaje: string): ResultadoTakeProfit 
 });
 
 /**
+ * Cantidad valida, o `null` si eso no es un numero.
+ *
+ * Misma razon que en `dimension-orden.ts`: `new Decimal('.')` lanza, y el
+ * porcentaje viaja con la apertura, asi que un punto suelto en ese campo se
+ * llevaba por delante el lote entero. Ver la incidencia del 05/09/2026.
+ */
+function cantidad(v: string | null | undefined): Decimal | null {
+  if (v == null || v.trim() === '') return null;
+  try {
+    const d = new Decimal(v);
+    return d.isFinite() ? d : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Precio de disparo del Take Profit.
  *
  * El redondeo va **hacia el precio de entrada**, nunca en contra: un objetivo
@@ -86,10 +103,10 @@ const rechazo = (motivo: MotivoRechazoTp, mensaje: string): ResultadoTakeProfit 
  * inofensivo es cobrar un céntimo menos.
  */
 export function precioTakeProfit(p: PeticionTakeProfit): ResultadoTakeProfit {
-  const porcentaje = new Decimal(p.porcentaje || '0');
-  const entrada = new Decimal(p.precioEntrada || '0');
+  const porcentaje = cantidad(p.porcentaje);
+  const entrada = cantidad(p.precioEntrada);
 
-  if (!porcentaje.isFinite() || porcentaje.lessThanOrEqualTo(0)) {
+  if (porcentaje === null || porcentaje.lessThanOrEqualTo(0)) {
     return rechazo('porcentaje-invalido', 'El Take Profit debe ser un porcentaje mayor que cero.');
   }
   if (!Number.isFinite(p.apalancamiento) || p.apalancamiento <= 0) {
@@ -98,7 +115,7 @@ export function precioTakeProfit(p: PeticionTakeProfit): ResultadoTakeProfit {
       'No se conoce el apalancamiento de la cuenta, y sin él el porcentaje no define ningún precio.'
     );
   }
-  if (!entrada.isFinite() || entrada.lessThanOrEqualTo(0)) {
+  if (entrada === null || entrada.lessThanOrEqualTo(0)) {
     return rechazo('precio-invalido', 'La posición no tiene un precio de entrada válido.');
   }
 

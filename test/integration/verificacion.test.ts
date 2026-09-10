@@ -203,8 +203,18 @@ describe('politica de permisos vigente', () => {
 
     await verificarCredencial(cliente, CREDENCIAL);
 
-    /* Dos peticiones: el paso 2 ya no corta, se llega a leer la cuenta. */
-    expect(exchange.peticiones).toHaveLength(2);
+    /*
+     * Tres peticiones: la deteccion de modo, la info de cuenta y la del simbolo.
+     *
+     * Lo que fija esta prueba es que **se llega a la tercera**: el paso 2 ya no
+     * corta ante un permiso sin catalogar. La primera es
+     * `/api/v3/account/settings`, que desde el Paquete B abre toda verificacion
+     * para saber si la cuenta habla V2 o V3; el exchange simulado la rechaza por
+     * defecto -es una cuenta clasica- y no consume cola.
+     */
+    expect(exchange.peticiones).toHaveLength(3);
+    expect(exchange.peticiones[0]?.url).toContain('/api/v3/account/settings');
+    expect(exchange.peticiones[2]?.url).toContain('/api/v2/mix/account/account');
   });
 
   it('ningun codigo catalogado queda vetado por la politica de hoy', () => {

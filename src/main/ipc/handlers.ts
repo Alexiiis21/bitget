@@ -10,7 +10,7 @@
  * pagina podria manipular, y una cadena donde se espera un objeto no debe
  * llegar viva hasta el vault. docs/02-arquitectura.html.
  */
-import { app, ipcMain } from 'electron';
+import { app, dialog, ipcMain } from 'electron';
 import Decimal from 'decimal.js';
 import { z } from 'zod';
 import {
@@ -28,7 +28,8 @@ import type {
   PlanCierreIpc,
   PlanMargenIpc,
   PlanQuitarTpIpc,
-  PlanTakeProfitIpc
+  PlanTakeProfitIpc,
+  ResultadoImportacionIpc
 } from '@shared/ipc-contract';
 import type { PosicionMonitor } from '@shared/types';
 import { UNIDAD_OPERACION } from '../domain/dimension-orden';
@@ -40,7 +41,8 @@ import type {
   PlanQuitarTakeProfit,
   PlanTakeProfit
 } from '../execution/motor-lotes';
-import { carpetaDatos, esPortable } from '../storage/paths';
+import { carpetaDatos, esPortable, rutas } from '../storage/paths';
+import { importarCredenciales } from '../storage/importar-credenciales';
 import { fijarNumeroPanel, type Instancia } from '../storage/instancia';
 import type { Sesion } from './sesion';
 
@@ -160,7 +162,9 @@ const aVistaCierre = (plan: PlanCierre): PlanCierreIpc => ({
     mensaje: d.mensaje
   })),
   margenLiberadoTotal: importe(
-    plan.entradas.reduce((total, e) => total.plus(e.margenLiberado ?? '0'), new Decimal(0)).toFixed()
+    plan.entradas
+      .reduce((total, e) => total.plus(e.margenLiberado ?? '0'), new Decimal(0))
+      .toFixed()
   ),
   creadoEn: plan.creadoEn
 });
@@ -292,6 +296,69 @@ const esquemaAlta = z.object({
 
 const esquemaId = z.string().min(1).max(128);
 
+/**
+ * Alta de una cuenta principal.
+ *
+ * Sin `grupoNombre` ni `casilla`: una cuenta madre no ocupa fila en el panel,
+ * no se opera y no compite por las casillas de un grupo. Lo unico que se le
+ * pide es un nombre para reconocerla y sus tres claves.
+ */
+/**
+ * Peticion de traspaso.
+ *
+ * El importe entra como **cadena**, no como numero: un `number` en JavaScript
+ * no puede representar exactamente 0.1, y aqui la cifra es dinero. Se valida su
+ * forma -digitos y un punto- y el resto lo comprueba el planificador contra el
+ * maximo transferible que reporta Bitget.
+ */
+const esquemaTraspaso = z.object({
+  uidOrigen: z.string().min(1).max(64),
+  uidDestino: z.string().min(1).max(64),
+  importe: z
+    .string()
+    .min(1)
+    .max(32)
+    .regex(/^\d+(\.\d+)?$/, 'El importe debe ser un numero.'),
+  uidMadre: z.string().min(1).max(64).optional()
+});
+
+/**
+ * Peticion de reparto masivo.
+ *
+ * El tope de destinos es el de subcuentas que puede tener una cuenta principal
+ * en el panel. No es una defensa contra el operador -no puede elegir mas de las
+ * que ve- sino contra una lista manipulada que hiciera al panel enviar miles de
+ * traspasos en serie.
+ */
+const esquemaReparto = z.object({
+  destinos: z
+    .array(z.string().min(1).max(64))
+    .min(1)
+    .max(CUENTAS_MADRE_MAX * SUBCUENTAS_POR_GRUPO),
+  total: z
+    .string()
+    .min(1)
+    .max(32)
+    .regex(/^\d+(\.\d+)?$/, 'El importe debe ser un numero.'),
+  modo: z.enum(['iguales', 'igualar']),
+  uidMadre: z.string().min(1).max(64).optional()
+});
+
+const esquemaRecogida = z.object({
+  origenes: z
+    .array(z.string().min(1).max(64))
+    .min(1)
+    .max(CUENTAS_MADRE_MAX * SUBCUENTAS_POR_GRUPO),
+  uidMadre: z.string().min(1).max(64).optional()
+});
+
+const esquemaAltaMadre = z.object({
+  etiqueta: z.string().min(1).max(64),
+  apiKey: z.string().min(1).max(256),
+  secretKey: z.string().min(1).max(256),
+  passphrase: z.string().min(1).max(256)
+});
+
 const esquemaObjetivo = z.object({
   cuentaId: z.string().min(1).max(128),
   lado: z.enum(['long', 'short'])
@@ -305,7 +372,11 @@ const esquemaObjetivo = z.object({
  * y no un valor ausente; el simbolo se comprueba despues contra el catalogo del
  * exchange, que es lo unico que puede decir si existe.
  */
-const esquemaRanura = z.number().int().min(0).max(RANURAS_ACTIVO - 1);
+const esquemaRanura = z
+  .number()
+  .int()
+  .min(0)
+  .max(RANURAS_ACTIVO - 1);
 const esquemaSimboloRanura = z.string().min(1).max(32).nullable();
 
 /**
@@ -391,26 +462,59 @@ export function registrarIpc(
   /** `instancia.json`: donde se guarda el numero cuando el operador lo cambia. */
   rutaInstancia: string
 ): void {
-  ipcMain.handle(
-    'sistema:info',
-    (): InfoSistema => ({
-      appVersion: app.getVersion(),
-      instanciaId: instancia.id,
-      instanciaNombre: instancia.nombre,
-      numeroPanel: instancia.numero,
-      mercado,
-      portable: esPortable(),
-      carpetaDatos: carpetaDatos(),
-      electron: process.versions.electron,
-      node: process.versions.node
-    })
-  );
+  ipcMain.handle('sistema:info', (): InfoSistema => ({
+    appVersion: app.getVersion(),
+    instanciaId: instancia.id,
+    instanciaNombre: instancia.nombre,
+    numeroPanel: instancia.numero,
+    mercado,
+    portable: esPortable(),
+    carpetaDatos: carpetaDatos(),
+    electron: process.versions.electron,
+    node: process.versions.node
+  }));
 
   ipcMain.handle('sistema:estado', (): Promise<EstadoApp> => sesion.estadoApp());
 
   ipcMain.handle('sistema:numero-panel', (_e, numero: unknown) =>
     fijarNumeroPanel(rutaInstancia, instancia, esquemaNumeroPanel.parse(numero))
   );
+
+  /*
+   * Traer las credenciales de una instalacion anterior.
+   *
+   * El dialogo de carpeta se abre **aqui**, en el proceso principal: el renderer
+   * no puede elegir una ruta ni mandarla: solo puede pedir que se abra el
+   * selector. Asi una pantalla comprometida no puede senalar una carpeta a su
+   * antojo, que es la unica forma de que este canal tocara archivos que nadie
+   * eligio.
+   *
+   * Y por eso tampoco recibe parametros. Ver `importar-credenciales.ts` para las
+   * tres reglas, empezando por la que importa: no se pisa un almacen existente.
+   */
+  ipcMain.handle('credenciales:importar', async (): Promise<ResultadoImportacionIpc> => {
+    const eleccion = await dialog.showOpenDialog({
+      title: 'Elija la carpeta de datos del panel anterior',
+      properties: ['openDirectory'],
+      buttonLabel: 'Importar credenciales'
+    });
+
+    if (eleccion.canceled || eleccion.filePaths[0] === undefined) {
+      return { cancelado: true, ok: false, motivo: null, mensaje: '', cuentas: null };
+    }
+
+    const r = rutas();
+    return {
+      cancelado: false,
+      ...(await importarCredenciales(eleccion.filePaths[0], {
+        base: r.base,
+        vault: r.vault,
+        vaultBak: r.vaultBak,
+        cuentas: r.cuentas,
+        activos: r.activos
+      }))
+    };
+  });
 
   ipcMain.handle('vault:estado', () => sesion.estadoVault());
   ipcMain.handle('vault:crear', (_e, contrasena: unknown) =>
@@ -444,6 +548,52 @@ export function registrarIpc(
   );
 
   ipcMain.handle('panel:cuentas', () => sesion.cuentasPanel());
+
+  /*
+   * Cuentas madre y saldos de sus subcuentas. Fase 2 de los traspasos.
+   *
+   * La baja lleva contrasena de paso por el mismo motivo que la de una
+   * subcuenta, y con mas razon: es la clave que puede mover saldo entre todas.
+   * `saldos:leer` es la unica que sale a la red, y su cupo es de 1 peticion cada
+   * 10 s por UID: se llama al abrir la pantalla y al refrescar, nunca en bucle.
+   */
+  ipcMain.handle('madres:listar', () => sesion.listarMadres());
+  ipcMain.handle('madres:agregar', (_e, alta: unknown) =>
+    sesion.agregarMadre(esquemaAltaMadre.parse(alta))
+  );
+  ipcMain.handle('madres:eliminar', (_e, uidMadre: unknown, contrasenaPaso: unknown) =>
+    sesion.eliminarMadre(esquemaId.parse(uidMadre), esquemaContrasena.parse(contrasenaPaso))
+  );
+  ipcMain.handle('saldos:leer', (_e, uidMadre: unknown) =>
+    sesion.saldosSubcuentas(uidMadre === undefined ? undefined : esquemaId.parse(uidMadre))
+  );
+
+  /*
+   * Traspaso, en dos pasos. Planificar no envia nada; ejecutar si.
+   *
+   * `traspaso:ejecutar` recibe el id del plan y la contrasena de paso, nunca un
+   * importe: los numeros ya viajaron en el plan que el operador aprobo, y
+   * volver a aceptarlos aqui permitiria enviar algo distinto de lo aprobado.
+   */
+  ipcMain.handle('traspaso:planificar', (_e, peticion: unknown) =>
+    sesion.planificarTraspaso(esquemaTraspaso.parse(peticion))
+  );
+  ipcMain.handle('traspaso:ejecutar', (_e, planId: unknown, contrasenaPaso: unknown) =>
+    sesion.ejecutarTraspaso(esquemaId.parse(planId), esquemaContrasena.parse(contrasenaPaso))
+  );
+  ipcMain.handle('traspaso:historial', (_e, limite: unknown) =>
+    sesion.historialTraspasos(typeof limite === 'number' ? limite : undefined)
+  );
+
+  ipcMain.handle('reparto:planificar', (_e, peticion: unknown) =>
+    sesion.planificarReparto(esquemaReparto.parse(peticion))
+  );
+  ipcMain.handle('recogida:planificar', (_e, peticion: unknown) =>
+    sesion.planificarRecogida(esquemaRecogida.parse(peticion))
+  );
+  ipcMain.handle('reparto:ejecutar', (_e, planId: unknown, contrasenaPaso: unknown) =>
+    sesion.ejecutarReparto(esquemaId.parse(planId), esquemaContrasena.parse(contrasenaPaso))
+  );
 
   /*
    * Las ocho casillas del selector, y el catalogo con el que se editan.

@@ -97,9 +97,23 @@ const CATALOGO: Record<string, { clase: ClaseError; mensaje: string }> = {
     clase: 'fatal-cuenta',
     mensaje: 'La API Key no existe, o la passphrase no coincide con ella.'
   },
+  /*
+   * Dos causas distintas bajo el mismo codigo, capturadas las dos.
+   *
+   *   28/07/2026  falta el permiso de trading en una cuenta clasica.
+   *   09/09/2026  «Incorrect permissions, need UTA manage read or UTA manage
+   *               write permissions» al llamar a /api/v3/account/settings.
+   *
+   * El mensaje nombra las dos a proposito, igual que el de `40012`: decir solo
+   * «permiso de trading» mandaba a revisar una casilla que ya estaba marcada,
+   * teniendo sin marcar la de UTA -que ni siquiera existe en una cuenta
+   * clasica-.
+   */
   '40014': {
     clase: 'fatal-cuenta',
-    mensaje: 'La API Key no tiene permiso de trading. Habilitalo en Bitget.'
+    mensaje:
+      'La API Key no tiene los permisos que pide esta operacion. Revisa en Bitget que ' +
+      'tenga Trading y, si la cuenta esta migrada a UTA, tambien «UTA manage read».'
   },
   '40018': {
     clase: 'fatal-cuenta',
@@ -158,6 +172,128 @@ const CATALOGO: Record<string, { clase: ClaseError; mensaje: string }> = {
    */
   '400172': { clase: 'fatal-lote', mensaje: 'Bitget rechazo un parametro de la operacion.' }
 };
+
+/**
+ * Codigos que significan lo mismo en las dos superficies, por construccion.
+ *
+ * ==========================================================================
+ * Por que existen: un rechazo no siempre es una respuesta
+ * ==========================================================================
+ * La deteccion de modo pregunta a `/api/v3/account/settings` y lee el rechazo
+ * como «esta key no vive en V3, es clasica». Eso es correcto **solo si el
+ * rechazo viene de la logica de negocio**. Estos codigos no: se producen antes,
+ * al validar el sobre de autenticacion, que es **identico en V2 y en V3** -misma
+ * firma, mismas cuatro cabeceras, docs de integracion seccion 2-.
+ *
+ * Un `40018` no dice nada sobre si la cuenta es UTA: dice que esta IP no puede
+ * usar esa clave, en ninguna de las dos APIs. Leerlo como «classic» y seguir a
+ * V2 produce un segundo rechazo y un diagnostico que manda al operador a buscar
+ * un problema de migracion teniendo un problema de lista blanca.
+ *
+ * Es exactamente lo que paso el 09/09/2026: la sonda devolvio
+ * `40018 · Invalid IP` y tanto el script como el panel lo tomaron por el codigo
+ * de superficie equivocada que buscaba la Fase A. No lo era.
+ *
+ * La lista es **corta a proposito**. Solo entran codigos cuya causa esta en el
+ * sobre, no en la cuenta:
+ *
+ *   40001 40002 40003   falta una cabecera de autenticacion
+ *   40005               la passphrase no coincide
+ *   40006 40009         la firma no valida
+ *   40018               la IP no esta autorizada para esa clave
+ *
+ * **No** entran `40012`, `40014` ni `40037` aunque lo parezcan: «la key no
+ * existe» o «sin permiso» si podrian ser la forma en que V3 rechaza a una clave
+ * clasica, y meterlos aqui haria que una cuenta Classic perfectamente valida se
+ * diera por invalida. Ante la duda, se prefiere el diagnostico peor al rechazo
+ * falso.
+ */
+const SOBRE_DE_AUTENTICACION = new Set([
+  '40001',
+  '40002',
+  '40003',
+  '40005',
+  '40006',
+  '40009',
+  '40018'
+]);
+
+/**
+ * `true` si el codigo se refiere al sobre de autenticacion y no a la superficie.
+ *
+ * Quien lo recibe **no debe concluir un modo de cuenta**: no se pudo llegar a
+ * preguntar. Ver `SOBRE_DE_AUTENTICACION`.
+ */
+export function esErrorDeAutenticacion(codigo: string | null): boolean {
+  return codigo !== null && SOBRE_DE_AUTENTICACION.has(codigo);
+}
+
+/**
+ * `true` si V3 rechazo por falta del permiso de UTA. **Prueba que la cuenta es
+ * unificada.**
+ *
+ * ==========================================================================
+ * Se mira el mensaje, no solo el codigo, y hay motivo
+ * ==========================================================================
+ * `40014` tiene dos causas capturadas: falta el permiso de trading -cuenta
+ * clasica, 28/07/2026- y falta el permiso de UTA -09/09/2026, «Incorrect
+ * permissions, need UTA manage read or UTA manage write permissions»-. El codigo
+ * solo no distingue, y confundirlas cuesta caro en las dos direcciones:
+ *
+ *   leerlo siempre como UTA     daria por unificada una cuenta clasica a la que
+ *                               simplemente le falta el permiso de trading
+ *   leerlo siempre como clasica es lo que se hacia, y es el fallo del
+ *                               09/09/2026: una subcuenta **ya migrada** se
+ *                               enrutaba a V2 para siempre
+ *
+ * La palabra `UTA` en el mensaje es el unico discriminante disponible, y es
+ * fiable en un sentido: Bitget no le habla de permisos de UTA a una clave de
+ * cuenta clasica, porque ese ambito no existe alli. Si algun dia cambiara el
+ * texto, esto deja de reconocerlo y se vuelve al comportamiento anterior
+ * -`classic`-, que es el lado seguro de fallar.
+ */
+export function esPermisoUtaFaltante(codigo: string | null, mensaje: string | null): boolean {
+  return codigo === '40014' && /\buta\b/i.test(mensaje ?? '');
+}
+
+/**
+ * `true` si el codigo esta en el catalogo de arriba.
+ *
+ * Lo usa la correccion de superficie del motor de lotes. Un codigo catalogado
+ * significa que **se sabe** por que fallo -saldo, permisos, parametro- y por
+ * tanto que el problema no es la superficie; uno ausente es candidato a serlo,
+ * porque hasta la migracion no existian dos superficies y ningun codigo de los
+ * 22 significa «esta clave no habla esta API». Ver §4.1 de
+ * `docs/00-uta-fase-1-equivalencias.md`.
+ */
+export function esCodigoCatalogado(codigo: string): boolean {
+  return Object.hasOwn(CATALOGO, codigo);
+}
+
+/**
+ * `true` si Bitget recibio la peticion y la rechazo, con un codigo suyo.
+ *
+ * ==========================================================================
+ * Es la unica forma segura de saber que una escritura NO se ejecuto
+ * ==========================================================================
+ * Un rechazo de negocio es una respuesta: el exchange leyo la peticion, dijo que
+ * no y no hizo nada. Eso autoriza a reenviarla —corregida— sin riesgo de
+ * duplicar.
+ *
+ * Se excluyen dos cosas que tambien llegan como `fatal-cuenta` y que **no**
+ * prueban nada de eso:
+ *
+ *   `ESQUEMA`   Bitget respondio `00000` y el cuerpo no encajo. La operacion
+ *               **pudo ejecutarse**; reenviarla la duplicaria.
+ *   los codigos de transporte (`ECONNRESET`, `UND_ERR_SOCKET`...) que no son
+ *               numericos: ahi no hubo respuesta y el resultado es desconocido.
+ *
+ * De ahi que se exija un codigo puramente numerico, que es la forma de todos los
+ * codigos de negocio de Bitget y de los estados HTTP.
+ */
+export function esRechazoDeNegocio(error: ErrorBitget): boolean {
+  return error.codigo !== null && /^\d+$/.test(error.codigo);
+}
 
 /** Traduccion y clase de un codigo del exchange. */
 export function clasificarCodigo(codigo: string): { clase: ClaseError; mensaje: string } {

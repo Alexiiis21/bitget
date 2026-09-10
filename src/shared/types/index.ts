@@ -19,6 +19,33 @@ export type Lado = 'long' | 'short';
 export type ModoMargen = 'aislado' | 'cruzado';
 export type ModoPosicion = 'cobertura' | 'unilateral';
 
+/**
+ * Modelo de cuenta de Bitget, que decide **con que API se habla**.
+ *
+ * `classic` es la cuenta de toda la vida, que responde a `/api/v2/*`. `uta`
+ * -Unified Trading Account- responde a `/api/v3/*` y **no puede consultar los
+ * endpoints clasicos**: una API Key emitida sobre una cuenta UTA recibe un
+ * rechazo en V2, y al reves.
+ *
+ * El valor por defecto de toda cuenta ya registrada es `classic`, porque es lo
+ * que eran todas antes de que esto existiera. Una cuenta pasa a `uta` solo
+ * cuando la deteccion lo confirma; nunca se supone.
+ *
+ * La actualizacion a UTA es **irreversible a nivel de subcuenta**: una vez
+ * hecha, no se puede volver a classic. docs/00-uta-fase-1-equivalencias.md.
+ */
+export type AccountMode = 'classic' | 'uta';
+
+/**
+ * Modo de posicion segun UTA. Es el `posMode` de V2 con otro nombre.
+ *
+ * Decide si `posSide` es obligatorio en la orden: en `hedge_mode` lo es, y
+ * omitirlo **cruza los lados** -abre corto donde el operador pidio largo-. Por
+ * eso `null` significa «no se sabe» y no se sustituye por un modo concreto:
+ * adivinar aqui cuesta una posicion en el lado equivocado.
+ */
+export type HoldMode = 'one_way_mode' | 'hedge_mode';
+
 /* ---------- cuentas ---------- */
 
 export type EstadoConexion = 'conectada' | 'conectando' | 'desconectada' | 'modo-rest';
@@ -67,6 +94,17 @@ export interface Cuenta {
   activa: boolean;
   modoPosicion: ModoPosicion;
   modoMargen: ModoMargen;
+  /**
+   * Con que API habla esta subcuenta. `classic` mientras no se demuestre otra
+   * cosa: es lo que eran todas las cuentas antes de que UTA existiera, y
+   * suponer `uta` mandaria las peticiones a una superficie que las rechaza.
+   */
+  accountMode: AccountMode;
+  /**
+   * `null` = todavia no se ha leido. Solo lo informa V3, asi que una cuenta
+   * `classic` lo tiene siempre `null` y usa `modoPosicion` en su lugar.
+   */
+  holdMode: HoldMode | null;
   altaEn: string;
 }
 

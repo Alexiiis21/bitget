@@ -15,6 +15,15 @@
  * de por medio.
  *
  * --------------------------------------------------------------------------
+ * Habla las dos superficies, y la elige la credencial
+ * --------------------------------------------------------------------------
+ * Desde la Fase D una cuenta UTA abre su socket en `/v3/ws/private` y se
+ * suscribe a `instType: UTA` con `topic`, mientras las Classic siguen en
+ * `/v2/ws/private` con `instType` de producto y `channel`. El ciclo de vida de
+ * arriba es el mismo para las dos, el login es identico byte a byte, y toda la
+ * diferencia cabe en la tabla `SUSCRIPCIONES`.
+ *
+ * --------------------------------------------------------------------------
  * Estado de verificacion del protocolo
  * --------------------------------------------------------------------------
  * La firma del `login` esta tomada de la documentacion de Bitget y es la misma
@@ -38,9 +47,18 @@ import { WebSocket } from 'ws';
 import { z } from 'zod';
 import { WS_PING_MS, WS_PONG_TIMEOUT_MS } from '@shared/constants';
 import type { Mercado } from '../mercado';
-import { firmar, type Credencial } from '../rest/signer';
+import { firmar, superficieDe, type Credencial, type Superficie } from '../rest/signer';
 
 export const URL_WS_PRIVADO = 'wss://ws.bitget.com/v2/ws/private';
+
+/**
+ * El socket privado de UTA. Otra URL, otro vocabulario, mismo login.
+ *
+ * La autenticacion es identica a la de V2 -misma firma, mismo timestamp en
+ * segundos, misma cadena `/user/verify`-, asi que `autenticar()` no distingue
+ * superficie. Lo que cambia es la suscripcion, y cambia en tres cosas a la vez.
+ */
+export const URL_WS_PRIVADO_V3 = 'wss://ws.bitget.com/v3/ws/private';
 
 /**
  * Cuanto se espera a que el servidor conteste al `login`.
@@ -56,6 +74,38 @@ export const CANAL_POSICIONES = 'positions';
 export const CANAL_PLANES = 'orders-algo';
 
 /**
+ * Los tres temas de UTA.
+ *
+ * ==========================================================================
+ * `order` no es el sustituto de `orders-algo`
+ * ==========================================================================
+ * Se parecen en el nombre y no en lo que traen: `orders-algo` son **ordenes de
+ * plan** -de ahi sale la columna de Take Profit del monitor- y `order` son las
+ * ordenes normales. V3 no publica un tema de planes en esta lista, que es
+ * coherente con lo que ya sabiamos de la Fase C: el ciclo de vida del Take
+ * Profit no tiene equivalente conocido en UTA (hueco 2.2).
+ *
+ * De los tres, hoy se consumen dos —`position` llena el monitor y `account`
+ * refresca el saldo—. `order` se suscribe porque el alcance lo pide y porque es
+ * la pieza sobre la que se apoyara la reconciliacion por `clientOid`, que es
+ * Fase E. Ver `PoolSockets.aplicar`.
+ */
+export const TEMA_POSICION = 'position';
+export const TEMA_ORDEN = 'order';
+export const TEMA_CUENTA = 'account';
+
+/**
+ * `instType` de UTA. Es un valor fijo, no el mercado.
+ *
+ * En V2 hay que suscribirse por producto -`USDT-FUTURES` o `SUSDT-FUTURES`- y
+ * el `instType` sale de `mercado.productType`. V3 unifica: un solo `instType`
+ * cubre la cuenta entera. Mandar aqui el `productType` seria el error natural, y
+ * dejaria la suscripcion sin confirmar -la conexion no llegaria a viva y la
+ * cuenta se quedaria en REST para siempre-.
+ */
+export const INST_TYPE_UTA = 'UTA';
+
+/**
  * El argumento comodin de cada canal. **Sin verificar contra el servidor real.**
  *
  * Bitget pide un tercer campo ademas de `instType` y `channel` para decir «todos
@@ -64,10 +114,45 @@ export const CANAL_PLANES = 'orders-algo';
  * clase de detalle que ya mordio una vez en este proyecto -ver `posSide` contra
  * `holdSide` en `tpsl.ts`-, asi que esta aqui aislado y no repartido por el
  * codigo.
+ *
+ * Los temas de V3 no llevan comodin: `{instType: UTA, topic}` y nada mas.
  */
 const ARGUMENTOS_CANAL: Record<string, Record<string, string>> = {
   [CANAL_POSICIONES]: { coin: 'default' },
   [CANAL_PLANES]: { instId: 'default' }
+};
+
+/**
+ * Que se suscribe en cada superficie, y como se nombra.
+ *
+ * Las dos diferencias que importan estan aqui juntas a proposito: la clave del
+ * canal pasa de `channel` a `topic`, y el `instType` deja de salir del mercado.
+ * Tenerlas en una tabla evita el `if (superficie === 'v3')` repartido por el
+ * resto de la clase, que es justo lo que pide la seccion 7 del documento de
+ * integracion.
+ */
+interface Suscripcion {
+  url: string;
+  /** Como se llama el campo del canal en esta superficie. */
+  clave: 'channel' | 'topic';
+  /** `null` = se usa `mercado.productType`. */
+  instType: string | null;
+  canales: readonly string[];
+}
+
+const SUSCRIPCIONES: Record<Superficie, Suscripcion> = {
+  v2: {
+    url: URL_WS_PRIVADO,
+    clave: 'channel',
+    instType: null,
+    canales: [CANAL_POSICIONES, CANAL_PLANES]
+  },
+  v3: {
+    url: URL_WS_PRIVADO_V3,
+    clave: 'topic',
+    instType: INST_TYPE_UTA,
+    canales: [TEMA_POSICION, TEMA_ORDEN, TEMA_CUENTA]
+  }
 };
 
 /* ---------- lo que llega por el socket ---------- */
@@ -87,6 +172,8 @@ const esquemaEvento = z.object({
     .object({
       instType: z.string().nullish(),
       channel: z.string().nullish(),
+      /** El `channel` de V3. Se leen los dos: la confirmacion vuelve con el que se mando. */
+      topic: z.string().nullish(),
       instId: z.string().nullish(),
       coin: z.string().nullish()
     })
@@ -103,7 +190,7 @@ const esquemaEvento = z.object({
  */
 const esquemaEmpujon = z.object({
   action: z.string(),
-  arg: z.object({ channel: z.string().nullish() }).nullish(),
+  arg: z.object({ channel: z.string().nullish(), topic: z.string().nullish() }).nullish(),
   data: z.array(z.unknown()).nullish(),
   ts: z.union([z.string(), z.number()]).nullish()
 });
@@ -128,7 +215,15 @@ export type EstadoSocket =
 export type MotivoCaida = 'credencial' | 'red' | 'sin-pong' | 'suscripcion' | 'cerrado-local';
 
 export interface AvisosConexion {
-  /** Un empujon de uno de los dos canales, ya clasificado. */
+  /**
+   * Un empujon, con el nombre del canal tal como lo manda Bitget.
+   *
+   * Se pasa el nombre crudo -`positions` en V2, `position` en V3- y no una
+   * etiqueta traducida, porque los nombres de las dos superficies **no chocan**
+   * y quien los recibe puede elegir con ellos el normalizador que toca sin
+   * preguntar por la superficie. Traducirlos aqui obligaria a `PoolSockets` a
+   * saber de que superficie viene cada empujon para volver a distinguirlos.
+   */
   alEmpujar(canal: string, accion: AccionEmpujon, datos: readonly unknown[]): void;
   /** La conexion quedo viva: autenticada y con los dos canales suscritos. */
   alQuedarViva?(): void;
@@ -161,6 +256,8 @@ export class ConexionBitget {
   private readonly mercado: Mercado;
   private readonly avisos: AvisosConexion;
 
+  /** Que URL, que vocabulario y que canales le tocan a esta credencial. */
+  private readonly suscripcion: Suscripcion;
   private readonly url: string;
   private readonly pingMs: number;
   private readonly pongTimeoutMs: number;
@@ -191,7 +288,16 @@ export class ConexionBitget {
     this.credencial = credencial;
     this.mercado = mercado;
     this.avisos = avisos;
-    this.url = opciones.url ?? URL_WS_PRIVADO;
+    /*
+     * La superficie sale de la credencial, igual que en REST.
+     *
+     * Es la misma costura de la Fase B y por la misma razon: una API Key
+     * pertenece a un UID y ese UID es Classic o UTA, nunca las dos cosas. El
+     * pool no tiene que saber nada de esto -reparte cupo, no habla protocolo- y
+     * por eso puede mezclar cuentas de los dos tipos sin una sola rama.
+     */
+    this.suscripcion = SUSCRIPCIONES[superficieDe(credencial)];
+    this.url = opciones.url ?? this.suscripcion.url;
     this.pingMs = opciones.pingMs ?? WS_PING_MS;
     this.pongTimeoutMs = opciones.pongTimeoutMs ?? WS_PONG_TIMEOUT_MS;
     this.esperaLoginMs = opciones.esperaLoginMs ?? ESPERA_LOGIN_MS;
@@ -284,14 +390,22 @@ export class ConexionBitget {
     }, this.esperaLoginMs);
   }
 
+  /**
+   * Pide los canales de esta superficie en un solo `subscribe`.
+   *
+   * El `op` es el mismo en las dos; lo que cambia es como se nombra cada canal
+   * y de donde sale el `instType`. Ver `SUSCRIPCIONES`.
+   */
   private suscribir(): void {
     this.estadoActual = 'suscribiendo';
 
+    const { clave, instType, canales } = this.suscripcion;
+
     this.enviar({
       op: 'subscribe',
-      args: [CANAL_POSICIONES, CANAL_PLANES].map((canal) => ({
-        instType: this.mercado.productType,
-        channel: canal,
+      args: canales.map((canal) => ({
+        instType: instType ?? this.mercado.productType,
+        [clave]: canal,
         ...ARGUMENTOS_CANAL[canal]
       }))
     });
@@ -326,7 +440,7 @@ export class ConexionBitget {
     const empujon = esquemaEmpujon.safeParse(crudo);
     if (!empujon.success) return;
 
-    const canal = empujon.data.arg?.channel ?? '';
+    const canal = empujon.data.arg?.channel ?? empujon.data.arg?.topic ?? '';
     const accion: AccionEmpujon = empujon.data.action === 'snapshot' ? 'snapshot' : 'update';
     this.avisos.alEmpujar(canal, accion, empujon.data.data ?? []);
   }
@@ -355,9 +469,16 @@ export class ConexionBitget {
     }
 
     if (evento.event === 'subscribe') {
-      const canal = evento.arg?.channel ?? '';
+      const canal = evento.arg?.channel ?? evento.arg?.topic ?? '';
       this.suscritos.add(canal);
-      if (this.suscritos.has(CANAL_POSICIONES) && this.suscritos.has(CANAL_PLANES)) {
+      /*
+       * Viva solo con **todos** los canales de su superficie confirmados.
+       *
+       * Media suscripcion es media verdad en el monitor, y en V3 son tres en vez
+       * de dos: si `account` no llegara a confirmarse, la cuenta enseñaria
+       * posiciones al segundo y un saldo de hace 45 s sin que nada lo indicara.
+       */
+      if (this.suscripcion.canales.every((c) => this.suscritos.has(c))) {
         this.estadoActual = 'viva';
         this.arrancarPing();
         this.avisos.alQuedarViva?.();

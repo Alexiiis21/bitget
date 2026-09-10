@@ -14,7 +14,7 @@
  * existente en español. `Decimal` se reutiliza de `shared/types` — nunca
  * `number` para precios o montos: ver docs/03-modelo-de-datos.md sección 14.
  */
-import type { Decimal } from '../types';
+import type { AccountMode, Decimal } from '../types';
 
 export type Side = 'long' | 'short';
 export type OrderType = 'market' | 'limit';
@@ -256,13 +256,7 @@ export interface BatchResult {
  * cuenta que se deja puesta **antes** de operar, y no viaja en ninguna orden.
  */
 export type PlanKind =
-  | 'open'
-  | 'close'
-  | 'tp'
-  | 'tp-remove'
-  | 'margin-add'
-  | 'margin-remove'
-  | 'leverage';
+  'open' | 'close' | 'tp' | 'tp-remove' | 'margin-add' | 'margin-remove' | 'leverage';
 
 /** Una casilla que sí va a recibir la operación, con lo que le va a pasar. */
 export interface PlanEntry extends BatchTarget {
@@ -418,6 +412,21 @@ export interface ApiKeyRow {
   parentUid: string;
   status: ApiKeyStatus;
   reason: string | null;
+  /**
+   * Modelo de cuenta en Bitget. `uta` habla la API V3; `classic`, la V2.
+   *
+   * Se enseña por fila porque una subcuenta actualizada a UTA desaparece de la
+   * API clasica sin previo aviso, y la actualizacion es irreversible. Sin este
+   * distintivo, el operador veria la fila caida y buscaria un problema de
+   * credenciales que no existe.
+   */
+  accountMode: AccountMode;
+  /**
+   * `true` mientras Bitget la declara a mitad del cambio de modelo.
+   *
+   * No se opera mientras dure, y no hay nada que arreglar: termina sola.
+   */
+  inTransition: boolean;
 }
 
 export interface ApiKeyInput {
@@ -457,6 +466,226 @@ export interface ValidationResult {
  * IPC, que es la misma respuesta al otro lado de la frontera.
  */
 export type DeleteOutcome = 'borrada' | 'paso-incorrecto' | 'no-estaba';
+
+/* ---------- cuentas madre y saldos (traspasos, Fase 2) ---------- */
+
+/**
+ * Credencial de una cuenta principal registrada.
+ *
+ * No es una `ApiKeyRow`: no ocupa casilla, no se opera y no tiene estado de
+ * conexion. Lo unico que hace es leer los saldos de sus subcuentas -y, cuando
+ * llegue la Fase 3, moverlos-.
+ */
+export interface ParentAccount {
+  id: string;
+  /** UID de la cuenta principal en Bitget. Es su identidad. */
+  uid: string;
+  name: string;
+  maskedKey: string;
+  addedAt: string;
+  /**
+   * Subcuentas que Bitget reporto al darla de alta. `null` si no se comprobo.
+   *
+   * Cero significa que la clave no es de la madre que el operador cree: valida,
+   * pero de una cuenta sin subcuentas.
+   */
+  subAccountsSeen: number | null;
+}
+
+export interface ParentAccountInput {
+  name: string;
+  apiKey: string;
+  secretKey: string;
+  passphrase: string;
+}
+
+export interface ParentValidationResult {
+  ok: boolean;
+  reason: string | null;
+  warnings: Warning[];
+  parent: ParentAccount | null;
+}
+
+/** Una subcuenta en la pantalla de saldos. */
+export interface SubAccountBalance {
+  uid: string;
+  /** `null` cuando Bitget la reporta pero el panel no la tiene dada de alta. */
+  subAccountId: string | null;
+  label: string;
+  /** `null` es «no se sabe», nunca «cero». */
+  available: Decimal | null;
+  /**
+   * Lo que de verdad puede salir de esta subcuenta.
+   *
+   * No es el disponible: el margen comprometido en posiciones abiertas no se
+   * transfiere. Es el numero contra el que se valida un traspaso.
+   */
+  maxTransferable: Decimal | null;
+  equity: Decimal | null;
+  onlyInBitget: boolean;
+  noData: boolean;
+}
+
+/** Una punta del traspaso, tal como se enseña en la confirmación. */
+export interface TransferSide {
+  uid: string;
+  label: string;
+  /** Saldo antes. Vacío cuando no se conoce. */
+  before: Decimal;
+  /** Cómo queda si sale bien. Vacío cuando no se conoce el de partida. */
+  after: Decimal;
+}
+
+/**
+ * Un traspaso calculado y pendiente de aprobar. **Todavía no se ha enviado.**
+ *
+ * La pantalla devuelve solo el `id` al ejecutar, nunca los importes: si los
+ * devolviera, podría enviarse algo distinto de lo que se aprobó.
+ */
+export interface TransferPlan {
+  id: string;
+  parentUid: string;
+  from: TransferSide;
+  to: TransferSide;
+  amount: Decimal;
+  currency: string;
+  /** Lo máximo que Bitget deja salir del origen ahora mismo. */
+  maxTransferable: Decimal;
+  createdAt: string;
+}
+
+/**
+ * Por qué no salió un traspaso.
+ *
+ * `indeterminado` **no es un fallo**: se envió y Bitget no confirmó si entró.
+ * La pantalla tiene que decirlo distinto, porque lo que puede hacer el operador
+ * es distinto —ante un rechazo, repetir; ante esto, comprobar el saldo primero—.
+ */
+export type TransferFailure =
+  | 'paso-incorrecto'
+  | 'sin-credencial'
+  | 'rechazado'
+  | 'indeterminado';
+
+export interface TransferResult {
+  ok: boolean;
+  failure: TransferFailure | null;
+  message: string | null;
+  /** Identificador del movimiento en Bitget. Lo único con lo que reclamar. */
+  transferId: string | null;
+  plan: TransferPlan;
+}
+
+/** Un traspaso del historial, tal como quedó registrado. */
+export interface TransferRecord {
+  id: string;
+  at: string;
+  fromLabel: string;
+  toLabel: string;
+  amount: Decimal;
+  currency: string;
+  /**
+   * `pendiente` es el estado que importa: se envió y no se supo el desenlace.
+   * No es un fallo —el dinero pudo salir— y nunca se reintenta solo.
+   */
+  outcome: 'exito' | 'fallo' | 'pendiente';
+  transferId: string | null;
+  message: string | null;
+}
+
+export type SpreadMode = 'iguales' | 'igualar';
+
+/** Un traspaso de un reparto o una recogida, ya calculado. */
+export interface SpreadMove {
+  fromUid: string;
+  fromLabel: string;
+  toUid: string;
+  toLabel: string;
+  amount: Decimal;
+  /** Saldo de la subcuenta antes y después. La cuenta principal no los lleva. */
+  before: Decimal;
+  after: Decimal;
+}
+
+/** Una subcuenta que se queda fuera del reparto, y por qué. Se enseña. */
+export interface SpreadSkip {
+  uid: string;
+  label: string;
+  reason: string;
+  message: string;
+}
+
+/**
+ * Un reparto o una recogida calculados y **sin enviar**.
+ *
+ * `total` es la suma de lo que de verdad va a moverse, no lo que el operador
+ * escribió: si alguna subcuenta se descarta, el total baja en consecuencia.
+ */
+export interface SpreadPlan {
+  id: string;
+  parentUid: string;
+  kind: 'reparto' | 'recogida';
+  mode: SpreadMode | null;
+  currency: string;
+  total: Decimal;
+  moves: SpreadMove[];
+  skipped: SpreadSkip[];
+  createdAt: string;
+}
+
+export interface SpreadMoveResult {
+  id: string;
+  fromLabel: string;
+  toLabel: string;
+  amount: Decimal;
+  ok: boolean;
+  message: string | null;
+}
+
+export interface SpreadResult {
+  /** `true` solo si salieron **todos**. Con uno fallido, es `false`. */
+  ok: boolean;
+  failure: 'paso-incorrecto' | 'sin-credencial' | null;
+  plan: SpreadPlan;
+  results: SpreadMoveResult[];
+  sent: number;
+  failed: number;
+  /** Enviados sin confirmación de Bitget. No son fallos: hay que comprobarlos. */
+  unconfirmed: number;
+}
+
+export interface BalanceSheet {
+  parentUid: string;
+  parentName: string;
+  /**
+   * Saldo de futuros de la propia cuenta principal, o `null` si no se pudo leer.
+   *
+   * Va aparte de `rows` porque la madre no es una subcuenta: no ocupa casilla,
+   * no se opera y su saldo sale de otra petición. Ver `SaldosPantalla`.
+   */
+  parentAvailable: Decimal | null;
+  currency: string;
+  /** Cuando se leyo. Se enseña: un saldo sin hora es un saldo que miente. */
+  fetchedAt: string;
+  rows: SubAccountBalance[];
+  totalAvailable: Decimal;
+  totalTransferable: Decimal;
+  withData: number;
+}
+
+/**
+ * Resultado de importar credenciales de una instalación anterior.
+ *
+ * `cancelled` no es un fallo: el operador cerró el selector de carpeta. La
+ * pantalla no debe enseñar un error donde no lo hubo.
+ */
+export interface ImportResult {
+  cancelled: boolean;
+  ok: boolean;
+  message: string;
+  /** Cuántas subcuentas traía el registro importado, si venía. */
+  accounts: number | null;
+}
 
 /** Resultado de crear o abrir el almacén. `reason` distingue contraseña incorrecta de archivo dañado. */
 export interface UnlockResult {

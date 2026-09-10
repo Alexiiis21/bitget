@@ -36,7 +36,8 @@ import { z as zod } from 'zod';
 import type { Lado } from '@shared/types';
 import type { Mercado } from '../../mercado';
 import type { ClienteBitget, RespuestaRest } from '../client';
-import type { Credencial } from '../signer';
+import { superficieDe, type Credencial } from '../signer';
+import { abrirPosicionV3, cerrarPosicionV3, consultarOrdenV3 } from './ordenes-v3';
 
 /** `crossed` reparte el margen de toda la cuenta; `isolated` lo acota a la posicion. */
 export type ModoMargenApi = 'crossed' | 'isolated';
@@ -73,6 +74,17 @@ export function abrirPosicion(
   credencial: Credencial,
   orden: AperturaOrden
 ): Promise<RespuestaRest<OrdenColocada>> {
+  /*
+   * El despachador de superficie.
+   *
+   * Va aqui, dentro de la funcion de endpoint, y no en el motor de lotes: la
+   * superficie es una propiedad de la API Key —ver `signer.ts`— asi que las
+   * cinco maniobras pueden seguir llamando exactamente igual. Meter el `if` en
+   * el motor habria significado seis ramas repartidas por el archivo que menos
+   * conviene tocar.
+   */
+  if (superficieDe(credencial) === 'v3') return abrirPosicionV3(cliente, credencial, orden);
+
   const cuerpo: Record<string, string> = {
     symbol: orden.simbolo,
     productType: orden.mercado.productType,
@@ -156,6 +168,8 @@ export function cerrarPosicion(
   credencial: Credencial,
   cierre: CierrePosicion
 ): Promise<RespuestaRest<ResultadoCierre>> {
+  if (superficieDe(credencial) === 'v3') return cerrarPosicionV3(cliente, credencial, cierre);
+
   return cliente.peticionFirmada(
     credencial,
     {
@@ -203,6 +217,15 @@ export async function consultarOrden(
   simbolo: string,
   clientOid: string
 ): Promise<DetalleOrden | null> {
+  /*
+   * En V3 esta consulta no tiene endpoint, y `consultarOrdenV3` la responde con
+   * lo que haya visto el socket -o lanza-. Lo que nunca hace es devolver
+   * `null`, y esa es la diferencia que separa un aviso de una posicion
+   * duplicada: `null` significa aqui «la orden NO entro», y quien lo recibe
+   * ofrece reintentar. Ver la cabecera de `consultarOrdenV3`.
+   */
+  if (superficieDe(credencial) === 'v3') return consultarOrdenV3(simbolo, clientOid);
+
   try {
     const r = await cliente.peticionFirmada(
       credencial,

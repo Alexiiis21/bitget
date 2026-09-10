@@ -28,6 +28,14 @@ import { Sesion } from '@main/ipc/sesion';
 import { RANURAS_ACTIVO } from '@shared/constants';
 import { iniciarExchangeSimulado, sobreOk, type ExchangeSimulado } from '../mock-exchange/servidor';
 
+/*
+ * scrypt barato: estas pruebas crean un almacen por caso y lo que ejercitan es
+ * la sesion, no la dureza del cifrado -que cubre test/unit/vault.test.ts-. Con
+ * el coste real, varias suites en paralelo agotaban el limite de tiempo de
+ * vitest de forma intermitente.
+ */
+const KDF_PRUEBAS = { N: 16, r: 1, p: 1 };
+
 const contrato = (symbol: string, baseCoin: string): unknown => ({
   symbol,
   baseCoin,
@@ -61,9 +69,13 @@ let sesion: Sesion;
 /** Una sesion nueva sobre la misma carpeta: lo que ve el panel al reiniciarse. */
 const otraSesion = (): Sesion =>
   new Sesion(
-    { vault: join(carpeta, 'vault.enc'), cuentas: join(carpeta, 'cuentas.json'), activos: rutaActivos },
+    {
+      vault: join(carpeta, 'vault.enc'),
+      cuentas: join(carpeta, 'cuentas.json'),
+      activos: rutaActivos
+    },
     cliente,
-    { mercado: 'real' }
+    { parametrosKdf: KDF_PRUEBAS, mercado: 'real' }
   );
 
 const ids = (ranuras: readonly ({ id: string } | null)[]): (string | null)[] =>

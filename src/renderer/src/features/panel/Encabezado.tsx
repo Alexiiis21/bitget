@@ -102,7 +102,16 @@ function NumeroPanel() {
   return (
     <span
       title="Número de este panel. Se guarda en el equipo y se conserva al reiniciar."
-      style={{ flex: 'none', fontSize: 18, fontWeight: 700, color: '#8ccdf5', fontFamily: FUENTE.mono, display: 'flex', alignItems: 'center', gap: 2 }}
+      style={{
+        flex: 'none',
+        fontSize: 18,
+        fontWeight: 700,
+        color: '#8ccdf5',
+        fontFamily: FUENTE.mono,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 2
+      }}
     >
       <span>#</span>
       <input
@@ -176,8 +185,12 @@ function UltimoPrecio() {
         background: '#ffffff14'
       }}
     >
-      <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.1em', color: '#8ccdf5' }}>ÚLTIMO</span>
-      <span style={{ fontSize: 11, fontWeight: 600, color: '#95c9ea' }}>{activo?.label ?? '—'}</span>
+      <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.1em', color: '#8ccdf5' }}>
+        ÚLTIMO
+      </span>
+      <span style={{ fontSize: 11, fontWeight: 600, color: '#95c9ea' }}>
+        {activo?.label ?? '—'}
+      </span>
       <span style={{ fontSize: 13, fontWeight: 700, color: '#ffffff' }}>
         {activo === undefined ? '—' : (precios[activo.id] ?? '—')}
       </span>
@@ -212,6 +225,7 @@ export function Encabezado() {
   const apiKeys = usarPanel((s) => s.apiKeys);
   const cuentas = usarPanel((s) => s.cuentas);
   const abrirApis = usarPanel((s) => s.abrirApis);
+  const abrirSaldos = usarPanel((s) => s.abrirSaldos);
   const abrirSeguridad = usarPanel((s) => s.abrirSeguridad);
   const abrirColores = usarPanel((s) => s.abrirColores);
   const bloquear = usarPanel((s) => s.bloquear);
@@ -222,19 +236,37 @@ export function Encabezado() {
   return (
     <div style={barra}>
       {/*
-        * El nombre del panel es lo único que puede encogerse.
-        *
-        * Con el precio al lado del distintivo de mercado, el grupo izquierdo
-        * pasa a competir por el ancho con los botones de la derecha en las
-        * ventanas más estrechas que admite el diseño. Los datos —número,
-        * mercado, precio— no se recortan: se recorta el rótulo, que es el único
-        * que el operador ya se sabe.
-        */}
+       * El nombre del panel es lo único que puede encogerse.
+       *
+       * Con el precio al lado del distintivo de mercado, el grupo izquierdo
+       * pasa a competir por el ancho con los botones de la derecha en las
+       * ventanas más estrechas que admite el diseño. Los datos —número,
+       * mercado, precio— no se recortan: se recorta el rótulo, que es el único
+       * que el operador ya se sabe.
+       */}
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, minWidth: 0 }}>
-        <span style={{ flex: 'none', fontSize: 11, fontWeight: 700, letterSpacing: '.14em', color: '#8ccdf5', fontFamily: FUENTE.mono }}>
+        <span
+          style={{
+            flex: 'none',
+            fontSize: 11,
+            fontWeight: 700,
+            letterSpacing: '.14em',
+            color: '#8ccdf5',
+            fontFamily: FUENTE.mono
+          }}
+        >
           PCB
         </span>
-        <span style={{ minWidth: 0, fontSize: 15, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        <span
+          style={{
+            minWidth: 0,
+            fontSize: 15,
+            fontWeight: 600,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis'
+          }}
+        >
           Panel de Control Bitget
         </span>
         <NumeroPanel />
@@ -247,11 +279,29 @@ export function Encabezado() {
           title="Estado de las credenciales registradas, según la última comprobación contra Bitget"
           style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#95c9ea' }}
         >
-          <span style={{ width: 7, height: 7, borderRadius: '50%', background: conexion.color, display: 'block' }} />
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: '50%',
+              background: conexion.color,
+              display: 'block'
+            }}
+          />
           {conexion.texto}
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 2, padding: 2, borderRadius: 20, border: '1px solid #ffffff2e', background: '#ffffff14' }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 2,
+            padding: 2,
+            borderRadius: 20,
+            border: '1px solid #ffffff2e',
+            background: '#ffffff14'
+          }}
+        >
           <button
             type="button"
             onClick={() => fijarTema('light')}
@@ -298,23 +348,57 @@ export function Encabezado() {
 
         <div style={{ width: 1, height: 22, background: '#ffffff26' }} />
 
-        <button type="button" className="pcb-boton-barra" onClick={abrirApis} title="Gestión de API keys de las subcuentas" style={botonBarra}>
+        <button
+          type="button"
+          className="pcb-boton-barra"
+          onClick={abrirApis}
+          title="Gestión de API keys de las subcuentas"
+          style={botonBarra}
+        >
           API keys
           <span style={{ fontSize: 10.5, fontFamily: FUENTE.mono, color: '#95c9ea' }}>
             {conectadas} de {apiKeys.length}
           </span>
         </button>
 
-        <button type="button" className="pcb-boton-barra" onClick={abrirSeguridad} title="Configurar la contraseña de paso" style={botonBarra}>
+        <button
+          type="button"
+          className="pcb-boton-barra"
+          onClick={abrirSaldos}
+          title="Saldo de futuros de cada subcuenta, y cuánto puede salir de cada una"
+          style={botonBarra}
+        >
+          Saldos
+        </button>
+
+        <button
+          type="button"
+          className="pcb-boton-barra"
+          onClick={abrirSeguridad}
+          title="Configurar la contraseña de paso"
+          style={botonBarra}
+        >
           Seguridad
         </button>
 
         {/* Junto al interruptor de tema y a Seguridad, que es donde ya viven los ajustes. */}
-        <button type="button" className="pcb-boton-barra" onClick={abrirColores} title="Cambiar los colores de estado de la matriz" style={botonBarra}>
+        <button
+          type="button"
+          className="pcb-boton-barra"
+          onClick={abrirColores}
+          title="Cambiar los colores de estado de la matriz"
+          style={botonBarra}
+        >
           Colores
         </button>
 
-        <button type="button" className="pcb-boton-salir" onClick={bloquear} title="Cerrar sesión y bloquear el panel" style={{ ...botonBarra, fontWeight: 600 }}>
+        <button
+          type="button"
+          className="pcb-boton-salir"
+          onClick={bloquear}
+          title="Cerrar sesión y bloquear el panel"
+          style={{ ...botonBarra, fontWeight: 600 }}
+        >
           Cerrar sesión
         </button>
       </div>

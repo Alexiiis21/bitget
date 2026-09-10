@@ -16,11 +16,18 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { CUENTAS_MADRE_MAX, SUBCUENTAS_POR_GRUPO } from '@shared/constants';
-import type { Cuenta, Grupo, ModoMargen, ModoPosicion } from '@shared/types';
+import type {
+  AccountMode,
+  Cuenta,
+  Grupo,
+  HoldMode,
+  ModoMargen,
+  ModoPosicion
+} from '@shared/types';
 import { escribirAtomico, existe, rotarRespaldo } from '../storage/atomic-write';
 
 /**
- * Version 3: se guarda el UID de la cuenta principal (`uidPadre`).
+ * Version 4: se guarda con que API habla cada subcuenta (`accountMode`).
  *
  * Historial, y por que se siguen leyendo los archivos viejos:
  *
@@ -30,11 +37,17 @@ import { escribirAtomico, existe, rotarRespaldo } from '../storage/atomic-write'
  *             cargan con la cadena vacia; se rellena solo la proxima vez que se
  *             valide esa credencial, porque el dato lo da Bitget y no se puede
  *             inventar al migrar.
+ *   v3 -> v4  se anadieron `accountMode` y `holdMode`, para la convivencia con
+ *             la API V3 (UTA). Los archivos anteriores se cargan como
+ *             `classic` / `null`, que es lo que eran todas las cuentas antes de
+ *             que UTA existiera. El valor real lo pone la deteccion la proxima
+ *             vez que se valide la credencial; igual que `uidPadre`, lo dice
+ *             Bitget y no se puede inventar al migrar.
  *
  * En ningun caso se convierte el archivo por las bravas: se reescribe con el
  * formato nuevo la proxima vez que se guarde.
  */
-const VERSION_ACTUAL = 3;
+const VERSION_ACTUAL = 4;
 
 const esquemaGrupo = z.object({
   id: z.string(),
@@ -58,6 +71,14 @@ const esquemaCuenta = z.object({
   activa: z.boolean(),
   modoPosicion: z.enum(['cobertura', 'unilateral']),
   modoMargen: z.enum(['aislado', 'cruzado']),
+  /**
+   * Formato v4. Ausente en archivos anteriores: se cargan como `classic`, que
+   * es lo que eran todas las cuentas antes de que UTA existiera. Enrutar a V3
+   * por defecto mandaria las peticiones a una superficie que las rechaza.
+   */
+  accountMode: z.enum(['classic', 'uta']).default('classic'),
+  /** Formato v4. `null` = no se ha leido; solo lo informa V3. */
+  holdMode: z.enum(['one_way_mode', 'hedge_mode']).nullable().default(null),
   altaEn: z.string()
 });
 
@@ -90,6 +111,14 @@ export interface AltaCuentaRegistro {
   apiKeyEnmascarada: string;
   modoPosicion: ModoPosicion;
   modoMargen: ModoMargen;
+  /**
+   * Con que API habla. Ausente cuando la deteccion no llego a concluir -un
+   * corte de red durante el alta-, y entonces se guarda `classic`: la cuenta
+   * seguira hablando V2 hasta que una revalidacion diga lo contrario, que es el
+   * fallo seguro. Suponer `uta` la dejaria muda.
+   */
+  accountMode?: AccountMode;
+  holdMode?: HoldMode | null;
 }
 
 /** Motivo por el que un alta no cabe en el registro. */
@@ -406,6 +435,14 @@ export class RegistroCuentas {
       activa: true,
       modoPosicion: alta.modoPosicion,
       modoMargen: alta.modoMargen,
+      /*
+       * Al rotar la clave de una cuenta ya conocida se conserva lo que tuviera
+       * si el alta no trae modo: una API Key nueva sobre la misma subcuenta no
+       * cambia el modelo de cuenta, y perderlo la haria hablar V2 hasta la
+       * siguiente deteccion.
+       */
+      accountMode: alta.accountMode ?? previa?.accountMode ?? 'classic',
+      holdMode: alta.holdMode ?? previa?.holdMode ?? null,
       altaEn: previa?.altaEn ?? new Date().toISOString()
     };
 
@@ -444,7 +481,12 @@ export class RegistroCuentas {
    */
   actualizarModos(
     cuentaId: string,
-    modos: { modoPosicion?: ModoPosicion | null; modoMargen?: ModoMargen | null }
+    modos: {
+      modoPosicion?: ModoPosicion | null;
+      modoMargen?: ModoMargen | null;
+      accountMode?: AccountMode | null;
+      holdMode?: HoldMode | null;
+    }
   ): boolean {
     const cuenta = this.cuentas.find((c) => c.id === cuentaId);
     if (cuenta === undefined) return false;
@@ -463,6 +505,22 @@ export class RegistroCuentas {
     }
     if (modos.modoMargen != null && modos.modoMargen !== cuenta.modoMargen) {
       cuenta.modoMargen = modos.modoMargen;
+      cambio = true;
+    }
+
+    /*
+     * Mismo criterio que arriba, con una consecuencia mas cara: un `null` aqui
+     * es «la deteccion no concluyo» -corte de red, 429-, y pisar `uta` con
+     * `classic` dejaria a esa subcuenta enrutando a una superficie que la
+     * rechaza hasta la siguiente verificacion buena. El caso de vuelta no
+     * existe: Bitget no permite volver de UTA a classic.
+     */
+    if (modos.accountMode != null && modos.accountMode !== cuenta.accountMode) {
+      cuenta.accountMode = modos.accountMode;
+      cambio = true;
+    }
+    if (modos.holdMode != null && modos.holdMode !== cuenta.holdMode) {
+      cuenta.holdMode = modos.holdMode;
       cambio = true;
     }
 

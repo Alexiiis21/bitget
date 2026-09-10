@@ -92,7 +92,15 @@ export async function iniciarWsSimulado(iniciales: OpcionesWsSimulado = {}): Pro
 
       if (mensaje.op === 'subscribe') {
         for (const arg of mensaje.args ?? []) {
-          const canal = (arg as { channel?: string }).channel ?? '';
+          /*
+           * El canal se llama `channel` en V2 y `topic` en V3. Se leen los dos
+           * para que el mismo servidor sirva a las dos superficies: si aqui se
+           * leyera solo `channel`, una suscripcion de UTA se confirmaria con el
+           * nombre vacio y la conexion nunca llegaria a viva -que es justo el
+           * fallo que estas pruebas tienen que poder distinguir de un acierto-.
+           */
+          const { channel, topic } = arg as { channel?: string; topic?: string };
+          const canal = channel ?? topic ?? '';
           const falla = opciones.canalesQueFallan?.includes(canal) ?? false;
           socket.send(
             JSON.stringify(
@@ -153,6 +161,23 @@ export const empujonPosiciones = (accion: 'snapshot' | 'update', data: unknown[]
 export const empujonPlanes = (accion: 'snapshot' | 'update', data: unknown[]): unknown => ({
   action: accion,
   arg: { instType: 'SUSDT-FUTURES', channel: 'orders-algo', instId: 'default' },
+  data,
+  ts: 1_700_000_000_000
+});
+
+/**
+ * Un empujon de un tema de UTA.
+ *
+ * Dos diferencias con los de V2, y las dos importan: el canal viaja en `topic`
+ * y el `instType` es `UTA` para los tres temas, no el producto.
+ */
+export const empujonUta = (
+  tema: 'position' | 'order' | 'account',
+  accion: 'snapshot' | 'update',
+  data: unknown[]
+): unknown => ({
+  action: accion,
+  arg: { instType: 'UTA', topic: tema },
   data,
   ts: 1_700_000_000_000
 });

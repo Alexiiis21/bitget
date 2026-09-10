@@ -16,6 +16,7 @@ import { registrarIpc } from './ipc/handlers';
 import { habilitarMenuContextual } from './menu-contextual';
 import { Sesion } from './ipc/sesion';
 import { cargarInstancia } from './storage/instancia';
+import { iniciarBitacora } from './diagnostico/bitacora';
 import { fijarCarpetaDeEntorno, rutas } from './storage/paths';
 
 /*
@@ -170,6 +171,17 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(async () => {
     const r = rutas();
+
+    /*
+     * Antes que nada: sin bitacora, un rechazo de Bitget es un numero sin
+     * contexto. Se enciende aqui para que el arranque y la primera verificacion
+     * ya queden anotados. Ver `diagnostico/bitacora.ts`.
+     */
+    await iniciarBitacora();
+    if (esStaging()) {
+      console.warn(`[PCB] bitacora en: ${r.logs}`);
+    }
+
     const instancia = await cargarInstancia(r.instancia);
 
     /*

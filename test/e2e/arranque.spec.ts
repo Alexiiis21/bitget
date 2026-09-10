@@ -105,7 +105,9 @@ test('los canales de operacion existen y ninguno opera con el panel bloqueado', 
     };
 
     return {
-      cierre: await intentar(() => window.pcb.cierrePlanificar({ simbolo: 'SBTCSUSDT', objetivos })),
+      cierre: await intentar(() =>
+        window.pcb.cierrePlanificar({ simbolo: 'SBTCSUSDT', objetivos })
+      ),
       tp: await intentar(() =>
         window.pcb.tpPlanificar({ simbolo: 'SBTCSUSDT', objetivos, porcentaje: '35' })
       ),
@@ -134,6 +136,80 @@ test('los canales de operacion existen y ninguno opera con el panel bloqueado', 
   for (const [canal, mensaje] of Object.entries(respuestas)) {
     expect(mensaje, canal).toContain('bloqueado');
   }
+});
+
+/*
+ * Traspasos, Fase 2. Los canales de saldos existen y respetan el cerrojo.
+ *
+ * Importa comprobarlo aqui y no solo en integracion: `saldosLeer` usa la clave
+ * de la cuenta principal, que es la unica credencial del almacen capaz de mover
+ * saldo entre cuentas. Que responda «bloqueado» con el panel cerrado es la misma
+ * garantia que ya tienen las seis operaciones.
+ */
+test('los canales de saldos existen y no leen nada con el panel bloqueado', async () => {
+  const respuestas = await ventana.evaluate(async () => {
+    const intentar = async (f: () => Promise<unknown>): Promise<string> => {
+      try {
+        await f();
+        return 'RESPONDIO';
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    };
+
+    return {
+      saldos: await intentar(() => window.pcb.saldosLeer()),
+      alta: await intentar(() =>
+        window.pcb.madresAgregar({
+          etiqueta: 'X',
+          apiKey: 'bg_x',
+          secretKey: 'y',
+          passphrase: 'z'
+        })
+      )
+    };
+  });
+
+  for (const [canal, mensaje] of Object.entries(respuestas)) {
+    expect(mensaje, canal).toContain('bloqueado');
+  }
+});
+
+/*
+ * Traspaso, Fase 3. Es el canal que mueve dinero: con el panel bloqueado no
+ * puede ni planificar. Aqui no se ejecuta ninguno —eso lo cubre la prueba de
+ * integracion contra el exchange simulado—; lo que se comprueba es que el
+ * cerrojo tambien vale para el.
+ */
+test('el traspaso no planifica ni se envia con el panel bloqueado', async () => {
+  const respuestas = await ventana.evaluate(async () => {
+    const intentar = async (f: () => Promise<unknown>): Promise<string> => {
+      try {
+        await f();
+        return 'RESPONDIO';
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    };
+
+    return {
+      planificar: await intentar(() =>
+        window.pcb.traspasoPlanificar({ uidOrigen: '111', uidDestino: '222', importe: '10' })
+      ),
+      ejecutar: await intentar(() => window.pcb.traspasoEjecutar('plan-inventado', 'bg1'))
+    };
+  });
+
+  for (const [canal, mensaje] of Object.entries(respuestas)) {
+    expect(mensaje, canal).toContain('bloqueado');
+  }
+});
+
+/* Listar no lanza: con el panel bloqueado no hay madres que enseñar, y punto. */
+test('el listado de cuentas principales responde vacio con el panel bloqueado', async () => {
+  const madres = await ventana.evaluate(() => window.pcb.madresListar());
+
+  expect(madres).toEqual([]);
 });
 
 /*
@@ -172,6 +248,24 @@ test('la superficie de window.pcb es la del contrato, sin canales de sobra', asy
       'cuentasEliminar',
       'cuentasListar',
       'cuentasVerificar',
+      /*
+       * Desde el 05/09/2026. Trae el `vault.enc` de una instalacion anterior,
+       * que es la salida cuando una version nueva se abre desde otra carpeta y
+       * el panel arranca en blanco. No recibe la ruta: el selector de carpeta lo
+       * abre el proceso principal, asi que el renderer no puede senalar un
+       * archivo. Y nunca sobrescribe un almacen existente.
+       */
+      'credencialesImportar',
+      /*
+       * Los cuatro de traspasos, desde el 03/09/2026 (Fase 2: solo lectura).
+       *
+       * `madresAgregar` y `madresEliminar` administran la credencial de la
+       * cuenta principal; `saldosLeer` es la unica que sale a Bitget. Ninguna
+       * mueve saldo todavia: el traspaso es la Fase 3 y aun no tiene canal.
+       */
+      'madresAgregar',
+      'madresEliminar',
+      'madresListar',
       'margenEjecutar',
       'margenPlanificar',
       'mercadoCatalogo',
@@ -180,6 +274,23 @@ test('la superficie de window.pcb es la del contrato, sin canales de sobra', asy
       'mercadoRanuras',
       'monitorInstantanea',
       'panelCuentas',
+      /*
+       * Reparto y recogida masiva, Fase 4. `repartoEjecutar` manda una lista de
+       * traspasos uno detras de otro: un fallo no detiene a los demas y no hay
+       * rollback, asi que su confirmacion ensena la lista entera antes de salir.
+       */
+      'recogidaPlanificar',
+      'repartoEjecutar',
+      'repartoPlanificar',
+      'saldosLeer',
+      /*
+       * Los tres de la Fase 3, desde el 03/09/2026. `traspasoEjecutar` es el
+       * unico canal del panel que mueve saldo entre cuentas, y por eso lleva
+       * contrasena de paso igual que la apertura de posiciones.
+       */
+      'traspasoEjecutar',
+      'traspasoHistorial',
+      'traspasoPlanificar',
       'pasoComprobar',
       'pasoFijar',
       'pasoHay',

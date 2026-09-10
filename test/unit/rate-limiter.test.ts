@@ -288,3 +288,126 @@ describe('reaccion ante un 429', () => {
     await expect(l.ejecutar('uid-1', () => Promise.resolve('ok'))).resolves.toBe('ok');
   });
 });
+
+/*
+ * ==========================================================================
+ * Techos por endpoint: el tercer nivel de la jerarquia
+ * ==========================================================================
+ * V3 publica limites por endpoint **y** por UID, y uno de ellos —
+ * `close-positions`, 5/s— cae por debajo del bucket por cuenta. Lo que se prueba
+ * aqui es que ese techo se respeta sin estropear nada de lo anterior.
+ *
+ * Lo que deliberadamente NO se prueba, porque no existe: un bucket por
+ * superficie. El techo de Bitget es por UID, y partirlo entre V2 y V3 pondria a
+ * una misma cuenta al doble de su limite.
+ */
+describe('techos por endpoint', () => {
+  const LIMITES = { '/api/v3/trade/close-positions': 2 };
+
+  it('acota el endpoint sin tocar el cupo del resto de la cuenta', async () => {
+    const reloj = relojFalso();
+    const l = new LimitadorPeticiones({
+      limitesPorEndpoint: LIMITES,
+      /* Cuenta holgada: el unico techo que puede morder es el del endpoint. */
+      limiteCuentaPorSegundo: 100,
+      rafagaCuenta: 100,
+      ahora: reloj.ahora,
+      dormir: reloj.dormir
+    });
+
+    const inicio = reloj.ahora();
+    for (let i = 0; i < 4; i += 1) {
+      await l.ejecutar('uid-1', () => Promise.resolve(i), '/api/v3/trade/close-positions');
+    }
+
+    /*
+     * Cuatro peticiones a 2/s con rafaga de 2: las dos primeras salen de golpe
+     * y las otras dos esperan medio segundo cada una.
+     */
+    expect(reloj.ahora() - inicio).toBeGreaterThanOrEqual(1_000);
+  });
+
+  it('una ruta sin techo declarado no espera nada', async () => {
+    const reloj = relojFalso();
+    const l = new LimitadorPeticiones({
+      limitesPorEndpoint: LIMITES,
+      limiteCuentaPorSegundo: 100,
+      rafagaCuenta: 100,
+      ahora: reloj.ahora,
+      dormir: reloj.dormir
+    });
+
+    const inicio = reloj.ahora();
+    for (let i = 0; i < 4; i += 1) {
+      await l.ejecutar('uid-1', () => Promise.resolve(i), '/api/v3/trade/place-order');
+    }
+
+    expect(reloj.ahora() - inicio).toBe(0);
+  });
+
+  it('sin endpoint se comporta igual que antes de existir esto', async () => {
+    /*
+     * Es la prueba de que el parametro nuevo no cambia ninguna de las llamadas
+     * que ya habia: todas las de V2 pasan sin endpoint.
+     */
+    const reloj = relojFalso();
+    const l = new LimitadorPeticiones({
+      limitesPorEndpoint: LIMITES,
+      limiteCuentaPorSegundo: 100,
+      rafagaCuenta: 100,
+      ahora: reloj.ahora,
+      dormir: reloj.dormir
+    });
+
+    const inicio = reloj.ahora();
+    for (let i = 0; i < 4; i += 1) await l.ejecutar('uid-1', () => Promise.resolve(i));
+
+    expect(reloj.ahora() - inicio).toBe(0);
+  });
+
+  it('el techo es por cuenta: dos UID no se estorban en el mismo endpoint', async () => {
+    const reloj = relojFalso();
+    const l = new LimitadorPeticiones({
+      limitesPorEndpoint: LIMITES,
+      limiteCuentaPorSegundo: 100,
+      rafagaCuenta: 100,
+      ahora: reloj.ahora,
+      dormir: reloj.dormir
+    });
+
+    const inicio = reloj.ahora();
+    for (const uid of ['uid-1', 'uid-2']) {
+      for (let i = 0; i < 2; i += 1) {
+        await l.ejecutar(uid, () => Promise.resolve(i), '/api/v3/trade/close-positions');
+      }
+    }
+
+    /* Dos cada uno, y la rafaga de cada bucket es 2: nadie espera. */
+    expect(reloj.ahora() - inicio).toBe(0);
+  });
+
+  it('un 429 en un endpoint acotado penaliza tambien su bucket', async () => {
+    const reloj = relojFalso();
+    const l = new LimitadorPeticiones({
+      limitesPorEndpoint: LIMITES,
+      limiteCuentaPorSegundo: 100,
+      rafagaCuenta: 100,
+      ahora: reloj.ahora,
+      dormir: reloj.dormir
+    });
+
+    const err = Object.assign(new Error('limitado'), { codigo: '429', reintentarEnMs: 4_000 });
+    await expect(
+      l.ejecutar('uid-1', () => Promise.reject(err), '/api/v3/trade/close-positions')
+    ).rejects.toThrow('limitado');
+
+    /*
+     * Si solo se penalizaran el global y el de cuenta, la siguiente peticion de
+     * este endpoint saldria en cuanto se recuperase la cuenta y repetiria el
+     * error. Se comprueba que espera la penalizacion entera.
+     */
+    const inicio = reloj.ahora();
+    await l.ejecutar('uid-1', () => Promise.resolve('ok'), '/api/v3/trade/close-positions');
+    expect(reloj.ahora() - inicio).toBeGreaterThanOrEqual(4_000);
+  });
+});

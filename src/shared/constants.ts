@@ -34,6 +34,31 @@ export const RAFAGA_CUENTA = 8;
 /** Peticiones simultaneas en vuelo. docs/01 seccion 9. */
 export const CONCURRENCIA_MAXIMA = 12;
 
+/**
+ * Endpoints con un techo **por debajo** del bucket por cuenta.
+ *
+ * ==========================================================================
+ * Por que esta tabla es corta a proposito
+ * ==========================================================================
+ * V3 publica limites por endpoint y por UID: `place-order` 10/s,
+ * `current-position` 20/s, `close-positions` 5/s. De los tres, solo el ultimo
+ * cae por debajo de `LIMITE_CUENTA_POR_SEGUNDO` (8/s), asi que es el unico que
+ * necesita un bucket propio; los otros dos ya estan protegidos por el bucket de
+ * cuenta y anadirlos solo gastaria memoria y confundiria el diagnostico.
+ *
+ * --------------------------------------------------------------------------
+ * Lo que NO se hace: un bucket por superficie
+ * --------------------------------------------------------------------------
+ * Seria el error caro. El techo de Bitget es **por UID**, no por superficie:
+ * dar 8/s a V2 y otros 8/s a V3 pondria a un mismo UID en 16/s, por encima de
+ * su limite de 10/s, y un 429 cuesta cinco minutos de bloqueo en mitad de una
+ * operacion. Ademas no haria falta: una cuenta es Classic **o** UTA, nunca las
+ * dos a la vez. docs/00-uta-fase-1-equivalencias.md seccion 6.3.
+ */
+export const LIMITES_POR_ENDPOINT: Readonly<Record<string, number>> = {
+  '/api/v3/trade/close-positions': 5
+};
+
 /* ---------- Presupuesto propio, por debajo del techo ---------- */
 /** 20 % de margen bajo el techo de 100. docs/01 seccion 8. */
 export const WS_MAX_CONCURRENTES = 80;

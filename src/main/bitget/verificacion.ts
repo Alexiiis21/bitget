@@ -50,12 +50,14 @@
  * Aceptar en silencio seria lo unico peor que rechazar: el operador tiene que
  * enterarse de que acaba de guardar una clave que puede vaciar la cuenta.
  */
-import type { ModoMargen, ModoPosicion } from '@shared/types';
-import { ErrorBitget } from './errors';
+import type { AccountMode, HoldMode, ModoMargen, ModoPosicion } from '@shared/types';
+import { detectarModo, type ResultadoDeteccion } from './deteccion-modo';
+import { clasificarCodigo, ErrorBitget } from './errors';
 import { MERCADO_REAL, type Mercado } from './mercado';
 import type { ClienteBitget } from './rest/client';
 import type { Credencial } from './rest/signer';
 import { obtenerCuentaSimbolo, obtenerInfoCuenta } from './rest/endpoints/cuenta';
+import { disponibleDe, obtenerActivosCuenta } from './rest/endpoints/ajustes-v3';
 
 /**
  * Codigos de permiso confirmados contra la API real.
@@ -103,20 +105,42 @@ const CATALOGO_PERMISOS: Record<string, PermisoCatalogado> = {
   coow: { descripcion: 'Futuros: ordenes', nivel: 'operacion' },
   cpow: { descripcion: 'Futuros: posiciones', nivel: 'operacion' },
   ttow: { descripcion: 'Futuros: operar (alta por API)', nivel: 'operacion' },
-  chow: { descripcion: 'Subcuentas: administrar', nivel: 'operacion' }
+  chow: { descripcion: 'Subcuentas: administrar', nivel: 'operacion' },
 
   /*
-   * Los codigos de traspaso y de retiro todavia no se conocen, y **no se
-   * inventan**: la clave de la cuenta madre, consultada el 29/08/2026 con
-   * `node scripts/ver-permisos.mjs --env MADRE`, devuelve `[coow, cpow, chow]`
-   * -hoy no tiene ninguno de los dos, que es justo por lo que el traspaso de
-   * prueba fallo con `40014 · need transfer write permissions`-.
+   * --------------------------------------------------------------------------
+   * `wtow` y `stow`: catalogados el 05/09/2026, y por observacion directa
+   * --------------------------------------------------------------------------
+   * Estuvieron sin catalogar mientras no hubo forma de saber que eran: Bitget no
+   * publica el significado de estos codigos, y la clave de la madre no tenia
+   * permiso de traspaso -devolvia `[coow, cpow, chow]`- asi que no habia con que
+   * comparar.
    *
-   * Desde el cambio de politica **eso ya no bloquea nada**: una clave con esos
-   * permisos entra igual, avisando de que trae codigos sin catalogar. Anadirlos
-   * aqui cuando aparezcan no cambia quien entra; cambia que la advertencia diga
-   * «puede sacar fondos» en vez de «trae un permiso que no reconozco».
+   * Ese dia el operador amplio los permisos de esa misma clave y capturo la
+   * pantalla de Bitget junto a la respuesta de la API. Las dos listas, una al
+   * lado de la otra:
+   *
+   *   API    [coow, wtow, cpow, chow, stow]
+   *   Web     Futures|Orders · Futures|Holdings · Spot|Trade ·
+   *           Sub-accounts|Manage · Wallet|Transfer
+   *
+   * Los tres conocidos ya ocupaban Futures y Sub-accounts, asi que los dos
+   * nuevos solo pueden ser los dos que se anadieron. Y el traspaso, que hasta
+   * entonces fallaba con `40014 · need transfer write permissions`, empezo a
+   * funcionar ese mismo dia: `wtow` es el de mover saldo.
+   *
+   * `stow` es spot, que el panel no usa: se cataloga igual, para que la
+   * advertencia diga que permiso trae de mas en vez de callarlo.
+   *
+   * **El retiro sigue sin catalogar, y esta bien que asi sea.** No aparecio
+   * ningun codigo nuevo porque esa casilla no se marco, que es justo lo que el
+   * presupuesto promete: el sistema no solicitara ni utilizara permisos de
+   * retiro. El dia que alguien cree una clave con retiro saldra un sexto codigo
+   * desconocido y el panel lo dira; inventarlo hoy seria arriesgarse a etiquetar
+   * de inocuo el unico permiso que no lo es.
    */
+  wtow: { descripcion: 'Monedero: traspasos entre cuentas propias', nivel: 'traspaso' },
+  stow: { descripcion: 'Spot: operar (el panel no lo usa)', nivel: 'operacion' }
 };
 
 /**
@@ -174,7 +198,9 @@ export type CodigoAdvertencia =
   | 'reloj-desviado'
   | 'permiso-traspaso'
   | 'permiso-retiro'
-  | 'permiso-desconocido';
+  | 'permiso-desconocido'
+  /** Cuenta UTA: se opera por V3 y hay datos que esa API todavia no da. */
+  | 'cuenta-uta';
 
 export interface Advertencia {
   codigo: CodigoAdvertencia;
@@ -222,6 +248,25 @@ export interface ResultadoVerificacion {
   motivo: string | null;
   /** Codigo crudo del exchange cuando el veredicto es `invalida`. */
   codigoBitget: string | null;
+  /**
+   * Con que API habla la cuenta, segun la deteccion.
+   *
+   * `null` cuando no se pudo concluir -un corte de red durante la
+   * verificacion-. Es distinto de `'classic'`: quien persista esto tiene que
+   * ignorar el `null` en vez de degradar la cuenta, o una caida de red
+   * convertiria una cuenta UTA en clasica y la dejaria muda.
+   */
+  accountMode: AccountMode | null;
+  /** Solo lo informa V3. `null` en cuentas clasicas. */
+  holdMode: HoldMode | null;
+  /**
+   * `true` si Bitget declara la cuenta a mitad del cambio a UTA.
+   *
+   * Se distingue del resto de rechazos porque **se arregla solo**: no hay nada
+   * que corregir, solo esperar. Quien lo reciba debe dejar de operar esa
+   * subcuenta y volver a preguntar, no pedirle al operador que revise la clave.
+   */
+  enTransicion: boolean;
   latenciaMs: number;
 }
 
@@ -251,6 +296,140 @@ export interface OpcionesVerificacion {
    * comprobar un activo concreto.
    */
   simbolo?: string;
+}
+
+/**
+ * Verificacion de una cuenta UTA, por V3.
+ *
+ * ==========================================================================
+ * Por que es mas corta que la clasica, y que se pierde
+ * ==========================================================================
+ * La verificacion clasica responde tres preguntas leyendo dos endpoints de V2.
+ * En V3 solo se puede responder la primera y media:
+ *
+ *   ¿la acepta Bitget?   si: `account/settings` respondio, o no estariamos aqui.
+ *   ¿permisos justos?    **no se puede saber**. `authorities` e `ips` salen hoy
+ *                        de `/api/v2/spot/account/info`, y V3 no publica
+ *                        equivalente conocido. Es el hueco 2.4 del Paquete A.
+ *   ¿puede operar?       si: `holdMode` y `symbolConfigList` lo dicen, y con
+ *                        mas precision que V2 -la lista trae todos los simbolos
+ *                        en vez de uno por peticion-.
+ *
+ * De modo que la cuenta se acepta, pero **nunca en silencio**: sale con una
+ * advertencia `cuenta-uta` que nombra lo que no se ha podido comprobar. Callarlo
+ * daria por auditada una clave cuyos permisos nadie ha visto.
+ */
+/**
+ * Mensaje de una credencial que rechazaron **las dos** superficies.
+ *
+ * El de V2 es el que manda —es el que llevaba el veredicto hasta ahora— y se le
+ * anade lo que dijo V3, que es la mitad que faltaba. Cuando V3 respondio bien
+ * pero su respuesta no encajo con el esquema, se dice explicitamente: esa cuenta
+ * **es** UTA y el panel la esta tratando como clasica por un nombre de campo,
+ * que es un problema del panel y no de la clave.
+ */
+function motivoDobleRechazo(err: ErrorBitget, codigoV3: string | null): string {
+  if (codigoV3 === 'ESQUEMA') {
+    return (
+      'Esta cuenta parece ser UTA: la API V3 respondió correctamente, pero el panel no supo ' +
+      'leer su respuesta y la trató como cuenta clásica. Es un fallo del panel, no de la ' +
+      `clave. (V2 respondió: ${err.message})`
+    );
+  }
+
+  if (codigoV3 === null) return err.message;
+
+  return (
+    `${err.message} La API V3 también la rechazó (código ${codigoV3}), así que el panel la ` +
+    'tomó por cuenta clásica. Si la cuenta ya está migrada a UTA, revise que la clave sea de ' +
+    'esa subcuenta y que su IP esté autorizada.'
+  );
+}
+
+async function verificarUta(
+  cliente: ClienteBitget,
+  credencial: Credencial,
+  deteccion: ResultadoDeteccion,
+  mercado: Mercado,
+  simbolo: string,
+  inicio: number
+): Promise<ResultadoVerificacion> {
+  const advertencias: Advertencia[] = [
+    {
+      codigo: 'cuenta-uta',
+      mensaje:
+        'Esta cuenta esta en modo UTA y se opera por la API V3. El panel no puede leer sus ' +
+        'permisos ni su IP ligada por esa via, asi que compruebalos en Bitget: la clave deberia ' +
+        'tener solo Futuros, sin retiro.'
+    }
+  ];
+
+  /*
+   * `holdMode` es el `posMode` de V2 con otro nombre, y decide lo mismo: si la
+   * cuenta admite LONG y SHORT a la vez. Un `null` -V3 no lo informo- se trata
+   * como cobertura, que es como opera el panel; suponer unilateral haria que
+   * las ordenes salieran sin `posSide` y cruzaria los lados.
+   */
+  const modoPosicion: ModoPosicion =
+    deteccion.holdMode === 'one_way_mode' ? 'unilateral' : 'cobertura';
+
+  const config =
+    deteccion.configSimbolos.find((c) => c.symbol === simbolo) ?? deteccion.configSimbolos[0];
+  const modoMargen: ModoMargen = config?.marginMode === 'isolated' ? 'aislado' : 'cruzado';
+
+  /*
+   * El saldo se lee aparte y su fallo **no invalida la credencial**: es un dato
+   * informativo que el barrido refresca cada 45 s. Tumbar el alta de una cuenta
+   * buena porque el balance no se pudo leer seria desproporcionado.
+   */
+  let saldoDisponible: string | null = null;
+  try {
+    const activos = await obtenerActivosCuenta(cliente, { ...credencial, superficie: 'v3' });
+    saldoDisponible = disponibleDe(activos.datos, mercado.marginCoin);
+  } catch (e) {
+    if (e instanceof ErrorBitget && e.reintentable) throw e;
+    /* Se sigue sin saldo: la credencial ya demostro que autentica. */
+  }
+
+  if (modoPosicion !== 'cobertura') {
+    advertencias.push({
+      codigo: 'modo-unilateral',
+      mensaje:
+        'La cuenta esta en modo unilateral: no admite LONG y SHORT a la vez. ' +
+        'Cambialo a modo cobertura en Bitget, con la cuenta sin posiciones abiertas.'
+    });
+  }
+
+  if (saldoDisponible !== null && Number(saldoDisponible) === 0) {
+    advertencias.push({
+      codigo: 'sin-saldo',
+      mensaje: 'La cuenta no tiene saldo disponible: las ordenes se rechazaran por fondos.'
+    });
+  }
+
+  return {
+    veredicto: 'valida',
+    uid: deteccion.uid,
+    /* V3 no declara `parentId`. Se rellenara si algun dia lo publica. */
+    uidPadre: null,
+    esSubcuenta: false,
+    permisos: [],
+    permisosDesconocidos: [],
+    ipsLigadas: [],
+    modoPosicion,
+    modoMargen,
+    apalancamientoLong: null,
+    apalancamientoShort: null,
+    apalancamientoCruzado: config?.leverage == null ? null : Number(config.leverage),
+    saldoDisponible,
+    advertencias,
+    motivo: null,
+    codigoBitget: null,
+    accountMode: 'uta',
+    holdMode: deteccion.holdMode,
+    enTransicion: false,
+    latenciaMs: Date.now() - inicio
+  };
 }
 
 /**
@@ -287,8 +466,83 @@ export async function verificarCredencial(
     advertencias: [],
     motivo: null,
     codigoBitget: null,
+    accountMode: null,
+    holdMode: null,
+    enTransicion: false,
     latenciaMs: 0
   });
+
+  /* ---- 0. ¿con que API habla esta cuenta? ---- */
+
+  /*
+   * Va primero por necesidad, no por orden estetico: los tres pasos siguientes
+   * llaman a endpoints de V2, y una key de cuenta UTA los recibe rechazados.
+   * Sin este paso, toda subcuenta migrada se daria de alta como «invalida» y el
+   * operador iria a buscar un problema de credenciales que no existe.
+   *
+   * `detectarModo` lanza ante un fallo reintentable -red, 429-, y aqui se deja
+   * subir igual que en los otros dos pasos: no es un veredicto sobre la
+   * credencial, es que no se pudo preguntar.
+   */
+  const deteccion = await detectarModo(cliente, credencial);
+
+  if (deteccion.modo === 'transicion') {
+    return {
+      ...base(),
+      veredicto: 'rechazada',
+      uid: deteccion.uid,
+      accountMode: null,
+      enTransicion: true,
+      motivo:
+        'La cuenta esta cambiando de modelo en Bitget y no admite operaciones mientras dura ' +
+        `el cambio (estado «${deteccion.accountModeCrudo ?? 'desconocido'}»). ` +
+        'Vuelve a validarla en unos minutos.',
+      latenciaMs: Date.now() - inicio
+    };
+  }
+
+  /*
+   * ==========================================================================
+   * No se pudo preguntar: el problema es la clave, no la superficie
+   * ==========================================================================
+   * `indeterminado` significa que V3 rechazo el **sobre de autenticacion** -IP
+   * no autorizada, firma o passphrase-, y eso es identico en las dos
+   * superficies. Seguir a V2 gastaria una peticion para cosechar el mismo
+   * rechazo con otro codigo y ensenar ese, que es como el operador acaba
+   * revisando una migracion teniendo un problema de lista blanca.
+   *
+   * Se corta aqui y se dice lo que Bitget dijo. `accountMode` queda `null` -no
+   * se sabe- y `actualizarModos` ignora los nulos, asi que una cuenta ya
+   * detectada como UTA **no se degrada a clasica** por un corte de este tipo.
+   */
+  if (deteccion.modo === 'indeterminado') {
+    const codigo = deteccion.codigoRechazo;
+    return {
+      ...base(),
+      veredicto: 'invalida',
+      accountMode: null,
+      /*
+       * `esUta` cambia por completo lo que hay que decirle al operador: no es
+       * que la credencial sea mala, es que su cuenta **si** esta migrada y a la
+       * clave le falta el ambito de UTA. Sin esta rama, el mensaje generico le
+       * mandaba a revisar la clave entera.
+       */
+      motivo:
+        deteccion.esUta === true
+          ? 'Esta subcuenta ya está migrada a UTA, pero la API Key no tiene el permiso ' +
+            '«UTA manage read». Habilítelo en Bitget para esa clave y vuelva a validarla.'
+          : codigo === null
+            ? 'Bitget rechazó la credencial y no se pudo determinar el tipo de cuenta.'
+            : `${clasificarCodigo(codigo).mensaje} Afecta por igual a las dos APIs de Bitget, ` +
+              'así que no es un problema de la migración a UTA.',
+      codigoBitget: codigo,
+      latenciaMs: Date.now() - inicio
+    };
+  }
+
+  if (deteccion.modo === 'uta') {
+    return verificarUta(cliente, credencial, deteccion, mercado, simbolo, inicio);
+  }
 
   /* ---- 1. ¿la acepta Bitget? ---- */
 
@@ -300,7 +554,21 @@ export async function verificarCredencial(
     const err = e as ErrorBitget;
     return {
       ...base(),
-      motivo: err.message,
+      /* La deteccion ya concluyo: V3 la rechazo, asi que es clasica. */
+      accountMode: 'classic',
+      /*
+       * ======================================================================
+       * Las dos superficies la rechazaron: hay que decirlo
+       * ======================================================================
+       * Aqui se llega cuando V3 dijo que no -por eso se dio por clasica- y V2
+       * tambien. Ensenar solo el codigo de V2 manda al operador a revisar una
+       * clave que puede estar perfectamente bien y ser de una cuenta UTA que el
+       * panel no supo reconocer.
+       *
+       * Es exactamente lo que paso el 09/09/2026: `40085` a secas, sin ninguna
+       * pista de que antes se habia intentado V3 ni de con que contesto.
+       */
+      motivo: motivoDobleRechazo(err, deteccion.codigoRechazo),
       codigoBitget: err.codigo,
       latenciaMs: Date.now() - inicio
     };
@@ -327,7 +595,8 @@ export async function verificarCredencial(
     esSubcuenta: uidPadreDe(info.datos.parentId) !== null,
     permisos,
     permisosDesconocidos: desconocidos,
-    ipsLigadas: ips
+    ipsLigadas: ips,
+    accountMode: 'classic'
   };
 
   /* ---- 2. ¿permisos justos? ---- */

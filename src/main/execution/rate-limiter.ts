@@ -33,6 +33,7 @@ import {
   CONCURRENCIA_MAXIMA,
   LIMITE_CUENTA_POR_SEGUNDO,
   LIMITE_GLOBAL_POR_SEGUNDO,
+  LIMITES_POR_ENDPOINT,
   PENALIZACION_429_MS,
   RAFAGA_CUENTA,
   RAFAGA_GLOBAL
@@ -135,6 +136,13 @@ export interface OpcionesLimitador {
   rafagaGlobal?: number;
   rafagaCuenta?: number;
   concurrenciaMaxima?: number;
+  /**
+   * Endpoints con techo propio, por debajo del bucket de cuenta.
+   *
+   * Por defecto, `LIMITES_POR_ENDPOINT`. Las pruebas lo sustituyen para no
+   * depender de la tabla real.
+   */
+  limitesPorEndpoint?: Readonly<Record<string, number>>;
   /** Reloj. Se inyecta en las pruebas. */
   ahora?: () => number;
   /** Espera. Se inyecta en las pruebas para no depender de tiempo real. */
@@ -151,6 +159,8 @@ export interface DiagnosticoLimitador {
 
 interface Esperando {
   clave: string;
+  /** Ruta con techo propio, o `undefined` si el endpoint no tiene el suyo. */
+  endpoint: string | undefined;
   resolver: () => void;
 }
 
@@ -174,6 +184,8 @@ const dormirReal = (ms: number): Promise<void> =>
 export class LimitadorPeticiones {
   private readonly global: BucketTokens;
   private readonly porCuenta = new Map<string, BucketTokens>();
+  /** Solo para endpoints de `limitesPorEndpoint`. Clave: `apiKey|ruta`. */
+  private readonly porEndpoint = new Map<string, BucketTokens>();
   private readonly cola: Esperando[] = [];
   private enVuelo = 0;
   private bombeando = false;
@@ -181,6 +193,7 @@ export class LimitadorPeticiones {
   private readonly limiteCuenta: number;
   private readonly rafagaCuenta: number;
   private readonly concurrencia: number;
+  private readonly limitesEndpoint: Readonly<Record<string, number>>;
   private readonly ahora: () => number;
   private readonly dormir: (ms: number) => Promise<void>;
 
@@ -190,6 +203,7 @@ export class LimitadorPeticiones {
     this.limiteCuenta = opciones.limiteCuentaPorSegundo ?? LIMITE_CUENTA_POR_SEGUNDO;
     this.rafagaCuenta = opciones.rafagaCuenta ?? RAFAGA_CUENTA;
     this.concurrencia = opciones.concurrenciaMaxima ?? CONCURRENCIA_MAXIMA;
+    this.limitesEndpoint = opciones.limitesPorEndpoint ?? LIMITES_POR_ENDPOINT;
     this.global = new BucketTokens(
       opciones.rafagaGlobal ?? RAFAGA_GLOBAL,
       opciones.limiteGlobalPorSegundo ?? LIMITE_GLOBAL_POR_SEGUNDO,
@@ -207,14 +221,49 @@ export class LimitadorPeticiones {
   }
 
   /**
+   * Bucket del endpoint, o `null` si esa ruta no tiene techo propio.
+   *
+   * La rafaga es el propio limite: un endpoint acotado a 5/s no deberia poder
+   * soltar los 8 de la rafaga de cuenta de golpe, que es justo lo que su techo
+   * mas bajo pretende evitar.
+   */
+  private bucketEndpoint(clave: string, endpoint: string | undefined): BucketTokens | null {
+    if (endpoint === undefined) return null;
+    const limite = this.limitesEndpoint[endpoint];
+    if (limite === undefined) return null;
+
+    const compuesta = `${clave}|${endpoint}`;
+    let b = this.porEndpoint.get(compuesta);
+    if (b === undefined) {
+      b = new BucketTokens(limite, limite, this.ahora);
+      this.porEndpoint.set(compuesta, b);
+    }
+    return b;
+  }
+
+  /** `true` si la peticion tiene cupo de cuenta **y** de endpoint. */
+  private puedeSalir(e: Esperando): boolean {
+    if (!this.bucketDe(e.clave).hayToken()) return false;
+    const endpoint = this.bucketEndpoint(e.clave, e.endpoint);
+    return endpoint === null || endpoint.hayToken();
+  }
+
+  /** Lo que falta para que esa peticion pueda salir, mirando los dos buckets. */
+  private esperaDe(e: Esperando): number {
+    const cuenta = this.bucketDe(e.clave).esperaMs();
+    const endpoint = this.bucketEndpoint(e.clave, e.endpoint);
+    return endpoint === null ? cuenta : Math.max(cuenta, endpoint.esperaMs());
+  }
+
+  /**
    * Espera hasta tener permiso para lanzar una peticion de esa cuenta.
    *
    * Hay que llamar a `liberar()` cuando la peticion termine, pase lo que pase.
    * `ejecutar()` lo hace por su cuenta y es la forma recomendada.
    */
-  adquirir(clave: string): Promise<void> {
+  adquirir(clave: string, endpoint?: string): Promise<void> {
     return new Promise<void>((resolver) => {
-      this.cola.push({ clave, resolver });
+      this.cola.push({ clave, endpoint, resolver });
       void this.bombear();
     });
   }
@@ -247,11 +296,11 @@ export class LimitadorPeticiones {
           continue;
         }
 
-        const indice = this.cola.findIndex((e) => this.bucketDe(e.clave).hayToken());
+        const indice = this.cola.findIndex((e) => this.puedeSalir(e));
 
         if (indice === -1) {
           /* Hay cupo global, pero ninguna cuenta lo tiene. Espera la mas proxima. */
-          const esperas = this.cola.map((e) => this.bucketDe(e.clave).esperaMs());
+          const esperas = this.cola.map((e) => this.esperaDe(e));
           await this.dormir(Math.max(1, Math.min(...esperas)));
           continue;
         }
@@ -259,9 +308,10 @@ export class LimitadorPeticiones {
         const elegido = this.cola[indice];
         if (elegido === undefined) continue;
 
-        /* Los dos, o ninguno: consumir uno solo desperdiciaria cupo. */
+        /* Los tres, o ninguno: consumir uno solo desperdiciaria cupo. */
         this.global.consumir();
         this.bucketDe(elegido.clave).consumir();
+        this.bucketEndpoint(elegido.clave, elegido.endpoint)?.consumir();
         this.cola.splice(indice, 1);
         this.enVuelo += 1;
         elegido.resolver();
@@ -278,12 +328,12 @@ export class LimitadorPeticiones {
    * se reintenta no es competencia del limitador, sino de la politica de
    * reintento del lote. docs/01 seccion 9.
    */
-  async ejecutar<T>(clave: string, tarea: () => Promise<T>): Promise<T> {
-    await this.adquirir(clave);
+  async ejecutar<T>(clave: string, tarea: () => Promise<T>, endpoint?: string): Promise<T> {
+    await this.adquirir(clave, endpoint);
     try {
       return await tarea();
     } catch (e) {
-      if (esError429(e)) this.registrar429(clave, extraerRetryAfterMs(e));
+      if (esError429(e)) this.registrar429(clave, extraerRetryAfterMs(e), endpoint);
       throw e;
     } finally {
       this.liberar();
@@ -297,10 +347,17 @@ export class LimitadorPeticiones {
    * cruzo, y equivocarse hacia el lado permisivo cuesta cinco minutos de
    * bloqueo del exchange.
    */
-  registrar429(clave: string, retryAfterMs: number | null): void {
+  registrar429(clave: string, retryAfterMs: number | null, endpoint?: string): void {
     const ms = retryAfterMs ?? PENALIZACION_429_MS;
     this.global.penalizar(ms);
     this.bucketDe(clave).penalizar(ms);
+    /*
+     * Tambien el del endpoint, cuando lo tiene: si el 429 vino de su techo
+     * propio -5/s frente a los 8/s de la cuenta-, penalizar solo los dos de
+     * arriba dejaria salir la siguiente peticion de ese mismo endpoint en
+     * cuanto la cuenta se recupere, repitiendo el error.
+     */
+    this.bucketEndpoint(clave, endpoint)?.penalizar(ms);
   }
 
   diagnostico(): DiagnosticoLimitador {

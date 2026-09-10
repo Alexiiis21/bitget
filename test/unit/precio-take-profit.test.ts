@@ -230,4 +230,34 @@ describe('redondeo', () => {
       expect(r.motivo).toBe('porcentaje-invalido');
     }
   });
+
+  /* El porcentaje viaja con la apertura: si lanza, se lleva el lote entero. */
+  it('lo que no es un numero se rechaza, no revienta', () => {
+    for (const porcentaje of ['.', '1.2.3', 'abc']) {
+      const r = precioTakeProfit({
+        contrato: BTC,
+        precioEntrada: '63378',
+        lado: 'long',
+        apalancamiento: 150,
+        porcentaje
+      });
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.motivo).toBe('porcentaje-invalido');
+    }
+  });
+
+  it('un precio de entrada ilegible se rechaza como precio', () => {
+    const r = precioTakeProfit({
+      contrato: BTC,
+      precioEntrada: '.',
+      lado: 'long',
+      apalancamiento: 150,
+      porcentaje: '35'
+    });
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.motivo).toBe('precio-invalido');
+  });
 });

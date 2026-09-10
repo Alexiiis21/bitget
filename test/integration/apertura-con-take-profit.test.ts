@@ -56,6 +56,14 @@ import {
   type Respuesta
 } from '../mock-exchange/servidor';
 
+/*
+ * scrypt barato: estas pruebas crean un almacen por caso y lo que ejercitan es
+ * la sesion, no la dureza del cifrado -que cubre test/unit/vault.test.ts-. Con
+ * el coste real, varias suites en paralelo agotaban el limite de tiempo de
+ * vitest de forma intermitente.
+ */
+const KDF_PRUEBAS = { N: 16, r: 1, p: 1 };
+
 const SIMBOLO = 'SBTCSUSDT';
 
 /** Contrato real de SBTCSUSDT, capturado de api.bitget.com el 12/08/2026. */
@@ -242,7 +250,7 @@ beforeEach(async () => {
       activos: join(carpeta, 'activos.json')
     },
     cliente,
-    { mercado: 'simulado', motor, dormir: async () => undefined }
+    { parametrosKdf: KDF_PRUEBAS, mercado: 'simulado', motor, dormir: async () => undefined }
   );
 
   /*

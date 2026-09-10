@@ -23,6 +23,7 @@ import type {
   ApiKeyStatus,
   Asset,
   Balance,
+  BalanceSheet,
   BatchFailure,
   BatchPlan,
   BatchResult,
@@ -33,8 +34,18 @@ import type {
   LeverageRequest,
   MarginRequest,
   OpenRequest,
+  ParentAccount,
+  ParentAccountInput,
+  ParentValidationResult,
+  SpreadMode,
+  SpreadPlan,
+  SpreadResult,
+  TransferPlan,
+  TransferRecord,
+  TransferResult,
   PlanDiscard,
   PlanKind,
+  ImportResult,
   Position,
   PositionSnapshot,
   SystemInfo,
@@ -42,9 +53,19 @@ import type {
   UnlockResult,
   ValidationResult
 } from '@shared/domain/panel-view';
-import type { ActivoIpc, CuentaPanel } from '@shared/ipc-contract';
+import type {
+  ActivoIpc,
+  CuentaPanel,
+  MadreIpc,
+  PlanRepartoIpc,
+  PlanTraspasoIpc
+} from '@shared/ipc-contract';
 import type { EstadoConexion, EstadoJob, Lado, Lote, PosicionMonitor } from '@shared/types';
-import { NotImplementedError, type PanelService, type Unsubscribe } from '@shared/ports/panel-service';
+import {
+  NotImplementedError,
+  type PanelService,
+  type Unsubscribe
+} from '@shared/ports/panel-service';
 
 const ESTADO_A_STATUS: Record<EstadoConexion, ApiKeyStatus> = {
   conectada: 'ok',
@@ -86,6 +107,64 @@ const aCuenta = (c: CuentaPanel): Account => ({
     status: ESTADO_A_STATUS[s.estado],
     statusReason: s.motivo
   }))
+});
+
+/** El plan de reparto o recogida, traducido al vocabulario de la pantalla. */
+const aPlanReparto = (p: PlanRepartoIpc): SpreadPlan => ({
+  id: p.id,
+  parentUid: p.uidMadre,
+  kind: p.tipo,
+  mode: p.modo,
+  currency: p.moneda,
+  total: p.total,
+  moves: p.movimientos.map((m) => ({
+    fromUid: m.uidOrigen,
+    fromLabel: m.etiquetaOrigen,
+    toUid: m.uidDestino,
+    toLabel: m.etiquetaDestino,
+    amount: m.importe,
+    before: m.antes,
+    after: m.despues
+  })),
+  skipped: p.descartes.map((d) => ({
+    uid: d.uid,
+    label: d.etiqueta,
+    reason: d.motivo,
+    message: d.mensaje
+  })),
+  createdAt: p.creadoEn
+});
+
+/** El plan de traspaso, traducido al vocabulario de la pantalla. */
+const aPlanTraspaso = (p: PlanTraspasoIpc): TransferPlan => ({
+  id: p.id,
+  parentUid: p.uidMadre,
+  from: {
+    uid: p.origen.uid,
+    label: p.origen.etiqueta,
+    before: p.origen.antes,
+    after: p.origen.despues
+  },
+  to: {
+    uid: p.destino.uid,
+    label: p.destino.etiqueta,
+    before: p.destino.antes,
+    after: p.destino.despues
+  },
+  amount: p.importe,
+  currency: p.moneda,
+  maxTransferable: p.maxTransferible,
+  createdAt: p.creadoEn
+});
+
+/** Una cuenta principal registrada, tal como la envía el proceso principal. */
+const traducirMadre = (m: MadreIpc): ParentAccount => ({
+  id: m.id,
+  uid: m.uidMadre,
+  name: m.etiqueta,
+  maskedKey: m.apiKeyEnmascarada,
+  addedAt: m.altaEn,
+  subAccountsSeen: m.subcuentasVistas
 });
 
 /**
@@ -196,7 +275,8 @@ const aResultado = (label: string, lote: Lote): BatchResult => {
       .map((j) => ({
         subAccountId: j.cuentaId,
         side: j.lado,
-        reason: j.mensaje ?? (j.codigoBitget === null ? 'Sin detalle.' : `Bitget ${j.codigoBitget}`),
+        reason:
+          j.mensaje ?? (j.codigoBitget === null ? 'Sin detalle.' : `Bitget ${j.codigoBitget}`),
         /*
          * El `clientOid` vacío marca las filas que no son la operación en sí:
          * los descartes y las derivadas de la apertura -«Sub-01 · TP»,
@@ -403,9 +483,7 @@ export class IpcPanelService implements PanelService {
          * otra vía: todo lo de esta línea sale con esta orden, y decirlo dos
          * veces solo alargaba el resumen hasta hacerlo saltar de línea.
          */
-        (plan.takeProfitPorcentaje === null
-          ? ''
-          : ` · Take Profit ${plan.takeProfitPorcentaje}%`) +
+        (plan.takeProfitPorcentaje === null ? '' : ` · Take Profit ${plan.takeProfitPorcentaje}%`) +
         (plan.margenAdicional === null
           ? ''
           : ` · margen adicional ${plan.margenAdicional} ${moneda} por casilla ` +
@@ -659,7 +737,9 @@ export class IpcPanelService implements PanelService {
       uid: f.uid,
       parentUid: f.uidPadre,
       status: ESTADO_A_STATUS[f.estado],
-      reason: f.motivo
+      reason: f.motivo,
+      accountMode: f.accountMode,
+      inTransition: f.enTransicion
     }));
   }
 
@@ -703,6 +783,154 @@ export class IpcPanelService implements PanelService {
    */
   async deleteApiKey(id: string, stepPassword: string): Promise<DeleteOutcome> {
     return window.pcb.cuentasEliminar(id, stepPassword);
+  }
+
+  /* ---- cuentas madre y saldos ---- */
+
+  async listParentAccounts(): Promise<ParentAccount[]> {
+    return (await window.pcb.madresListar()).map(traducirMadre);
+  }
+
+  async registerParentAccount(input: ParentAccountInput): Promise<ParentValidationResult> {
+    const resultado = await window.pcb.madresAgregar({
+      etiqueta: input.name,
+      apiKey: input.apiKey,
+      secretKey: input.secretKey,
+      passphrase: input.passphrase
+    });
+    return {
+      ok: resultado.ok,
+      reason: resultado.motivo,
+      warnings: resultado.advertencias.map((a) => ({ code: a.codigo, message: a.mensaje })),
+      parent: resultado.madre === null ? null : traducirMadre(resultado.madre)
+    };
+  }
+
+  async deleteParentAccount(uid: string, stepPassword: string): Promise<DeleteOutcome> {
+    return window.pcb.madresEliminar(uid, stepPassword);
+  }
+
+  async planTransfer(input: {
+    fromUid: string;
+    toUid: string;
+    amount: string;
+    parentUid?: string;
+  }): Promise<TransferPlan> {
+    const p = await window.pcb.traspasoPlanificar({
+      uidOrigen: input.fromUid,
+      uidDestino: input.toUid,
+      importe: input.amount,
+      ...(input.parentUid === undefined ? {} : { uidMadre: input.parentUid })
+    });
+    return aPlanTraspaso(p);
+  }
+
+  async executeTransfer(planId: string, stepPassword: string): Promise<TransferResult> {
+    const r = await window.pcb.traspasoEjecutar(planId, stepPassword);
+    return {
+      ok: r.ok,
+      failure: r.motivo,
+      message: r.mensaje,
+      transferId: r.transferId,
+      plan: aPlanTraspaso(r.plan)
+    };
+  }
+
+  async listTransfers(limit?: number): Promise<TransferRecord[]> {
+    return (await window.pcb.traspasoHistorial(limit)).map((m) => ({
+      id: m.clientOid,
+      at: m.ts,
+      fromLabel: m.etiquetaOrigen,
+      toLabel: m.etiquetaDestino,
+      amount: m.importe,
+      currency: m.moneda,
+      outcome: m.resultado,
+      transferId: m.transferId,
+      message: m.mensaje
+    }));
+  }
+
+  async planSpread(input: {
+    toUids: string[];
+    total: string;
+    mode: SpreadMode;
+    parentUid?: string;
+  }): Promise<SpreadPlan> {
+    return aPlanReparto(
+      await window.pcb.repartoPlanificar({
+        destinos: input.toUids,
+        total: input.total,
+        modo: input.mode,
+        ...(input.parentUid === undefined ? {} : { uidMadre: input.parentUid })
+      })
+    );
+  }
+
+  async planCollect(input: { fromUids: string[]; parentUid?: string }): Promise<SpreadPlan> {
+    return aPlanReparto(
+      await window.pcb.recogidaPlanificar({
+        origenes: input.fromUids,
+        ...(input.parentUid === undefined ? {} : { uidMadre: input.parentUid })
+      })
+    );
+  }
+
+  async executeSpread(planId: string, stepPassword: string): Promise<SpreadResult> {
+    const r = await window.pcb.repartoEjecutar(planId, stepPassword);
+    return {
+      ok: r.ok,
+      failure: r.motivo,
+      plan: aPlanReparto(r.plan),
+      results: r.resultados.map((x) => ({
+        id: x.clientOid,
+        fromLabel: x.etiquetaOrigen,
+        toLabel: x.etiquetaDestino,
+        amount: x.importe,
+        ok: x.ok,
+        message: x.mensaje
+      })),
+      sent: r.enviados,
+      failed: r.fallidos,
+      unconfirmed: r.indeterminados
+    };
+  }
+
+  async getBalanceSheet(parentUid?: string): Promise<BalanceSheet> {
+    const s = await window.pcb.saldosLeer(parentUid);
+    return {
+      parentUid: s.uidMadre,
+      parentName: s.etiquetaMadre,
+      parentAvailable: s.disponibleMadre,
+      currency: s.moneda,
+      fetchedAt: s.obtenidoEn,
+      rows: s.filas.map((f) => ({
+        uid: f.uid,
+        subAccountId: f.cuentaId,
+        label: f.etiqueta,
+        available: f.disponible,
+        maxTransferable: f.maxTransferible,
+        equity: f.equity,
+        onlyInBitget: f.soloEnBitget,
+        noData: f.sinDatos
+      })),
+      totalAvailable: s.totalDisponible,
+      totalTransferable: s.totalTransferible,
+      withData: s.conDatos
+    };
+  }
+
+  async isFirstRun(): Promise<boolean> {
+    return (await window.pcb.vaultEstado()) === 'sin-inicializar';
+  }
+
+  async importCredentials(): Promise<ImportResult> {
+    const r = await window.pcb.credencialesImportar();
+    return {
+      cancelled: r.cancelado,
+      ok: r.ok,
+      message: r.mensaje,
+      accounts: r.cuentas
+    };
   }
 
   async unlockVault(masterPassword: string): Promise<UnlockResult> {

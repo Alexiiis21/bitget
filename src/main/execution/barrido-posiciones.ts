@@ -413,7 +413,8 @@ export class BarridoPosiciones {
       const respuesta = await obtenerCuentasFuturos(
         this.cliente,
         cuenta.credencial,
-        this.mercado.productType
+        this.mercado.productType,
+        this.mercado.marginCoin
       );
       const propia = respuesta.datos.find((c) => c.marginCoin === this.mercado.marginCoin);
       if (propia !== undefined) this.fuente.registrarSaldo(cuenta.cuentaId, propia.available);

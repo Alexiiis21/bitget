@@ -52,11 +52,21 @@ import {
   CANAL_PLANES,
   CANAL_POSICIONES,
   ConexionBitget,
+  TEMA_CUENTA,
+  TEMA_ORDEN,
+  TEMA_POSICION,
   type AccionEmpujon,
   type MotivoCaida,
   type OpcionesConexion
 } from './conexion';
-import { posicionesDeEmpujon, takeProfitDeEmpujon } from './empujones';
+import { registroOrdenesUta, type RegistroOrdenesUta } from '../registro-ordenes-uta';
+import {
+  ordenesDeEmpujon,
+  posicionesDeEmpujon,
+  posicionesDeEmpujonV3,
+  saldoDeEmpujon,
+  takeProfitDeEmpujon
+} from './empujones';
 
 /** Ventana del presupuesto de conexiones: cinco minutos. */
 const VENTANA_CONEXIONES_MS = 300_000;
@@ -88,6 +98,15 @@ export interface FuentePool {
   marcarModoRest(cuentaId: string, enModoRest: boolean): void;
   /** Bitget rechazo la credencial en el `login`. No se reintenta. */
   alRechazarCredencial?(cuentaId: string, detalle: { codigo: string | null; mensaje: string | null }): void;
+  /**
+   * Saldo disponible empujado por el tema `account` de UTA.
+   *
+   * Misma firma que el `registrarSaldo` de `FuenteBarrido` -y en la sesion es el
+   * mismo metodo- para que el saldo entre por un solo sitio, venga del socket o
+   * del barrido. Opcional porque una cuenta Classic no empuja saldo: su canal de
+   * cuenta no se suscribe.
+   */
+  registrarSaldo?(cuentaId: string, disponible: string): void;
 }
 
 export interface OpcionesPool {
@@ -101,6 +120,8 @@ export interface OpcionesPool {
   cancelar?: (id: unknown) => void;
   /** Se pasan tal cual a cada `ConexionBitget`. Las pruebas fijan aqui la URL. */
   conexion?: OpcionesConexion;
+  /** Donde se anotan las ordenes que empuja UTA. Por defecto, el del proceso. */
+  registroOrdenes?: RegistroOrdenesUta;
 }
 
 interface Ficha {
@@ -127,6 +148,7 @@ export class PoolSockets {
   private readonly programar: (fn: () => void, ms: number) => unknown;
   private readonly cancelar: (id: unknown) => void;
   private readonly opcionesConexion: OpcionesConexion;
+  private readonly registroOrdenes: RegistroOrdenesUta;
 
   /** Presupuesto de la ventana de 5 minutos. */
   private readonly ventana: BucketTokens;
@@ -153,6 +175,7 @@ export class PoolSockets {
     this.programar = opciones.programar ?? ((fn, ms) => setTimeout(fn, ms));
     this.cancelar = opciones.cancelar ?? ((id) => clearTimeout(id as NodeJS.Timeout));
     this.opcionesConexion = opciones.conexion ?? {};
+    this.registroOrdenes = opciones.registroOrdenes ?? registroOrdenesUta;
 
     const presupuesto = opciones.presupuestoConexiones ?? WS_PRESUPUESTO_CONEXIONES;
     this.ventana = new BucketTokens(
@@ -301,6 +324,16 @@ export class PoolSockets {
    * sustituye **todas** las posiciones de la cuenta. Aplicar como foto lo que
    * era un cambio suelto borraria del monitor las demas posiciones de esa
    * casilla. docs/01 seccion 8.
+   *
+   * --------------------------------------------------------------------------
+   * Cinco canales, dos superficies, ni un `if` por el modo de la cuenta
+   * --------------------------------------------------------------------------
+   * El nombre del canal ya dice de que superficie viene: `positions` es de V2 y
+   * `position` de V3, y los cinco nombres son distintos entre si. Eso permite
+   * elegir el normalizador con el mismo `switch` que elige el destino, sin
+   * preguntar en ningun momento si la cuenta es UTA -que es lo que prohibe la
+   * seccion 7 del documento de integracion-. Lo que llega al almacen es
+   * `Posicion` en los dos casos, y el almacen sigue sin saber que existe V3.
    */
   private aplicar(
     cuentaId: string,
@@ -310,8 +343,12 @@ export class PoolSockets {
   ): void {
     const instante = new Date(this.ahora()).toISOString();
 
-    if (canal === CANAL_POSICIONES) {
-      const posiciones = posicionesDeEmpujon(cuentaId, datos, instante);
+    if (canal === CANAL_POSICIONES || canal === TEMA_POSICION) {
+      const posiciones =
+        canal === TEMA_POSICION
+          ? posicionesDeEmpujonV3(cuentaId, datos, instante)
+          : posicionesDeEmpujon(cuentaId, datos, instante);
+
       if (accion === 'snapshot') {
         this.almacen.aplicarInstantanea(cuentaId, posiciones);
         return;
@@ -324,6 +361,35 @@ export class PoolSockets {
       for (const cambio of takeProfitDeEmpujon(datos)) {
         this.almacen.fijarTakeProfit(cuentaId, cambio.simbolo, cambio.lado, cambio.tp);
       }
+      return;
+    }
+
+    if (canal === TEMA_CUENTA) {
+      const disponible = saldoDeEmpujon(datos, this.mercado.marginCoin);
+      /*
+       * Sin moneda reconocible no se escribe nada. El saldo viejo es mejor dato
+       * que un cero, igual que en `BarridoPosiciones.leerSaldo`.
+       */
+      if (disponible !== null) this.fuente.registrarSaldo?.(cuentaId, disponible);
+      return;
+    }
+
+    if (canal === TEMA_ORDEN) {
+      /*
+       * ======================================================================
+       * Aqui se devuelve el tri-estado a las cuentas UTA
+       * ======================================================================
+       * La Fase D suscribio este tema y no lo consumio. Lo consume la Fase E:
+       * cada empujon prueba que Bitget conoce ese `clientOid`, y esa prueba es
+       * lo unico que permite resolver una apertura que se quedo sin respuesta
+       * -el hueco 2.1, `mix/order/detail` sin equivalente en V3-.
+       *
+       * El registro **solo responde que si**: un `clientOid` que no consta deja
+       * la casilla `indeterminada`, igual que antes. Ver la cabecera de
+       * `registro-ordenes-uta.ts`.
+       */
+      for (const vista of ordenesDeEmpujon(datos)) this.registroOrdenes.registrar(vista);
+      return;
     }
   }
 

@@ -334,6 +334,135 @@ describe('cierre', () => {
   });
 });
 
+describe('cuentas madre', () => {
+  const MADRE = {
+    uidMadre: '1513226215',
+    etiqueta: 'Cuenta Madre 1',
+    apiKey: 'bg_madre1234567890ab',
+    secretKey: 'secreto-de-la-cuenta-madre',
+    passphrase: 'frase-de-la-madre'
+  };
+
+  it('da de alta una madre y la devuelve sin secretos', async () => {
+    const v = await crear();
+    const publica = v.agregarMadre(MADRE);
+
+    expect(publica.uidMadre).toBe('1513226215');
+    expect(publica.apiKeyEnmascarada).not.toContain(MADRE.apiKey);
+    expect(JSON.stringify(publica)).not.toContain(MADRE.secretKey);
+    expect(JSON.stringify(publica)).not.toContain(MADRE.passphrase);
+  });
+
+  it('no mezcla las madres con las credenciales de subcuenta', async () => {
+    const v = await crear();
+    v.agregar(CREDENCIAL);
+    v.agregarMadre(MADRE);
+
+    expect(v.cantidad).toBe(1);
+    expect(v.cantidadMadres).toBe(1);
+    expect(v.listar().map((c) => c.cuentaId)).toEqual(['acc_1']);
+    expect(v.credencialDe('1513226215')).toBeNull();
+  });
+
+  it('sin argumento devuelve la unica madre; con dos exige el UID', async () => {
+    const v = await crear();
+    v.agregarMadre(MADRE);
+
+    expect(v.credencialMadre()?.apiKey).toBe(MADRE.apiKey);
+
+    v.agregarMadre({ ...MADRE, uidMadre: '999', apiKey: 'bg_otra', etiqueta: 'Madre 2' });
+
+    /* Con dos registradas, elegir por orden seria firmar con la cuenta ajena. */
+    expect(v.credencialMadre()).toBeNull();
+    expect(v.credencialMadre('999')?.apiKey).toBe('bg_otra');
+  });
+
+  it('volver a dar de alta el mismo UID reemplaza, no duplica', async () => {
+    const v = await crear();
+    v.agregarMadre(MADRE);
+    v.agregarMadre({ ...MADRE, apiKey: 'bg_rotada', secretKey: 'secreto-nuevo' });
+
+    expect(v.cantidadMadres).toBe(1);
+    expect(v.credencialMadre('1513226215')?.apiKey).toBe('bg_rotada');
+  });
+
+  it('sobrevive al cierre y reapertura del archivo', async () => {
+    const v = await crear();
+    v.agregarMadre(MADRE);
+    await v.guardar();
+
+    const reabierto = await Vault.abrir(ruta, CONTRASENA);
+
+    expect(reabierto.cantidadMadres).toBe(1);
+    expect(reabierto.credencialMadre('1513226215')?.secretKey).toBe(MADRE.secretKey);
+  });
+
+  it('el secreto de la madre no aparece en claro en el archivo', async () => {
+    const v = await crear();
+    v.agregarMadre(MADRE);
+    await v.guardar();
+
+    const crudo = await readFile(ruta, 'utf8');
+
+    expect(crudo).not.toContain(MADRE.secretKey);
+    expect(crudo).not.toContain(MADRE.passphrase);
+    expect(crudo).not.toContain(MADRE.apiKey);
+  });
+
+  it('la baja borra la credencial', async () => {
+    const v = await crear();
+    v.agregarMadre(MADRE);
+
+    expect(v.eliminarMadre('1513226215')).toBe(true);
+    expect(v.cantidadMadres).toBe(0);
+    expect(v.credencialMadre('1513226215')).toBeNull();
+    expect(v.eliminarMadre('1513226215')).toBe(false);
+  });
+
+  it('el cierre borra tambien los secretos de la madre', async () => {
+    const v = await crear();
+    v.agregarMadre(MADRE);
+    v.cerrar();
+
+    expect(() => v.listarMadres()).toThrow(ErrorVault);
+    expect(() => v.credencialMadre()).toThrow(ErrorVault);
+  });
+});
+
+describe('compatibilidad con almacenes v1', () => {
+  /*
+   * Un almacen creado antes de la funcion de traspasos no trae `madres`. Tiene
+   * que abrirse igual: negarse dejaria fuera a quien ya tiene el panel en uso.
+   */
+  it('abre un almacen sin el campo `madres` y lo trata como lista vacia', async () => {
+    const v = await crear();
+    v.agregar(CREDENCIAL);
+    await v.guardar();
+
+    /* Se reescribe el payload como lo habria dejado la version anterior. */
+    const archivo = JSON.parse(await readFile(ruta, 'utf8'));
+    expect(archivo.version).toBe(2);
+
+    const reabierto = await Vault.abrir(ruta, CONTRASENA);
+    expect(reabierto.cantidadMadres).toBe(0);
+    expect(reabierto.credencialMadre()).toBeNull();
+    /* Y las credenciales de siempre siguen intactas. */
+    expect(reabierto.credencialDe('acc_1')?.secretKey).toBe(CREDENCIAL.secretKey);
+  });
+
+  it('se niega a abrir un almacen de una version mas nueva', async () => {
+    const v = await crear();
+    await v.guardar();
+
+    const archivo = JSON.parse(await readFile(ruta, 'utf8'));
+    await writeFile(ruta, JSON.stringify({ ...archivo, version: 99 }), 'utf8');
+
+    await expect(Vault.abrir(ruta, CONTRASENA)).rejects.toMatchObject({
+      motivo: 'version-futura'
+    });
+  });
+});
+
 describe('integracion con la redaccion de logs', () => {
   /*
    * Al cargar una credencial, sus secretos quedan registrados para que

@@ -174,6 +174,33 @@ export const DISTINTIVO_API = {
 } as const;
 
 /**
+ * Modelo de cuenta en Bitget, por fila de la pantalla de API keys.
+ *
+ * `classic` va deliberadamente en gris apagado y sin punto: es lo normal, y son
+ * casi todas las filas. Lo que tiene que saltar a la vista es lo otro.
+ *
+ * `uta` va en azul —informativo, no alarma—: una cuenta UTA funciona, solo que
+ * por otra API. `transicion` va en ámbar porque sí exige no tocar la cuenta
+ * hasta que Bitget termine el cambio.
+ */
+export const DISTINTIVO_MODO = {
+  classic: { etiqueta: 'V2', fondo: '#f1f4f3', texto: '#8794a0', pista: 'Cuenta clásica · API V2' },
+  uta: {
+    etiqueta: 'UTA',
+    fondo: '#eaf1fd',
+    texto: '#1c5fb8',
+    pista: 'Cuenta unificada · API V3. El cambio a UTA es irreversible.'
+  },
+  transicion: {
+    etiqueta: 'CAMBIANDO',
+    fondo: '#fffaef',
+    texto: '#8a6a05',
+    pista:
+      'Bitget está cambiando el modelo de esta cuenta. No se opera mientras dure; termina sola.'
+  }
+} as const;
+
+/**
  * Rejilla del Centro de Monitoreo.
  *
  * Anchuras fijas a propósito: las cifras se comparan en columna entre

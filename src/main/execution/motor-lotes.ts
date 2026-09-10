@@ -45,11 +45,12 @@
 import { randomUUID } from 'node:crypto';
 import Decimal from 'decimal.js';
 import { CONCURRENCIA_MAXIMA } from '@shared/constants';
-import type { AccionLote, Job, Lado, Lote } from '@shared/types';
-import { ErrorBitget } from '../bitget/errors';
+import type { AccionLote, AccountMode, HoldMode, Job, Lado, Lote } from '@shared/types';
+import { detectarModo } from '../bitget/deteccion-modo';
+import { ErrorBitget, esCodigoCatalogado, esRechazoDeNegocio } from '../bitget/errors';
 import type { Mercado } from '../bitget/mercado';
 import type { ClienteBitget } from '../bitget/rest/client';
-import type { Credencial } from '../bitget/rest/signer';
+import { superficieDe, type Credencial } from '../bitget/rest/signer';
 import {
   abrirPosicion,
   cerrarPosicion,
@@ -65,7 +66,8 @@ import {
   ajustarMargen,
   fijarApalancamiento,
   fijarModoMargen,
-  obtenerCuentaSimbolo
+  obtenerCuentaSimbolo,
+  type ApalancamientoFijado
 } from '../bitget/rest/endpoints/cuenta';
 import { obtenerContratos, obtenerTicker, type Contrato } from '../bitget/rest/endpoints/simbolos';
 import {
@@ -145,6 +147,18 @@ const apalancamientoDe = (
  */
 export interface FuenteCuentas {
   cuentaEjecutable(cuentaId: string): CuentaEjecutable | null;
+  /**
+   * La cuenta resulto estar en la superficie contraria a la que tenia guardada.
+   *
+   * Lo descubre el motor al fallar un envio -ver `corregirSuperficie`- y lo
+   * avisa para que el modo corregido se persista: si no, la siguiente casilla,
+   * el barrido y el socket seguirian yendo a la superficie equivocada hasta que
+   * alguien revalidara la credencial a mano.
+   *
+   * Opcional para que una prueba pueda implementar `FuenteCuentas` con un solo
+   * metodo, como hacen hoy varias.
+   */
+  alCorregirModo?(cuentaId: string, modo: AccountMode, holdMode: HoldMode | null): void;
 }
 
 /* ---------------- lo que comparten todos los lotes ---------------- */
@@ -2050,47 +2064,133 @@ export class MotorLotes {
   }
 
   /**
-   * Fija el apalancamiento de un plan aprobado.
+   * El apalancamiento que ese simbolo tiene ahora en esa cuenta.
    *
-   * La mas benigna de las cinco: fijar 150x dos veces deja 150x, asi que un
-   * reenvio no tiene consecuencia y lo indeterminado se resuelve simplemente
-   * leyendo como quedo la cuenta.
+   * El modo lo dice **la respuesta de Bitget**, no la ficha de la cuenta: la
+   * ficha guarda el del primer simbolo del mercado, y leer el campo del modo
+   * equivocado -`isolatedLongLever` en una cuenta cruzada- devuelve un numero
+   * cierto que no es el que se aplica. `null` es «Bitget no lo informa».
+   */
+  private async apalancamientoDelSimbolo(
+    cuenta: CuentaEjecutable,
+    mercado: Mercado,
+    simbolo: string,
+    lado: Lado
+  ): Promise<number | null> {
+    const r = await obtenerCuentaSimbolo(
+      this.cliente,
+      cuenta.credencial,
+      simbolo,
+      mercado.productType,
+      mercado.marginCoin
+    );
+    const vigente =
+      r.datos.marginMode === 'crossed'
+        ? r.datos.crossedMarginLeverage
+        : lado === 'long'
+          ? r.datos.isolatedLongLever
+          : r.datos.isolatedShortLever;
+
+    return vigente == null ? null : Number(vigente);
+  }
+
+  /**
+   * Fija el apalancamiento de un plan aprobado, y **comprueba que quedo fijado**.
+   *
+   * --------------------------------------------------------------------------
+   * Por que no basta con que Bitget responda que si
+   * --------------------------------------------------------------------------
+   * Incidencia del 05/09/2026, con dos cuentas principales: la segunda seguia a
+   * 10x despues de fijarle 150x, y el informe del lote decia que las dos habian
+   * quedado correctas. `set-leverage` respondia `00000` -no habia nada que
+   * reintentar ni error que enseñar- porque se le mandaba `holdSide` sobre una
+   * cuenta en margen **cruzado**: lo que se fijaba era el apalancamiento del
+   * lado aislado, que en cruzado no se usa. El panel confirmaba leyendo
+   * `longLeverage` de la respuesta, que efectivamente traia 150.
+   *
+   * De ahi las dos cosas que hace ahora:
+   *
+   *  - **Manda `holdSide` solo en aislado.** En cruzado hay un apalancamiento y
+   *    no tiene lado.
+   *  - **Confirma contra el campo del modo que Bitget declara** en la propia
+   *    respuesta. Si no cuadra, prueba la otra forma -el modo de la ficha es el
+   *    del primer simbolo del mercado y puede no ser el de este- y, si tampoco,
+   *    la casilla **falla**. Un `exito` que no cambio nada es peor que un fallo:
+   *    manda al operador a abrir con un apalancamiento que no es el suyo.
+   *
+   * Sigue siendo la mas benigna de las cinco: fijar 150x dos veces deja 150x,
+   * asi que ni el segundo intento ni un reenvio tienen consecuencia.
    */
   async ejecutarApalancamiento(
     plan: PlanApalancamiento,
     soloEstos?: readonly string[]
   ): Promise<Lote> {
+    /** Lo que quedo puesto segun la respuesta, o `null` si no se puede saber. */
+    const puestoSegun = (datos: ApalancamientoFijado, lado: Lado): number | null => {
+      /* Sin el modo declarado no se sabe que campo mirar, y adivinarlo es justo
+         lo que hacia pasar por bueno un cambio que no se aplico. */
+      if (datos.marginMode !== 'crossed' && datos.marginMode !== 'isolated') return null;
+      const valor =
+        datos.marginMode === 'crossed'
+          ? datos.crossMarginLeverage
+          : lado === 'long'
+            ? datos.longLeverage
+            : datos.shortLeverage;
+      return valor == null || valor === '' ? null : Number(valor);
+    };
+
     return this.correrLote(plan, 'apalancamiento', soloEstos, {
       enviar: async (cuenta, entrada) => {
-        const r = await fijarApalancamiento(this.cliente, cuenta.credencial, {
-          simbolo: plan.simbolo,
-          productType: plan.mercado.productType,
-          marginCoin: plan.mercado.marginCoin,
-          apalancamiento: entrada.apalancamiento,
-          lado: entrada.lado
-        });
+        /*
+         * Las dos formas de pedirlo, empezando por la del modo que se conoce.
+         * La segunda solo se envia si la primera no cambio nada, asi que el
+         * caso normal sigue costando una peticion.
+         */
+        const formas: (Lado | null)[] =
+          cuenta.modoMargen === 'crossed' ? [null, entrada.lado] : [entrada.lado, null];
 
-        const puesto =
-          entrada.lado === 'long' ? r.datos.longLeverage : r.datos.shortLeverage;
-        return { ordenId: null, mensaje: `Apalancamiento ${puesto ?? entrada.apalancamiento}x` };
+        let puesto: number | null = null;
+        for (const lado of formas) {
+          const r = await fijarApalancamiento(this.cliente, cuenta.credencial, {
+            simbolo: plan.simbolo,
+            productType: plan.mercado.productType,
+            marginCoin: plan.mercado.marginCoin,
+            apalancamiento: entrada.apalancamiento,
+            lado
+          });
+
+          puesto =
+            puestoSegun(r.datos, entrada.lado) ??
+            (await this.apalancamientoDelSimbolo(cuenta, plan.mercado, plan.simbolo, entrada.lado));
+
+          if (puesto === entrada.apalancamiento) {
+            return { ordenId: null, mensaje: `Apalancamiento ${puesto}x` };
+          }
+        }
+
+        throw new ErrorBitget(
+          `Bitget aceptó la petición pero ${plan.simbolo} sigue a ${puesto ?? '?'}x en esta cuenta, ` +
+            `no a ${entrada.apalancamiento}x. No se abrió nada. Compruebe en Bitget el modo de margen ` +
+            'de este activo y que la API Key tenga permiso de futuros.',
+          {
+            clase: 'fatal-cuenta',
+            codigo: null,
+            mensajeOriginal: null,
+            httpStatus: null,
+            reintentarEnMs: null
+          }
+        );
       },
 
       resolver: async (cuenta, entrada) => {
-        const r = await obtenerCuentaSimbolo(
-          this.cliente,
-          cuenta.credencial,
+        const vigente = await this.apalancamientoDelSimbolo(
+          cuenta,
+          plan.mercado,
           plan.simbolo,
-          plan.mercado.productType,
-          plan.mercado.marginCoin
+          entrada.lado
         );
-        const vigente =
-          cuenta.modoMargen === 'crossed'
-            ? r.datos.crossedMarginLeverage
-            : entrada.lado === 'long'
-              ? r.datos.isolatedLongLever
-              : r.datos.isolatedShortLever;
 
-        if (Number(vigente) === entrada.apalancamiento) {
+        if (vigente === entrada.apalancamiento) {
           return {
             estado: 'exito',
             ordenId: null,
@@ -2278,6 +2378,117 @@ export class MotorLotes {
   }
 
   /**
+   * ¿Puede este fallo ser «esta clave no habla esta API»?
+   *
+   * ==========================================================================
+   * Se pregunta por descarte, porque el codigo exacto no se conoce
+   * ==========================================================================
+   * Ninguno de los 22 codigos del catalogo significa «superficie equivocada»:
+   * hasta la migracion no habia dos superficies. El codigo real con que V3
+   * rechaza una clave Classic sigue **sin capturar** —§4.1 del documento de
+   * equivalencias— y la Fase A concluyo que sin el no se podia implementar esto.
+   *
+   * La salida es no depender de el. Un codigo **ausente del catalogo** es
+   * precisamente donde tiene que caer ese rechazo desconocido, y un codigo
+   * presente prueba lo contrario: si Bitget dijo «saldo insuficiente» o «IP no
+   * autorizada», el problema no es la superficie y no hay nada que corregir.
+   *
+   * Las tres condiciones, y ninguna sobra:
+   *
+   *   fatal-cuenta        un `retryable` ya se reintenta solo; un
+   *                       `indeterminada` **no se puede** reenviar, y un
+   *                       `fatal-lote` es de los parametros, iguales en las dos
+   *                       superficies.
+   *   rechazo de negocio  prueba que Bitget recibio la peticion y no la
+   *                       ejecuto. Excluye `ESQUEMA` -donde la operacion pudo
+   *                       ejecutarse- y los cortes de transporte. Es lo unico
+   *                       que hace seguro reenviar una escritura.
+   *   sin catalogar       ver arriba.
+   */
+  private pareceSuperficieEquivocada(e: ErrorBitget): boolean {
+    return (
+      e.clase === 'fatal-cuenta' &&
+      esRechazoDeNegocio(e) &&
+      e.codigo !== null &&
+      !esCodigoCatalogado(e.codigo)
+    );
+  }
+
+  /**
+   * Le pregunta a Bitget de que tipo es esta cuenta y corrige si hacia falta.
+   *
+   * ==========================================================================
+   * No se adivina: se comprueba
+   * ==========================================================================
+   * `detectarModo` consulta `GET /api/v3/account/settings`, que es el oraculo:
+   * si responde, la clave es UTA; si la rechaza por negocio, es clasica. Eso
+   * **prueba** en que superficie esta la cuenta, en vez de deducirlo de un
+   * codigo de error que nadie ha visto.
+   *
+   * Devuelve `true` solo si el modo real difiere del que llevaba la credencial.
+   * En ese caso el envio anterior fue a la API equivocada, y por tanto:
+   *
+   *  1. No pudo ejecutarse —una clave UTA no puede operar en V2 ni al reves—.
+   *  2. Reenviar es seguro, y ademas va con **el mismo `clientOid`**: `entrada`
+   *     no se toca, asi que si por lo que fuera hubiera entrado algo, Bitget
+   *     rechaza el identificador repetido en vez de duplicar la posicion. Es la
+   *     misma red que protege el reintento por `retryable`.
+   *
+   * Si el modo coincide, no habia nada que corregir y el fallo era de verdad lo
+   * que decia ser: se devuelve `false` y la casilla falla con su mensaje.
+   *
+   * --------------------------------------------------------------------------
+   * Que pasa si el oraculo tampoco responde
+   * --------------------------------------------------------------------------
+   * `detectarModo` lanza ante un fallo reintentable —red, 429— en vez de
+   * concluir nada, que es lo correcto: concluir «clasica» por un corte de red
+   * dejaria una cuenta UTA hablando V2 para siempre. Aqui se traga ese fallo y
+   * se devuelve `false`, de modo que la casilla falla con el error original. No
+   * se pierde informacion: se pierde una oportunidad de corregir.
+   */
+  private async corregirSuperficie(cuenta: CuentaEjecutable): Promise<boolean> {
+    let deteccion;
+    try {
+      deteccion = await detectarModo(this.cliente, cuenta.credencial);
+    } catch {
+      return false;
+    }
+
+    /*
+     * Una cuenta en transicion no opera en ninguna de las dos superficies. No se
+     * corrige nada -no hay a que corregir- y la casilla falla con su motivo
+     * original, que es lo que el operador tiene que ver.
+     */
+    if (deteccion.modo === 'transicion') return false;
+
+    /*
+     * `indeterminado` es «no se pudo preguntar»: V3 rechazo el sobre de
+     * autenticacion -IP, firma, passphrase-, que falla igual en las dos
+     * superficies. Cambiar de superficie no arreglaria nada y reenviar seria
+     * gastar otra peticion para el mismo rechazo.
+     */
+    if (deteccion.modo === 'indeterminado') return false;
+
+    const superficieReal = deteccion.modo === 'uta' ? 'v3' : 'v2';
+    if (superficieDe(cuenta.credencial) === superficieReal) return false;
+
+    /*
+     * Se corrige la credencial **de esta ejecucion**, que es la que usara el
+     * reenvio inmediato, y se avisa a la sesion para que lo persista. Sin lo
+     * segundo, la siguiente casilla del mismo lote volveria a fallar y a gastar
+     * otra deteccion.
+     */
+    cuenta.credencial = {
+      ...cuenta.credencial,
+      superficie: superficieReal,
+      holdMode: deteccion.holdMode
+    };
+
+    this.fuente.alCorregirModo?.(cuenta.cuentaId, deteccion.modo, deteccion.holdMode);
+    return true;
+  }
+
+  /**
    * Un objetivo. Nunca lanza: el fallo se escribe en su trabajo.
    *
    * Es lo que sostiene la promesa de que un error en una cuenta no rompe el
@@ -2295,6 +2506,9 @@ export class MotorLotes {
       job.mensaje = 'La subcuenta dejó de estar disponible antes de enviar la orden.';
       return;
     }
+
+    /* La correccion de superficie se intenta una vez por casilla, no por intento. */
+    let superficieCorregida = false;
 
     for (let intento = 1; ; intento += 1) {
       try {
@@ -2364,6 +2578,20 @@ export class MotorLotes {
           }
 
           continue;
+        }
+
+        /*
+         * ¿Y si el fallo es que esta cuenta ya no habla esta API?
+         *
+         * Se comprueba **una sola vez** por casilla, y solo ante un rechazo que
+         * pruebe que la operacion no se ejecuto. Ver `corregirSuperficie`.
+         */
+        if (!superficieCorregida && this.pareceSuperficieEquivocada(e)) {
+          superficieCorregida = true;
+          if (await this.corregirSuperficie(cuenta)) {
+            job.mensaje = null;
+            continue;
+          }
         }
 
         if (e.clase !== 'indeterminada') {

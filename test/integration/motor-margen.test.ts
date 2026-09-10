@@ -93,6 +93,12 @@ class Cuentas implements FuenteCuentas {
     if (c) c.saldoDisponible = saldo;
   }
 
+  /** El modo que trae la ficha de la cuenta, que es el del primer simbolo. */
+  fijarModoMargen(cuentaId: string, modo: 'isolated' | 'crossed'): void {
+    const c = this.mapa.get(cuentaId);
+    if (c) c.modoMargen = modo;
+  }
+
   objetivos(cuantas: number, lado: 'long' | 'short' = 'long'): ObjetivoApertura[] {
     return Array.from({ length: cuantas }, (_, i) => ({
       cuentaId: `cta_${String(i + 1).padStart(3, '0')}`,
@@ -616,7 +622,19 @@ describe('apalancamiento', () => {
     expect(exchange.peticiones.filter((p) => p.url.includes('set-leverage'))).toHaveLength(0);
   });
 
-  it('envia el valor y el lado, y cuenta el resultado', async () => {
+  /*
+   * Margen aislado: el unico modo que el cliente opera, confirmado el
+   * 05/09/2026. De ahi que esta prueba fije tambien el **coste**, y no solo el
+   * resultado: una peticion por casilla y ninguna lectura extra.
+   *
+   * Se puede porque `set-leverage` devuelve `marginMode` y el apalancamiento que
+   * dejo puesto -verificado contra la API real ese mismo dia, en el mercado real
+   * y en el simulado-, asi que el motor confirma con la propia respuesta. Si
+   * algun dia dejara de traerlo, el motor releeria la cuenta para confirmar
+   * -sigue siendo correcto- pero un lote de trescientas casillas pasaria de
+   * trescientas peticiones a seiscientas, y eso hay que enterarse aqui.
+   */
+  it('en aislado confirma con la respuesta: una peticion por casilla y ninguna lectura extra', async () => {
     const cuerpos: Record<string, unknown>[] = [];
     enrutar({
       alApalancar: (c) => {
@@ -632,6 +650,104 @@ describe('apalancamiento', () => {
     expect(resumirLote(lote).exito).toBe(3);
     expect(cuerpos[0]).toMatchObject({ leverage: '125', holdSide: 'long' });
     expect(lote.jobs[0]?.mensaje).toContain('125x');
+
+    /* Tres casillas, tres envios: ni uno de mas. */
+    expect(cuerpos).toHaveLength(3);
+    expect(
+      exchange.peticiones.filter((p) => p.url.startsWith('/api/v2/mix/account/account?'))
+    ).toHaveLength(0);
+  });
+
+  /*
+   * En cruzado hay un solo apalancamiento y no tiene lado. Mandar `holdSide`
+   * era fijar el del lado aislado -que en cruzado no se aplica- y darlo por
+   * bueno leyendo `longLeverage`: la incidencia del 05/09/2026.
+   */
+  it('en margen cruzado no manda el lado y confirma con el apalancamiento cruzado', async () => {
+    cuentas.fijarModoMargen('cta_001', 'crossed');
+    const cuerpos: Record<string, unknown>[] = [];
+    enrutar({
+      alApalancar: (c) => {
+        cuerpos.push(c);
+        return {
+          cuerpo: sobreOk({
+            symbol: SIMBOLO,
+            marginCoin: 'SUSDT',
+            crossMarginLeverage: String(c['leverage']),
+            marginMode: 'crossed'
+          })
+        };
+      }
+    });
+
+    const plan = await motor.planificarApalancamiento(apalancar(1));
+    const lote = await motor.ejecutarApalancamiento(plan);
+
+    expect(resumirLote(lote).exito).toBe(1);
+    expect(cuerpos).toHaveLength(1);
+    expect(cuerpos[0]).not.toHaveProperty('holdSide');
+  });
+
+  /*
+   * La ficha guarda el modo del primer simbolo del mercado, asi que puede no
+   * ser el de este. Cuando no lo es, la primera forma no cambia nada y se
+   * prueba la otra: son dos peticiones y ninguna consecuencia, porque fijar el
+   * mismo valor dos veces deja el mismo valor.
+   */
+  it('si la ficha se equivoca de modo, lo reintenta con la otra forma y queda fijado', async () => {
+    const cuerpos: Record<string, unknown>[] = [];
+    let cruzado = 10;
+    enrutar({
+      alApalancar: (c) => {
+        cuerpos.push(c);
+        /* Con lado, Bitget fija el aislado y deja el cruzado como estaba. */
+        if (c['holdSide'] === undefined) cruzado = Number(c['leverage']);
+        return {
+          cuerpo: sobreOk({
+            symbol: SIMBOLO,
+            marginCoin: 'SUSDT',
+            longLeverage: String(c['leverage']),
+            shortLeverage: String(c['leverage']),
+            crossMarginLeverage: String(cruzado),
+            marginMode: 'crossed'
+          })
+        };
+      }
+    });
+
+    const plan = await motor.planificarApalancamiento(apalancar(1));
+    const lote = await motor.ejecutarApalancamiento(plan);
+
+    expect(resumirLote(lote).exito).toBe(1);
+    expect(cuerpos).toHaveLength(2);
+    expect(cuerpos[0]).toMatchObject({ holdSide: 'long' });
+    expect(cuerpos[1]).not.toHaveProperty('holdSide');
+    expect(lote.jobs[0]?.mensaje).toContain('125x');
+  });
+
+  /*
+   * Un `exito` que no cambio nada es peor que un fallo: manda al operador a
+   * abrir con un apalancamiento que no es el que aprobo.
+   */
+  it('si Bitget acepta y la cuenta no cambia, la casilla falla en vez de darse por buena', async () => {
+    enrutar({
+      alApalancar: () => ({
+        cuerpo: sobreOk({
+          symbol: SIMBOLO,
+          marginCoin: 'SUSDT',
+          longLeverage: '125',
+          shortLeverage: '125',
+          crossMarginLeverage: '10',
+          marginMode: 'crossed'
+        })
+      })
+    });
+
+    const plan = await motor.planificarApalancamiento(apalancar(1));
+    const lote = await motor.ejecutarApalancamiento(plan);
+
+    expect(resumirLote(lote).fallo).toBe(1);
+    expect(lote.jobs[0]?.mensaje).toContain('sigue a 10x');
   });
 
   /*

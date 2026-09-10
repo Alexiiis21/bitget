@@ -25,7 +25,8 @@ import { z as zod } from 'zod';
 import type { Lado } from '@shared/types';
 import type { Mercado } from '../../mercado';
 import type { ClienteBitget, RespuestaRest } from '../client';
-import type { Credencial } from '../signer';
+import { superficieDe, type Credencial } from '../signer';
+import { obtenerPosicionesV3 } from './posiciones-v3';
 
 export const esquemaPosicion = zod.object({
   symbol: zod.string(),
@@ -59,6 +60,15 @@ export function obtenerPosiciones(
   credencial: Credencial,
   mercado: Mercado
 ): Promise<RespuestaRest<PosicionBitget[]>> {
+  /*
+   * El despachador. La superficie sale de la credencial —es una propiedad de la
+   * API Key, ver `signer.ts`— asi que ningun llamante tiene que decidir nada ni
+   * cambia una sola firma. `obtenerPosicionesV3` devuelve esta misma forma.
+   */
+  if (superficieDe(credencial) === 'v3') {
+    return obtenerPosicionesV3(cliente, credencial, mercado);
+  }
+
   return cliente.peticionFirmada(
     credencial,
     {

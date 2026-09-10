@@ -43,11 +43,61 @@ export interface ExchangeSimulado {
    * prioridad sobre la cola; devolver `null` cede el turno a esta.
    */
   responderCon(manejador: ((p: PeticionRecibida) => Respuesta | null) | null): void;
+  /**
+   * Convierte la cuenta simulada en UTA.
+   *
+   * Por defecto el exchange simulado es una cuenta **clasica**: rechaza todo
+   * `/api/v3/*`, que es lo que hace Bitget con una key emitida sobre una cuenta
+   * de las de siempre. Pasar los ajustes la convierte en UTA y
+   * `/api/v3/account/settings` empieza a responderlos; `null` la devuelve a
+   * clasica.
+   *
+   * Los demas `/api/v3/*` pasan entonces por la resolucion normal -manejador,
+   * cola, por defecto-, de modo que una prueba de UTA sigue controlando lo que
+   * responde cada endpoint.
+   */
+  simularUta(ajustes: Record<string, unknown> | null): void;
+  /**
+   * Fija que responde la superficie V3, pase lo que pase.
+   *
+   * Tiene prioridad sobre `simularUta` y sobre el rechazo por defecto, y es la
+   * unica forma de simular en V3 lo que no es ni exito ni rechazo de negocio: un
+   * 429, un 500, un cuerpo ilegible. `null` restaura el comportamiento normal.
+   *
+   * Existe aparte de `responderCon` a proposito: el manejador general **no** ve
+   * las peticiones a V3, para que un manejador escrito para V2 no conteste sin
+   * querer a la deteccion de modo y convierta la cuenta simulada en UTA.
+   */
+  responderV3(respuesta: Respuesta | null): void;
   peticiones: PeticionRecibida[];
   cerrar(): Promise<void>;
 }
 
 const SOBRE_OK = { code: '00000', msg: 'success', requestTime: 1_700_000_000_000, data: {} };
+
+/**
+ * Lo que responde V3 a una key de cuenta clasica.
+ *
+ * ==========================================================================
+ * El codigo concreto esta pendiente de capturar
+ * ==========================================================================
+ * `40404` es un valor de relleno: el codigo real con que V3 rechaza una key
+ * clasica **todavia no se ha observado** -es el hueco 4.1 de
+ * `docs/00-uta-fase-1-equivalencias.md`, y lo resuelve
+ * `node scripts/sondear-v3.mjs --env DEMO`-.
+ *
+ * Que sea de relleno no invalida estas pruebas, y conviene entender por que:
+ * `detectarModo` trata **cualquier** fallo de negocio como cuenta clasica, sin
+ * mirar el codigo. Es correcto por construccion, y por eso se puede probar
+ * antes de conocer el valor. El unico sitio donde el codigo exacto importara es
+ * el reintento cruzado, que es otro paquete.
+ */
+const RECHAZO_V3 = {
+  code: '40404',
+  msg: 'Request URL NOT FOUND',
+  requestTime: 1_700_000_000_000,
+  data: null
+};
 
 export async function iniciarExchangeSimulado(): Promise<ExchangeSimulado> {
   prohibidoEnStaging('El exchange simulado');
@@ -56,6 +106,50 @@ export async function iniciarExchangeSimulado(): Promise<ExchangeSimulado> {
   const peticiones: PeticionRecibida[] = [];
   let porDefecto: Respuesta = { estado: 200, cuerpo: SOBRE_OK };
   let manejador: ((p: PeticionRecibida) => Respuesta | null) | null = null;
+  /** `null` = cuenta clasica, que es el caso por defecto. */
+  let ajustesUta: Record<string, unknown> | null = null;
+  /** Respuesta impuesta a toda la superficie V3, por encima de lo demas. */
+  let respuestaV3: Respuesta | null = null;
+
+  /**
+   * Que responder a una peticion.
+   *
+   * La superficie V3 se decide **antes** que el manejador y la cola, y ese orden
+   * es load-bearing: la deteccion de modo pregunta por `/api/v3/account/settings`
+   * al empezar cada verificacion, y si esa pregunta consumiera un elemento de la
+   * cola FIFO desplazaria todas las respuestas encoladas de la prueba. Una
+   * cuenta clasica -el caso por defecto- rechaza V3 sin gastar cola.
+   */
+  const resolver = (recibida: PeticionRecibida): Respuesta => {
+    if (recibida.url.startsWith('/api/v3/')) {
+      if (respuestaV3 !== null) return respuestaV3;
+      if (ajustesUta === null) return { estado: 200, cuerpo: RECHAZO_V3 };
+
+      if (recibida.url.startsWith('/api/v3/account/settings')) {
+        return {
+          estado: 200,
+          cuerpo: {
+            code: '00000',
+            msg: 'success',
+            requestTime: 1_700_000_000_000,
+            data: ajustesUta
+          }
+        };
+      }
+
+      /*
+       * Los demas endpoints de una cuenta UTA si pasan por el manejador.
+       *
+       * Solo con `simularUta` activo, que es la diferencia que importa: una
+       * prueba que no ha pedido UTA no puede contestar V3 sin querer con un
+       * manejador escrito para V2, y una que si lo ha pedido controla cada
+       * endpoint como en V2.
+       */
+      return manejador?.(recibida) ?? cola.shift() ?? porDefecto;
+    }
+
+    return manejador?.(recibida) ?? cola.shift() ?? porDefecto;
+  };
 
   const servidor: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const trozos: Buffer[] = [];
@@ -69,7 +163,7 @@ export async function iniciarExchangeSimulado(): Promise<ExchangeSimulado> {
       };
       peticiones.push(recibida);
 
-      const respuesta = manejador?.(recibida) ?? cola.shift() ?? porDefecto;
+      const respuesta = resolver(recibida);
       const emitir = (): void => {
         const cuerpo =
           typeof respuesta.cuerpo === 'string'
@@ -101,6 +195,12 @@ export async function iniciarExchangeSimulado(): Promise<ExchangeSimulado> {
     },
     responderCon: (fn) => {
       manejador = fn;
+    },
+    simularUta: (ajustes) => {
+      ajustesUta = ajustes;
+    },
+    responderV3: (respuesta) => {
+      respuestaV3 = respuesta;
     },
     peticiones,
     cerrar: () =>

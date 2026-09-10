@@ -215,10 +215,19 @@ export interface EstadoPanel {
   /**
    * Mercado contra el que opera este panel. Lo dice el proceso principal.
    *
-   * Arranca en `simulado` a propósito: si la consulta al proceso principal
-   * falla, el distintivo de la cabecera dirá «simulado» y no «real». De los dos
-   * errores posibles, el que no se puede cometer es enseñar el mercado de
-   * pruebas cuando se está operando con dinero de verdad.
+   * Arranca en `real` a propósito, y hasta el 03/09/2026 arrancaba en
+   * `simulado` — con este mismo comentario justificándolo, que decía: «de los
+   * dos errores posibles, el que no se puede cometer es enseñar el mercado de
+   * pruebas cuando se está operando con dinero de verdad».
+   *
+   * El principio era el correcto y el valor hacía justo lo contrario. Mientras
+   * la consulta al proceso principal no responda, el distintivo dice MERCADO
+   * REAL: una falsa alarma dura lo que tarda una llamada local —y hace mirar
+   * dos veces—, mientras que una falsa tranquilidad puede costar una orden con
+   * dinero de verdad enviada creyendo que era de pruebas.
+   *
+   * Se vio en vivo el 03/09/2026: con la red caída, un panel arrancado contra
+   * el mercado real enseñaba SIMULADO. Ver `iniciar`.
    */
   mercado: 'real' | 'simulado';
 
@@ -310,6 +319,8 @@ export interface EstadoPanel {
 
   /* ---- pantallas superpuestas ---- */
   apisAbierto: boolean;
+  /** Pantalla de saldos por subcuenta (traspasos, Fase 2). */
+  saldosAbierto: boolean;
   /**
    * La casilla abierta en el detalle, y sobre qué activo.
    *
@@ -421,6 +432,8 @@ export interface EstadoPanel {
 
   abrirApis: () => void;
   cerrarApis: () => void;
+  abrirSaldos: () => void;
+  cerrarSaldos: () => void;
   escribirFormulario: (clave: keyof FormularioApiKey, v: string) => void;
   refrescarApis: () => Promise<void>;
   guardarApi: () => Promise<void>;
@@ -542,7 +555,8 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   tema: temaInicial(),
   coloresEstado: coloresIniciales(),
   coloresAbierto: false,
-  mercado: 'simulado',
+  /* Hasta saberlo de verdad, se avisa. Ver la declaración del campo. */
+  mercado: 'real',
 
   ranuras: [],
   activos: [],
@@ -585,6 +599,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   histSubAbierto: {},
 
   apisAbierto: false,
+  saldosAbierto: false,
   detalle: null,
   batch: null,
   reintentarFallidas: null,
@@ -613,20 +628,49 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   /* ---------------- sesión ---------------- */
 
   iniciar: async () => {
+    /*
+     * --------------------------------------------------------------------
+     * Las dos lecturas van por separado, y no en un `Promise.all`
+     * --------------------------------------------------------------------
+     * Estuvieron juntas hasta el 03/09/2026, y eso convertia un corte de red
+     * en una mentira sobre el mercado. `getSystemInfo` es local -version,
+     * numero de panel y contra que mercado opera-, pero `listAssetSlots` sale
+     * a Bitget; un `Promise.all` rechaza entero en cuanto falla una, asi que
+     * un `ENOTFOUND` en el catalogo se llevaba por delante el `set` completo y
+     * `mercado` se quedaba en su valor inicial.
+     *
+     * El sintoma se vio con la red caida: el panel arrancado con
+     * `--mode staging-real` -mercado real, ordenes con dinero de verdad-
+     * enseñaba la insignia SIMULADO. Es el peor fallo posible de ese
+     * distintivo: no es que no informe, es que tranquiliza al operador
+     * justo cuando no debe.
+     *
+     * Separadas, la insignia depende solo de una llamada que no puede fallar
+     * por red, y el catalogo puede caerse sin arrastrar nada mas.
+     */
     try {
-      const [info, ranuras] = await Promise.all([
-        panelService.getSystemInfo(),
-        panelService.listAssetSlots()
-      ]);
+      const info = await panelService.getSystemInfo();
+      set({ numeroPanel: info.panelNumber, mercado: info.market });
+    } catch {
+      /*
+       * Si ni siquiera esto responde, el IPC esta roto. `mercado` se queda
+       * como estaba, y su valor inicial es el de la alarma, no el de la
+       * tranquilidad: ver la declaracion del estado.
+       */
+    }
+
+    try {
+      const ranuras = await panelService.listAssetSlots();
       const activos = llenas(ranuras);
       const primero = activos[0];
       set((estado) => ({
-        numeroPanel: info.panelNumber,
-        mercado: info.market,
         ranuras,
         activos,
         activoId: primero?.id ?? 'BTC',
-        valores: { ...estado.valores, ap: primero === undefined ? estado.valores.ap : String(primero.maxLeverage) }
+        valores: {
+          ...estado.valores,
+          ap: primero === undefined ? estado.valores.ap : String(primero.maxLeverage)
+        }
       }));
     } catch {
       /* Sin catálogo de activos el selector se queda vacío; no bloquea el login. */
@@ -655,12 +699,19 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     try {
       const resultado = await panelService.unlockVault(contrasena);
       if (!resultado.ok) {
-        set({ errorContrasena: resultado.reason ?? 'No se pudo abrir el almacén de credenciales.' });
+        set({
+          errorContrasena: resultado.reason ?? 'No se pudo abrir el almacén de credenciales.'
+        });
         return;
       }
 
       set({ pantalla: 'panel', contrasena: '', errorContrasena: '' });
-      avisar('ok', 'Sesión iniciada', 'Verificando las API keys registradas de las subcuentas.', `PCB #${numeroPanel}`);
+      avisar(
+        'ok',
+        'Sesión iniciada',
+        'Verificando las API keys registradas de las subcuentas.',
+        `PCB #${numeroPanel}`
+      );
 
       set({ cargaCuentas: 'cargando', motivoCuentas: null });
       try {
@@ -707,7 +758,12 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       get()
         .apiKeys.filter((a) => a.status === 'error')
         .forEach((a) =>
-          avisar('error', `Sin conexión con ${a.subAccountLabel}`, 'La credencial no responde.', `Cuenta ${a.accountName}`)
+          avisar(
+            'error',
+            `Sin conexión con ${a.subAccountLabel}`,
+            'La credencial no responde.',
+            `Cuenta ${a.accountName}`
+          )
         );
     } catch (e) {
       set({ errorContrasena: textoDeError(e) });
@@ -726,6 +782,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       contrasena: '',
       errorContrasena: '',
       apisAbierto: false,
+      saldosAbierto: false,
       seguridadAbierta: false,
       /*
        * El buscador se cierra, pero las ocho casillas se quedan: son la
@@ -845,7 +902,11 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
     set({ cargaCatalogo: 'cargando', motivoCatalogo: null });
     try {
-      set({ catalogo: await panelService.listAssetCatalog(), cargaCatalogo: 'listo', motivoCatalogo: null });
+      set({
+        catalogo: await panelService.listAssetCatalog(),
+        cargaCatalogo: 'listo',
+        motivoCatalogo: null
+      });
     } catch (e) {
       set({ cargaCatalogo: 'error', motivoCatalogo: textoDeError(e) });
     }
@@ -960,8 +1021,10 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       const sel = seleccion[cuenta.id];
       if (!sel) continue;
       cuenta.subAccounts.forEach((sub, i) => {
-        if (alcance !== 'short' && sel.selLong[i]) objetivos.push({ subAccountId: sub.id, side: 'long' });
-        if (alcance !== 'long' && sel.selShort[i]) objetivos.push({ subAccountId: sub.id, side: 'short' });
+        if (alcance !== 'short' && sel.selLong[i])
+          objetivos.push({ subAccountId: sub.id, side: 'long' });
+        if (alcance !== 'long' && sel.selShort[i])
+          objetivos.push({ subAccountId: sub.id, side: 'short' });
       });
     }
     return objetivos;
@@ -973,7 +1036,10 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       const cuenta = s.cuentas.find((c) => c.id === accountId);
       if (!cuenta) return s;
       const n = cuenta.subAccounts.length;
-      const actual = s.seleccion[accountId] ?? { selLong: seleccionVacia(n), selShort: seleccionVacia(n) };
+      const actual = s.seleccion[accountId] ?? {
+        selLong: seleccionVacia(n),
+        selShort: seleccionVacia(n)
+      };
       const todas =
         (!operaLong(s.alcance) || actual.selLong.every(Boolean)) &&
         (!operaShort(s.alcance) || actual.selShort.every(Boolean));
@@ -1008,9 +1074,13 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
       const cuenta = s.cuentas.find((c) => c.id === accountId);
       const n = cuenta?.subAccounts.length ?? 20;
-      const actual = s.seleccion[accountId] ?? { selLong: seleccionVacia(n), selShort: seleccionVacia(n) };
+      const actual = s.seleccion[accountId] ?? {
+        selLong: seleccionVacia(n),
+        selShort: seleccionVacia(n)
+      };
       const marcar = actual[lado][indice] !== true;
-      const aplicar = (lista: boolean[]): boolean[] => lista.map((v, i) => (i === indice ? marcar : v));
+      const aplicar = (lista: boolean[]): boolean[] =>
+        lista.map((v, i) => (i === indice ? marcar : v));
 
       return {
         seleccion: {
@@ -1066,22 +1136,38 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
    * casillas marcadas y que el campo tenga valor.
    */
   planear: async (kind) => {
-    const { objetivosSeleccionados, avisar, valores, activoId, activos, tipoOrden, limitPrice } = get();
+    const { objetivosSeleccionados, avisar, valores, activoId, activos, tipoOrden, limitPrice } =
+      get();
     const targets = objetivosSeleccionados();
     const titulo = TITULOS[kind];
 
     if (targets.length === 0) {
-      avisar('aviso', 'Ninguna casilla seleccionada', 'Marque al menos una casilla sobre los números 1–20 antes de continuar.', `PCB · ${titulo}`);
+      avisar(
+        'aviso',
+        'Ninguna casilla seleccionada',
+        'Marque al menos una casilla sobre los números 1–20 antes de continuar.',
+        `PCB · ${titulo}`
+      );
       return;
     }
 
     const activo = activos.find((a) => a.id === activoId);
     if (!activo) {
-      avisar('error', 'Sin activo', 'No hay ningún activo seleccionado. Vuelva a abrir el panel si la lista está vacía.', `PCB · ${titulo}`);
+      avisar(
+        'error',
+        'Sin activo',
+        'No hay ningún activo seleccionado. Vuelva a abrir el panel si la lista está vacía.',
+        `PCB · ${titulo}`
+      );
       return;
     }
     if (!activo.tradable) {
-      avisar('aviso', 'Activo suspendido', `Bitget tiene ${activo.label} suspendido ahora mismo: no admite órdenes.`, `PCB · ${titulo}`);
+      avisar(
+        'aviso',
+        'Activo suspendido',
+        `Bitget tiene ${activo.label} suspendido ahora mismo: no admite órdenes.`,
+        `PCB · ${titulo}`
+      );
       return;
     }
 
@@ -1089,7 +1175,12 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     const campo = CAMPO_DE[kind];
     const valor = campo === null ? '' : valores[campo].trim();
     if (campo !== null && valor === '') {
-      avisar('aviso', 'Campo vacío', `Escriba un valor en ${titulo} antes de continuar.`, `PCB · ${titulo}`);
+      avisar(
+        'aviso',
+        'Campo vacío',
+        `Escriba un valor en ${titulo} antes de continuar.`,
+        `PCB · ${titulo}`
+      );
       return;
     }
 
@@ -1117,9 +1208,47 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       return;
     }
 
+    /*
+     * Los tres campos de la apertura que viajan como texto y acaban en un
+     * decimal del proceso principal.
+     *
+     * Un punto suelto —lo que queda al teclear el separador y borrar la cifra—
+     * llegaba hasta el planificador y lo reventaba con un `DecimalError` crudo:
+     * no se abría nada, pero el aviso no decía qué campo estaba mal ni se
+     * parecía a un mensaje del panel. Incidencia del 05/09/2026. El proceso
+     * principal ya no se cae por esto —descarta la casilla con su motivo—, pero
+     * decirlo aquí ahorra la consulta de precio y saldo de cada casilla marcada
+     * para llegar a la misma respuesta.
+     */
+    if (kind === 'open') {
+      const malo = (
+        [
+          ['Margen inicial', valores.mgi],
+          ['Margen adicional', valores.mga],
+          ['Take Profit %', valores.tp]
+        ] as const
+      ).find(([, v]) => v.trim() !== '' && !/^\d+(\.\d+)?$/.test(v.trim()));
+
+      if (malo !== undefined) {
+        avisar(
+          'aviso',
+          `${malo[0]}: valor no válido`,
+          `«${malo[1].trim()}» no es un número. Escriba una cifra positiva y sin signo, con el punto ` +
+            'como separador decimal —por ejemplo 10 o 10.5—. No se envió nada.',
+          `PCB · ${titulo}`
+        );
+        return;
+      }
+    }
+
     const apalancamiento = Number.parseFloat(valores.ap);
     if ((kind === 'open' || kind === 'leverage') && !Number.isFinite(apalancamiento)) {
-      avisar('aviso', 'Apalancamiento inválido', 'Escriba el apalancamiento antes de continuar.', `PCB · ${titulo}`);
+      avisar(
+        'aviso',
+        'Apalancamiento inválido',
+        'Escriba el apalancamiento antes de continuar.',
+        `PCB · ${titulo}`
+      );
       return;
     }
 
@@ -1132,7 +1261,8 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
      * respuesta. En cruzado el margen sale del saldo total de la cuenta y lo
      * reparte el propio exchange: no hay nada que agregar por posición.
      */
-    const margenAdicional = kind === 'open' && valores.mga.trim() !== '' ? valores.mga.trim() : null;
+    const margenAdicional =
+      kind === 'open' && valores.mga.trim() !== '' ? valores.mga.trim() : null;
     if (kind === 'open' && margenAdicional !== null && get().modoMargen === 'crossed') {
       avisar(
         'aviso',
@@ -1211,7 +1341,8 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
         avisar(
           'aviso',
           'Ninguna casilla puede recibir esta acción',
-          plan.discards[0]?.reason ?? 'Las casillas seleccionadas no admiten esta operación ahora mismo.',
+          plan.discards[0]?.reason ??
+            'Las casillas seleccionadas no admiten esta operación ahora mismo.',
           `PCB · ${titulo}`
         );
         return;
@@ -1220,7 +1351,12 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       set({ plan, planCargando: false, mensaje: '', pinPaso: '', errorPaso: '', intentosPaso: 0 });
     } catch (e) {
       set({ planCargando: false, plan: null, mensaje: '' });
-      avisar('error', `No se pudo preparar ${titulo.toLowerCase()}`, textoDeError(e), `PCB · ${titulo}`);
+      avisar(
+        'error',
+        `No se pudo preparar ${titulo.toLowerCase()}`,
+        textoDeError(e),
+        `PCB · ${titulo}`
+      );
     }
   },
 
@@ -1263,15 +1399,31 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
         const intentos = intentosPaso + 1;
         if (intentos >= INTENTOS_PASO) {
           set({ plan: null, pinPaso: '', errorPaso: '', intentosPaso: 0 });
-          avisar('error', `${plan.title}: cancelado`, `Se introdujo la contraseña de paso incorrecta ${INTENTOS_PASO} veces. No se envió ninguna orden a Bitget.`, 'Seguridad');
+          avisar(
+            'error',
+            `${plan.title}: cancelado`,
+            `Se introdujo la contraseña de paso incorrecta ${INTENTOS_PASO} veces. No se envió ninguna orden a Bitget.`,
+            'Seguridad'
+          );
           return;
         }
-        set({ pinPaso: '', errorPaso: `Contraseña de paso incorrecta. Intento ${intentos} de ${INTENTOS_PASO}.`, intentosPaso: intentos });
+        set({
+          pinPaso: '',
+          errorPaso: `Contraseña de paso incorrecta. Intento ${intentos} de ${INTENTOS_PASO}.`,
+          intentosPaso: intentos
+        });
         return;
       }
     }
 
-    set({ plan: null, pinPaso: '', errorPaso: '', intentosPaso: 0, enviando: true, mensaje: 'Enviando a Bitget…' });
+    set({
+      plan: null,
+      pinPaso: '',
+      errorPaso: '',
+      intentosPaso: 0,
+      enviando: true,
+      mensaje: 'Enviando a Bitget…'
+    });
     await get().enviarPlan(plan);
   },
 
@@ -1305,7 +1457,11 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
         mensaje: '',
         reintentarFallidas:
           reintentables.length > 0
-            ? async () => get().enviarPlan(plan, reintentables.map((f) => ({ subAccountId: f.subAccountId, side: f.side })))
+            ? async () =>
+                get().enviarPlan(
+                  plan,
+                  reintentables.map((f) => ({ subAccountId: f.subAccountId, side: f.side }))
+                )
             : null
       });
 
@@ -1330,16 +1486,34 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       if (plan.kind === 'open' && r.ok > 0) reproducirCajaRegistradora();
 
       if (r.undetermined.length > 0) {
-        avisar('aviso', 'Hay casillas sin confirmar', `${casillas(r.undetermined.length)} se enviaron y no se pudo averiguar si entraron. Compruébelas en Bitget antes de repetir: reintentarlas a ciegas podría duplicarlas.`, `PCB · ${plan.title}`);
+        avisar(
+          'aviso',
+          'Hay casillas sin confirmar',
+          `${casillas(r.undetermined.length)} se enviaron y no se pudo averiguar si entraron. Compruébelas en Bitget antes de repetir: reintentarlas a ciegas podría duplicarlas.`,
+          `PCB · ${plan.title}`
+        );
       } else if (r.failures.length === 0) {
-        avisar('ok', `${plan.title}: correcto`, `${casillas(r.ok)} completadas.`, `PCB · ${plan.title}`);
+        avisar(
+          'ok',
+          `${plan.title}: correcto`,
+          `${casillas(r.ok)} completadas.`,
+          `PCB · ${plan.title}`
+        );
       } else {
-        avisar('error', `${plan.title}: con errores`, `${r.ok} correctas y ${r.failures.length} con error. El detalle está sobre la matriz.`, `PCB · ${plan.title}`);
+        avisar(
+          'error',
+          `${plan.title}: con errores`,
+          `${r.ok} correctas y ${r.failures.length} con error. El detalle está sobre la matriz.`,
+          `PCB · ${plan.title}`
+        );
       }
 
       /* El apalancamiento se conserva; el resto se limpia salvo «valores fijos». */
       if (!get().valoresFijos) {
-        set((s) => ({ valores: { ...s.valores, ...LIMPIA_TRAS[plan.kind] }, limitPrice: plan.kind === 'open' ? '' : s.limitPrice }));
+        set((s) => ({
+          valores: { ...s.valores, ...LIMPIA_TRAS[plan.kind] },
+          limitPrice: plan.kind === 'open' ? '' : s.limitPrice
+        }));
       }
 
       /*
@@ -1363,7 +1537,12 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       if (plan.kind === 'open') get().limpiarSeleccion();
     } catch (e) {
       set({ enviando: false, mensaje: '' });
-      avisar('error', `No se pudo enviar ${plan.title.toLowerCase()}`, textoDeError(e), `PCB · ${plan.title}`);
+      avisar(
+        'error',
+        `No se pudo enviar ${plan.title.toLowerCase()}`,
+        textoDeError(e),
+        `PCB · ${plan.title}`
+      );
     }
   },
 
@@ -1373,7 +1552,6 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
   escribirPin: (v) => set({ pinPaso: v, errorPaso: '' }),
 
-
   /* ---------------- API keys ---------------- */
 
   /* Al abrir, la casilla propuesta es la primera libre de la cuenta de partida. */
@@ -1382,9 +1560,27 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       apisAbierto: true,
       formulario: { ...s.formulario, casilla: primeraCasillaLibre(s.cuentas, s.formulario.cuenta) }
     })),
+  /*
+   * La pantalla de saldos no precarga nada aquí: se lee sola al montarse.
+   *
+   * Es distinta del resto porque su lectura gasta una petición de un cupo de una
+   * cada diez segundos, así que quien decide cuándo se pide es la propia
+   * pantalla —al abrirse y al pulsar Actualizar—, y no el store cada vez que
+   * alguien toca este interruptor.
+   */
+  abrirSaldos: () => set({ saldosAbierto: true }),
+  cerrarSaldos: () => set({ saldosAbierto: false }),
+
   /* Cerrar la pantalla cancela la baja a medio confirmar: su diálogo vive sobre ella. */
   cerrarApis: () =>
-    set({ apisAbierto: false, ultimaValidacion: null, bajaApi: null, pinBaja: '', errorBaja: '', intentosBaja: 0 }),
+    set({
+      apisAbierto: false,
+      ultimaValidacion: null,
+      bajaApi: null,
+      pinBaja: '',
+      errorBaja: '',
+      intentosBaja: 0
+    }),
 
   /*
    * Cambiar de cuenta principal arrastra la casilla propuesta.
@@ -1418,8 +1614,18 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   guardarApi: async () => {
     const { formulario, ocupado, avisar, refrescarApis } = get();
     if (ocupado) return;
-    if (!formulario.subcuenta || !formulario.apiKey || !formulario.secretKey || !formulario.passphrase) {
-      avisar('aviso', 'Faltan datos', 'Complete subcuenta, API Key, Secret Key y Passphrase antes de guardar.', 'Gestión de API keys');
+    if (
+      !formulario.subcuenta ||
+      !formulario.apiKey ||
+      !formulario.secretKey ||
+      !formulario.passphrase
+    ) {
+      avisar(
+        'aviso',
+        'Faltan datos',
+        'Complete subcuenta, API Key, Secret Key y Passphrase antes de guardar.',
+        'Gestión de API keys'
+      );
       return;
     }
 
@@ -1451,7 +1657,12 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       });
 
       if (!resultado.ok) {
-        avisar('error', resultado.verdict === 'rechazada' ? 'Credenciales rechazadas' : 'Credenciales inválidas', resultado.reason ?? 'Bitget no aceptó la credencial.', `Cuenta ${formulario.cuenta}`);
+        avisar(
+          'error',
+          resultado.verdict === 'rechazada' ? 'Credenciales rechazadas' : 'Credenciales inválidas',
+          resultado.reason ?? 'Bitget no aceptó la credencial.',
+          `Cuenta ${formulario.cuenta}`
+        );
         return;
       }
 
@@ -1475,7 +1686,12 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
         }
       }));
       await refrescarApis();
-      avisar('ok', 'API key guardada', `${formulario.subcuenta} se registró en la casilla ${formulario.casilla} de la cuenta ${formulario.cuenta}.`, 'Gestión de API keys');
+      avisar(
+        'ok',
+        'API key guardada',
+        `${formulario.subcuenta} se registró en la casilla ${formulario.casilla} de la cuenta ${formulario.cuenta}.`,
+        'Gestión de API keys'
+      );
       /*
        * Lo que dice de los permisos no se puede ir solo a los cuatro segundos.
        *
@@ -1511,10 +1727,20 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       const resultado = await panelService.testApiKey(id);
       await refrescarApis();
       if (!resultado.ok) {
-        avisar('error', 'Credenciales rechazadas', resultado.reason ?? 'Bitget no aceptó la credencial.', `Cuenta ${fila.accountName}`);
+        avisar(
+          'error',
+          'Credenciales rechazadas',
+          resultado.reason ?? 'Bitget no aceptó la credencial.',
+          `Cuenta ${fila.accountName}`
+        );
         return;
       }
-      avisar('ok', 'Conexión válida', `${fila.subAccountLabel} responde correctamente a la API oficial de Bitget.`, `Cuenta ${fila.accountName}`);
+      avisar(
+        'ok',
+        'Conexión válida',
+        `${fila.subAccountLabel} responde correctamente a la API oficial de Bitget.`,
+        `Cuenta ${fila.accountName}`
+      );
     } catch (e) {
       avisar('error', 'No se pudo probar', textoDeError(e), `Cuenta ${fila.accountName}`);
     }
@@ -1562,7 +1788,8 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       if (hayPaso || bajaApi === null || bajaApi.id !== id) return;
       set({
         bajaApi: { ...bajaApi, hayPaso: false },
-        errorBaja: 'Este panel todavía no tiene contraseña de paso. Fíjela en Seguridad —la misma que pide abrir y cerrar— antes de dar de baja una API key.'
+        errorBaja:
+          'Este panel todavía no tiene contraseña de paso. Fíjela en Seguridad —la misma que pide abrir y cerrar— antes de dar de baja una API key.'
       });
     } catch {
       /*
@@ -1581,7 +1808,9 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     if (bajaApi === null || ocupado) return;
 
     if (!bajaApi.hayPaso) {
-      set({ errorBaja: 'Fije la contraseña de paso en Seguridad antes de dar de baja una API key.' });
+      set({
+        errorBaja: 'Fije la contraseña de paso en Seguridad antes de dar de baja una API key.'
+      });
       return;
     }
     /* La cadena vacía no se manda: el canal la rechazaría, y como error de red. */
@@ -1599,10 +1828,19 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
         const intentos = intentosBaja + 1;
         if (intentos >= INTENTOS_PASO) {
           set({ bajaApi: null, pinBaja: '', errorBaja: '', intentosBaja: 0 });
-          avisar('error', 'Baja cancelada', `Se introdujo la contraseña de paso incorrecta ${INTENTOS_PASO} veces. ${bajaApi.etiqueta} sigue registrada.`, 'Seguridad');
+          avisar(
+            'error',
+            'Baja cancelada',
+            `Se introdujo la contraseña de paso incorrecta ${INTENTOS_PASO} veces. ${bajaApi.etiqueta} sigue registrada.`,
+            'Seguridad'
+          );
           return;
         }
-        set({ pinBaja: '', errorBaja: `Contraseña de paso incorrecta. Intento ${intentos} de ${INTENTOS_PASO}.`, intentosBaja: intentos });
+        set({
+          pinBaja: '',
+          errorBaja: `Contraseña de paso incorrecta. Intento ${intentos} de ${INTENTOS_PASO}.`,
+          intentosBaja: intentos
+        });
         return;
       }
 
@@ -1611,10 +1849,20 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
       /* Ya no estaba: la lista de esta pantalla se había quedado vieja. */
       if (desenlace === 'no-estaba') {
-        avisar('aviso', 'No había nada que dar de baja', `${bajaApi.etiqueta} ya no figuraba en el registro de este panel.`, `Cuenta ${bajaApi.cuenta}`);
+        avisar(
+          'aviso',
+          'No había nada que dar de baja',
+          `${bajaApi.etiqueta} ya no figuraba en el registro de este panel.`,
+          `Cuenta ${bajaApi.cuenta}`
+        );
         return;
       }
-      avisar('aviso', 'API key eliminada', `${bajaApi.etiqueta} ya no recibirá órdenes desde este panel.`, `Cuenta ${bajaApi.cuenta}`);
+      avisar(
+        'aviso',
+        'API key eliminada',
+        `${bajaApi.etiqueta} ya no recibirá órdenes desde este panel.`,
+        `Cuenta ${bajaApi.cuenta}`
+      );
     } catch (e) {
       set({ bajaApi: null, pinBaja: '', errorBaja: '', intentosBaja: 0 });
       avisar('error', 'No se pudo eliminar', textoDeError(e), `Cuenta ${bajaApi.cuenta}`);
@@ -1625,7 +1873,15 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
   /* ---------------- seguridad ---------------- */
 
-  abrirSeguridad: () => set({ seguridadAbierta: true, etapaSeguridad: 'maestra', maestraSeguridad: '', errorSeguridad: '', pasoNuevo: '', pasoNuevo2: '' }),
+  abrirSeguridad: () =>
+    set({
+      seguridadAbierta: true,
+      etapaSeguridad: 'maestra',
+      maestraSeguridad: '',
+      errorSeguridad: '',
+      pasoNuevo: '',
+      pasoNuevo2: ''
+    }),
   cerrarSeguridad: () => set({ seguridadAbierta: false, errorSeguridad: '' }),
   escribirMaestraSeguridad: (v) => set({ maestraSeguridad: v, errorSeguridad: '' }),
 
@@ -1652,12 +1908,18 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   },
 
   escribirPasoNuevo: (campo, v) =>
-    set(campo === 'pasoNuevo' ? { pasoNuevo: v, errorSeguridad: '' } : { pasoNuevo2: v, errorSeguridad: '' }),
+    set(
+      campo === 'pasoNuevo'
+        ? { pasoNuevo: v, errorSeguridad: '' }
+        : { pasoNuevo2: v, errorSeguridad: '' }
+    ),
 
   guardarPaso: async () => {
     const { pasoNuevo, pasoNuevo2, avisar } = get();
     if (pasoNuevo.length < MINIMO_PASO) {
-      set({ errorSeguridad: `La contraseña de paso debe tener al menos ${MINIMO_PASO} caracteres.` });
+      set({
+        errorSeguridad: `La contraseña de paso debe tener al menos ${MINIMO_PASO} caracteres.`
+      });
       return;
     }
     if (pasoNuevo !== pasoNuevo2) {
@@ -1667,7 +1929,12 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     try {
       await panelService.setStepPassword(pasoNuevo);
       set({ seguridadAbierta: false, errorSeguridad: '', pasoNuevo: '', pasoNuevo2: '' });
-      avisar('ok', 'Contraseña de paso actualizada', 'Se pedirá esta clave cada vez que se abra o se cierre una posición.', 'Seguridad');
+      avisar(
+        'ok',
+        'Contraseña de paso actualizada',
+        'Se pedirá esta clave cada vez que se abra o se cierre una posición.',
+        'Seguridad'
+      );
     } catch (e) {
       set({ errorSeguridad: textoDeError(e) });
     }
@@ -1675,7 +1942,8 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
   /* ---------------- acordeones ---------------- */
 
-  alternarCmp: (accountId) => set((s) => ({ cmpAbierto: { ...s.cmpAbierto, [accountId]: !s.cmpAbierto[accountId] } })),
+  alternarCmp: (accountId) =>
+    set((s) => ({ cmpAbierto: { ...s.cmpAbierto, [accountId]: !s.cmpAbierto[accountId] } })),
 
   alternarHist: async (accountId) => {
     const abrira = !get().histAbierto[accountId];
@@ -1707,9 +1975,13 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     }
   },
 
-  alternarHistSub: (subAccountId) => set((s) => ({ histSubAbierto: { ...s.histSubAbierto, [subAccountId]: !s.histSubAbierto[subAccountId] } })),
+  alternarHistSub: (subAccountId) =>
+    set((s) => ({
+      histSubAbierto: { ...s.histSubAbierto, [subAccountId]: !s.histSubAbierto[subAccountId] }
+    })),
 
-  abrirDetalle: (accountId, subAccountId, assetId) => set({ detalle: { accountId, subAccountId, assetId } }),
+  abrirDetalle: (accountId, subAccountId, assetId) =>
+    set({ detalle: { accountId, subAccountId, assetId } }),
   cerrarDetalle: () => set({ detalle: null }),
 
   reintentarConexion: (accountId, subAccountId) => {
@@ -1717,7 +1989,12 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     const cuenta = cuentas.find((c) => c.id === accountId);
     const sub = cuenta?.subAccounts.find((s) => s.id === subAccountId);
     if (!cuenta || !sub) return;
-    avisar('ok', 'Reintentando conexión', `Se envió una nueva solicitud de sincronización a ${sub.label}.`, cuenta.name);
+    avisar(
+      'ok',
+      'Reintentando conexión',
+      `Se envió una nueva solicitud de sincronización a ${sub.label}.`,
+      cuenta.name
+    );
     set({ detalle: null });
   },
 

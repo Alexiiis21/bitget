@@ -120,24 +120,61 @@ const truncar = (valor: Decimal, decimales: number): Decimal =>
   valor.toDecimalPlaces(decimales, Decimal.ROUND_DOWN);
 
 /**
+ * Cantidad valida, o `null` si eso no es un numero.
+ *
+ * --------------------------------------------------------------------------
+ * `new Decimal('.')` lanza, y esta funcion promete no lanzar
+ * --------------------------------------------------------------------------
+ * Incidencia del 05/09/2026: un punto suelto en el campo del margen -lo que
+ * queda si se teclea el separador decimal y se borra la cifra- llegaba tal cual
+ * hasta aqui, y `new Decimal` respondia con `[DecimalError] Invalid argument`.
+ * El `||` de antes no protegia: un punto es una cadena no vacia y por tanto
+ * cierta, asi que ni siquiera caia en el `'0'` de respaldo.
+ *
+ * El error subia hasta el manejador de `apertura:planificar` y **se llevaba el
+ * lote entero**, que es justo lo contrario de lo que promete esta funcion: un
+ * problema de una casilla no puede tumbar las otras noventa y nueve. Ahora es
+ * un rechazo con su motivo, como el saldo corto o el nocional minimo.
+ */
+function cantidad(v: string | null | undefined): Decimal | null {
+  if (v == null || v.trim() === '') return null;
+  try {
+    const d = new Decimal(v);
+    return d.isFinite() ? d : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Calcula la cantidad de una apertura, o explica por que no se puede.
  *
  * No lanza: devolver el motivo permite que un lote de 100 cuentas siga con las
  * 99 restantes y le diga al operador exactamente cual fallo y por que.
  */
 export function dimensionarApertura(p: PeticionDimension): ResultadoDimension {
-  const margen = new Decimal(p.margenInicial || '0');
-  const saldo = new Decimal(p.saldoDisponible || '0');
-  const precio = new Decimal(p.precio || '0');
+  const margen = cantidad(p.margenInicial);
+  /* Un saldo ilegible cuenta como cero: no abre, que es el error inofensivo. */
+  const saldo = cantidad(p.saldoDisponible) ?? new Decimal(0);
+  const precio = cantidad(p.precio);
 
   /* ---- 1. el margen, siempre lo primero ---- */
 
-  if (!margen.isFinite() || margen.lessThanOrEqualTo(0)) {
+  if (margen === null || margen.lessThanOrEqualTo(0)) {
     return rechazo('margen-invalido', 'El margen inicial debe ser un número mayor que cero.');
   }
 
-  const adicional = new Decimal(p.margenAdicional ?? '0');
-  if (!adicional.isFinite() || adicional.lessThan(0)) {
+  /*
+   * Sin margen adicional es cero; un margen adicional **ilegible no es cero**.
+   *
+   * Tomarlo por cero abriria la posicion sin el colchon que el operador escribio
+   * y aprobo en la confirmacion, que es el error que no se puede cometer aqui.
+   */
+  const adicional =
+    p.margenAdicional == null || p.margenAdicional.trim() === ''
+      ? new Decimal(0)
+      : cantidad(p.margenAdicional);
+  if (adicional === null || adicional.lessThan(0)) {
     return rechazo('margen-invalido', 'El margen adicional debe ser un número mayor que cero.');
   }
 
@@ -180,7 +217,7 @@ export function dimensionarApertura(p: PeticionDimension): ResultadoDimension {
     );
   }
 
-  if (!precio.isFinite() || precio.lessThanOrEqualTo(0)) {
+  if (precio === null || precio.lessThanOrEqualTo(0)) {
     return rechazo('precio-invalido', 'No hay un precio válido para calcular la cantidad.');
   }
 
