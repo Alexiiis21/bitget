@@ -351,6 +351,97 @@ describe('correccion de reloj', () => {
     const fallo = await capturar(() => cliente.sincronizarReloj());
     expect(fallo.codigo).toBe('ESQUEMA');
   });
+
+  /*
+   * El caso del equipo que lleva dias apagado: la hora de Windows quedo atras,
+   * Bitget rechaza cada firma con 40008 y reintentar no arregla un reloj. Sin
+   * esta correccion, las cuentas caian y no habia nada que el operador pudiera
+   * corregir en su credencial, que estaba bien.
+   */
+  it('vuelve a medir el desfase cuando Bitget rechaza la firma por marca caducada', async () => {
+    const local = 1_700_000_000_000;
+    const servidor = local + 8_000;
+
+    const clienteFijo = new ClienteBitget({
+      host: exchange.url,
+      ahora: () => local,
+      timeoutsMs: { conexion: 500, cabeceras: 300, cuerpo: 300 }
+    });
+
+    exchange.responderCon((p) =>
+      p.url.startsWith('/api/v2/public/time')
+        ? { cuerpo: sobreOk({ serverTime: String(servidor) }) }
+        : { cuerpo: sobreError('40008', 'Request timestamp expired') }
+    );
+
+    const fallo = await capturar(() =>
+      clienteFijo.peticionFirmada(
+        CRED,
+        { metodo: 'GET', ruta: '/api/v2/mix/account/account', idempotente: true },
+        esquemaLibre
+      )
+    );
+
+    /* El rechazo llega intacto: medir el reloj no lo sustituye. */
+    expect(fallo.codigo).toBe('40008');
+    expect(fallo.reintentable).toBe(true);
+
+    /* Y el desfase queda medido, que es lo que hace util al reintento. */
+    expect(clienteFijo.relojSincronizado).toBe(true);
+    expect(clienteFijo.desfaseActualMs).toBeCloseTo(8_000, -2);
+
+    await clienteFijo.cerrar();
+  });
+
+  it('mide una sola vez aunque fallen varias cuentas a la vez', async () => {
+    const local = 1_700_000_000_000;
+
+    const clienteFijo = new ClienteBitget({
+      host: exchange.url,
+      ahora: () => local,
+      timeoutsMs: { conexion: 500, cabeceras: 300, cuerpo: 300 }
+    });
+
+    exchange.responderCon((p) =>
+      p.url.startsWith('/api/v2/public/time')
+        ? { cuerpo: sobreOk({ serverTime: String(local) }) }
+        : { cuerpo: sobreError('40008', 'Request timestamp expired') }
+    );
+
+    const cuentas = ['bg_una_0000', 'bg_otra_0000', 'bg_tercera_00'].map((apiKey) =>
+      capturar(() =>
+        clienteFijo.peticionFirmada(
+          { ...CRED, apiKey },
+          { metodo: 'GET', ruta: '/api/v2/mix/account/account', idempotente: true },
+          esquemaLibre
+        )
+      )
+    );
+
+    const fallos = await Promise.all(cuentas);
+    expect(fallos.map((f) => f.codigo)).toEqual(['40008', '40008', '40008']);
+
+    const sondas = exchange.peticiones.filter((p) => p.url.startsWith('/api/v2/public/time'));
+    expect(sondas).toHaveLength(1);
+
+    await clienteFijo.cerrar();
+  });
+
+  it('no toca el reloj ante un rechazo que no es de marca de tiempo', async () => {
+    exchange.responder({ cuerpo: sobreError('40018', 'Invalid IP') });
+
+    const fallo = await capturar(() =>
+      cliente.peticionFirmada(
+        CRED,
+        { metodo: 'GET', ruta: '/api/v2/mix/account/account', idempotente: true },
+        esquemaLibre
+      )
+    );
+
+    expect(fallo.codigo).toBe('40018');
+    expect(cliente.relojSincronizado).toBe(false);
+    expect(exchange.peticiones.some((p) => p.url.startsWith('/api/v2/public/time'))).toBe(false);
+  });
 });
 
 /** Captura el `ErrorBitget` de una promesa que debe fallar. */

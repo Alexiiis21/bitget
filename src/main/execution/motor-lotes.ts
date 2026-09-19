@@ -47,6 +47,7 @@ import Decimal from 'decimal.js';
 import { CONCURRENCIA_MAXIMA } from '@shared/constants';
 import type { AccionLote, AccountMode, HoldMode, Job, Lado, Lote } from '@shared/types';
 import { detectarModo } from '../bitget/deteccion-modo';
+import { anotarEvento, cuentaDe } from '../diagnostico/bitacora';
 import { ErrorBitget, esCodigoCatalogado, esRechazoDeNegocio } from '../bitget/errors';
 import type { Mercado } from '../bitget/mercado';
 import type { ClienteBitget } from '../bitget/rest/client';
@@ -140,6 +141,50 @@ const apalancamientoDe = (
       : configuracion.apalancamiento.short;
 
 /**
+ * El peor de varios rechazos seguidos, conservando su clase.
+ *
+ * Lo usa `ejecutarApalancamiento`, que puede intentar dos formas de fijarlo y
+ * quedarse sin ninguna respuesta de negocio. Aplanar los dos rechazos a
+ * `fatal-cuenta` seria perder las dos unicas clases que dan segunda
+ * oportunidad: `retryable` -que `enviarUna` reintenta- e `indeterminada` -que
+ * resuelve releyendo la cuenta-. De ahi el orden: si alguna de las dos formas
+ * quedo en el aire, eso es lo que manda; si no, un transitorio; y si tampoco,
+ * el primero, que es el de la forma que la ficha creia buena.
+ */
+function elMasGrave(rechazos: readonly ErrorBitget[], simbolo: string): ErrorBitget {
+  const elegido =
+    rechazos.find((e) => e.clase === 'indeterminada') ??
+    rechazos.find((e) => e.clase === 'retryable') ??
+    rechazos[0];
+
+  /* Solo puede llamarse tras un rechazo; sin ninguno no habria que decidir nada. */
+  if (elegido === undefined) {
+    throw new ErrorBitget(`No se pudo fijar el apalancamiento de ${simbolo}.`, {
+      clase: 'fatal-cuenta',
+      codigo: null,
+      mensajeOriginal: null,
+      httpStatus: null,
+      reintentarEnMs: null
+    });
+  }
+
+  /*
+   * El mensaje dice que se agotaron las dos formas. Sin eso, el operador lee
+   * «falta un parametro obligatorio» y va a buscar un parametro que el panel
+   * manda bien en una de las dos llamadas.
+   */
+  const agotadas = rechazos.length > 1 ? ' Se probaron las dos formas y Bitget rechazó ambas.' : '';
+
+  return new ErrorBitget(`${elegido.message}${agotadas}`, {
+    clase: elegido.clase,
+    codigo: elegido.codigo,
+    mensajeOriginal: elegido.mensajeOriginal,
+    httpStatus: elegido.httpStatus,
+    reintentarEnMs: elegido.reintentarEnMs
+  });
+}
+
+/**
  * De donde salen las credenciales y los saldos.
  *
  * Es una interfaz y no la `Sesion` directamente para que el motor se pueda
@@ -159,6 +204,19 @@ export interface FuenteCuentas {
    * metodo, como hacen hoy varias.
    */
   alCorregirModo?(cuentaId: string, modo: AccountMode, holdMode: HoldMode | null): void;
+  /**
+   * Por que `cuentaEjecutable` ha devuelto `null`.
+   *
+   * Ese `null` tiene cuatro causas -el panel bloqueado, la cuenta no
+   * registrada, sin credencial, o en mitad del cambio a UTA- y los seis
+   * planificadores las contaban todas como «ya no esta registrada», que en el
+   * caso de la transicion es falso y manda al operador a mirar donde no es.
+   *
+   * Opcional por lo mismo que `alCorregirModo`: hay varias implementaciones de
+   * `FuenteCuentas` en pruebas que no tienen por que saber de esto. Sin ella se
+   * conserva el mensaje de siempre.
+   */
+  motivoNoEjecutable?(cuentaId: string): 'transicion' | 'bloqueada' | 'desconocida';
 }
 
 /* ---------------- lo que comparten todos los lotes ---------------- */
@@ -340,6 +398,15 @@ export type MotivoDescarte =
   | MotivoRechazo
   | MotivoRechazoTp
   | 'cuenta-desconocida'
+  /**
+   * Bitget esta migrando la subcuenta a UTA y no se opera mientras dure.
+   *
+   * Se separa de `cuenta-desconocida` porque no es lo mismo ni para el
+   * operador ni para lo que hay que hacer despues: la cuenta esta bien y
+   * volvera sola, mientras que «ya no esta registrada» manda a revisar el alta
+   * de una credencial que no tiene ningun problema.
+   */
+  | 'cuenta-en-transicion'
   /** No hay posicion abierta de ese lado: no habia nada que cerrar. */
   | 'sin-posicion'
   /** No se pudo consultar que tiene abierto, asi que no se toca. */
@@ -608,7 +675,15 @@ export interface PeticionApalancamiento {
 
 export interface EntradaApalancamiento extends EntradaLote {
   apalancamiento: number;
-  /** El que el panel cree que tiene ahora, si lo sabe. */
+  /**
+   * El modo en que esta **este simbolo** en esta cuenta, leido al planificar.
+   *
+   * De el depende como se pide el cambio -con `holdSide` en aislado, sin el en
+   * cruzado-, asi que viaja en la entrada y no se toma de la ficha de la
+   * cuenta, que es la del primer simbolo del mercado.
+   */
+  modoMargen: ModoMargenApi;
+  /** El que tiene ahora, recien leido, o `null` si Bitget no lo informa. */
   apalancamientoActual: number | null;
 }
 
@@ -783,58 +858,16 @@ export class MotorLotes {
      * cruzado: quien no lo sabe no abre. Abrir a ciegas es lo que reconfiguraba
      * simbolos en silencio.
      */
-    const configuracion = new Map<string, ConfiguracionSimbolo | null>();
-    /*
-     * Por que no se pudo leer, cuenta por cuenta.
-     *
-     * El `catch` se tragaba el motivo y el descarte decia solo «no se pudo
-     * comprobar», sin el mensaje de Bitget. Es el mismo dato que ya llevan
-     * `posiciones-ilegibles` y `planes-ilegibles`, y sin el no hay forma de
-     * distinguir un corte de red de una credencial sin permiso.
-     */
-    const motivoIlegible = new Map<string, string>();
-    const cuentaIds = [...new Set(peticion.objetivos.map((o) => o.cuentaId))];
-
-    /* Por bloques, como los envios: cien cuentas no encolan cien lecturas de golpe. */
-    for (let i = 0; i < cuentaIds.length; i += this.tamanoBloque) {
-      await Promise.all(
-        cuentaIds.slice(i, i + this.tamanoBloque).map(async (cuentaId) => {
-          const cuenta = this.fuente.cuentaEjecutable(cuentaId);
-          if (cuenta === null) return;
-          try {
-            const r = await obtenerCuentaSimbolo(
-              this.cliente,
-              cuenta.credencial,
-              peticion.simbolo,
-              peticion.mercado.productType,
-              peticion.mercado.marginCoin
-            );
-            configuracion.set(cuentaId, {
-              modoMargen: r.datos.marginMode === 'isolated' ? 'isolated' : 'crossed',
-              apalancamiento: {
-                long: r.datos.isolatedLongLever ?? null,
-                short: r.datos.isolatedShortLever ?? null,
-                cruzado: r.datos.crossedMarginLeverage ?? null
-              }
-            });
-          } catch (e) {
-            configuracion.set(cuentaId, null);
-            motivoIlegible.set(cuentaId, e instanceof Error ? e.message : String(e));
-          }
-        })
-      );
-    }
+    const { configuracion, motivoIlegible } = await this.leerConfiguracionPorCuenta(
+      peticion.objetivos,
+      peticion.mercado,
+      peticion.simbolo
+    );
 
     peticion.objetivos.forEach((objetivo, indice) => {
       const cuenta = this.fuente.cuentaEjecutable(objetivo.cuentaId);
       if (cuenta === null) {
-        descartes.push({
-          cuentaId: objetivo.cuentaId,
-          etiqueta: objetivo.cuentaId,
-          lado: objetivo.lado,
-          motivo: 'cuenta-desconocida',
-          mensaje: 'La subcuenta ya no está registrada o no tiene credencial.'
-        });
+        descartes.push(this.descarteDeCuenta(objetivo.cuentaId, objetivo.lado));
         return;
       }
 
@@ -1046,13 +1079,7 @@ export class MotorLotes {
       const cuenta = this.fuente.cuentaEjecutable(cuentaId);
       if (cuenta === null) {
         for (const objetivo of objetivos) {
-          descartes.push({
-            cuentaId,
-            etiqueta: cuentaId,
-            lado: objetivo.lado,
-            motivo: 'cuenta-desconocida',
-            mensaje: 'La subcuenta ya no está registrada o no tiene credencial.'
-          });
+          descartes.push(this.descarteDeCuenta(cuentaId, objetivo.lado));
         }
         continue;
       }
@@ -1161,13 +1188,7 @@ export class MotorLotes {
       const cuenta = this.fuente.cuentaEjecutable(cuentaId);
       if (cuenta === null) {
         for (const objetivo of objetivos) {
-          descartes.push({
-            cuentaId,
-            etiqueta: cuentaId,
-            lado: objetivo.lado,
-            motivo: 'cuenta-desconocida',
-            mensaje: 'La subcuenta ya no está registrada o no tiene credencial.'
-          });
+          descartes.push(this.descarteDeCuenta(cuentaId, objetivo.lado));
         }
         continue;
       }
@@ -1324,13 +1345,7 @@ export class MotorLotes {
       const cuenta = this.fuente.cuentaEjecutable(cuentaId);
       if (cuenta === null) {
         for (const objetivo of objetivos) {
-          descartes.push({
-            cuentaId,
-            etiqueta: cuentaId,
-            lado: objetivo.lado,
-            motivo: 'cuenta-desconocida',
-            mensaje: 'La subcuenta ya no está registrada o no tiene credencial.'
-          });
+          descartes.push(this.descarteDeCuenta(cuentaId, objetivo.lado));
         }
         continue;
       }
@@ -1445,13 +1460,7 @@ export class MotorLotes {
       const cuenta = this.fuente.cuentaEjecutable(cuentaId);
       if (cuenta === null) {
         for (const objetivo of objetivos) {
-          descartes.push({
-            cuentaId,
-            etiqueta: cuentaId,
-            lado: objetivo.lado,
-            motivo: 'cuenta-desconocida',
-            mensaje: 'La subcuenta ya no está registrada o no tiene credencial.'
-          });
+          descartes.push(this.descarteDeCuenta(cuentaId, objetivo.lado));
         }
         continue;
       }
@@ -1583,13 +1592,32 @@ export class MotorLotes {
    * Prepara el ajuste de apalancamiento. **No envia nada.**
    *
    * A diferencia de las otras cuatro, **no hace falta que haya posicion**: es
-   * configuracion de la cuenta y se deja puesta antes de operar. Por eso
-   * tampoco consulta posiciones, y un lote de cien cuentas son cien peticiones
-   * y ninguna consulta previa.
+   * configuracion de la cuenta y se deja puesta antes de operar. Por eso no
+   * consulta posiciones.
    *
-   * Lo unico que se comprueba es el rango del simbolo, que sale del catalogo ya
-   * cacheado: fuera de rango Bitget responde «Leverage ratio exceeded the set
-   * limit», y es una peticion que no hace falta gastar para saber la respuesta.
+   * El rango del simbolo se comprueba **antes de leer nada**, porque sale del
+   * catalogo ya cacheado: fuera de rango Bitget responde «Leverage ratio
+   * exceeded the set limit», y es una peticion que no hace falta gastar para
+   * saber la respuesta.
+   *
+   * --------------------------------------------------------------------------
+   * Por que si lee el modo de margen, desde el 10/09/2026
+   * --------------------------------------------------------------------------
+   * Era la unica de las seis planificaciones que no consultaba nada por cuenta:
+   * se fiaba de la ficha, que guarda el modo del **primer simbolo del mercado**
+   * y solo se refresca al verificar la credencial. Dos subcuentas con el mismo
+   * modo real en el simbolo que se opera podian llegar aqui con fichas
+   * distintas, solo por haberse verificado en momentos distintos, y el motor
+   * las trataba distinto sin que nada en pantalla lo explicara.
+   *
+   * Aparte de eso, es lo que hace que la confirmacion diga la verdad:
+   * `apalancamientoActual` salia de la cache de la verificacion -tambien del
+   * primer simbolo-, asi que el «de tanto a tanto» que aprueba el operador
+   * podia ser de otro activo.
+   *
+   * El coste es el mismo que ya paga la apertura -una lectura por cuenta- y se
+   * recupera en parte: con el modo bueno, la casilla desalineada deja de gastar
+   * dos envios.
    */
   async planificarApalancamiento(peticion: PeticionApalancamiento): Promise<PlanApalancamiento> {
     if (peticion.objetivos.length === 0) {
@@ -1611,6 +1639,13 @@ export class MotorLotes {
       );
     }
 
+    const { configuracion, motivoIlegible } = await this.leerConfiguracionPorCuenta(
+      peticion.objetivos,
+      peticion.mercado,
+      peticion.simbolo,
+      { exigirModoDeclarado: true }
+    );
+
     const id = randomUUID().replace(/-/g, '').slice(0, 12);
     const entradas: EntradaApalancamiento[] = [];
     const descartes: DescartePlan[] = [];
@@ -1618,12 +1653,31 @@ export class MotorLotes {
     peticion.objetivos.forEach((objetivo, indice) => {
       const cuenta = this.fuente.cuentaEjecutable(objetivo.cuentaId);
       if (cuenta === null) {
+        descartes.push(this.descarteDeCuenta(objetivo.cuentaId, objetivo.lado));
+        return;
+      }
+
+      /*
+       * Sin saber el modo no se pide el apalancamiento.
+       *
+       * Podria pedirse igual con el modo de la ficha, y es justo lo que se
+       * acaba de quitar: la ficha es el modo de otro simbolo, asi que degradar
+       * a ella es volver a adivinar. Descartar no cuesta nada aqui -no se mueve
+       * dinero ni se reconfigura nada- y la casilla sale en el informe con el
+       * motivo que dio Bitget.
+       */
+      const config = configuracion.get(objetivo.cuentaId) ?? null;
+      if (config === null) {
         descartes.push({
-          cuentaId: objetivo.cuentaId,
-          etiqueta: objetivo.cuentaId,
+          cuentaId: cuenta.cuentaId,
+          etiqueta: cuenta.etiqueta,
           lado: objetivo.lado,
-          motivo: 'cuenta-desconocida',
-          mensaje: 'La subcuenta ya no está registrada o no tiene credencial.'
+          motivo: 'modo-margen-ilegible',
+          mensaje:
+            `No se pudo comprobar en qué modo de margen está ${peticion.simbolo} en esta cuenta: ` +
+            `${motivoIlegible.get(objetivo.cuentaId) ?? 'motivo desconocido'}. ` +
+            'No se fija el apalancamiento sin saberlo, porque de ello depende cómo hay que pedirlo. ' +
+            'Se puede reintentar.'
         });
         return;
       }
@@ -1634,7 +1688,14 @@ export class MotorLotes {
         lado: objetivo.lado,
         clientOid: clientOidDe(id, indice, objetivo.lado),
         apalancamiento: peticion.apalancamiento,
-        apalancamientoActual: apalancamientoVigente(cuenta, objetivo.lado)
+        modoMargen: config.modoMargen,
+        /*
+         * El que tiene **ahora mismo**, recien leido. Antes salia de la cache
+         * de la ultima verificacion, que es del primer simbolo del mercado: la
+         * confirmacion podia ensenar «10x → 125x» sobre una cuenta que ya
+         * estaba a 125x, o al reves.
+         */
+        apalancamientoActual: apalancamientoDe(config, config.modoMargen, objetivo.lado)
       });
     });
 
@@ -1997,41 +2058,42 @@ export class MotorLotes {
         return { ordenId: null, mensaje: `Margen ${entrada.margenActual} → ${entrada.margenResultante}` };
       },
 
-      /*
-       * Antes de **reenviar** tras un fallo transitorio: ¿ya se aplico?
-       *
-       * Es la red que `set-margin` no trae de fabrica. Un 429 o un `45001` se
-       * clasifican como transitorios y casi siempre significan «no se hizo»,
-       * pero «casi siempre» no basta cuando repetirse mueve el doble del margen
-       * que el operador aprobo y nada lo rechaza. Ver `Maniobra.yaHecha`.
-       */
-      yaHecha: async (cuenta, entrada) => {
-        if (!(await this.margenYaAplicado(cuenta, plan, entrada))) return null;
-        return {
-          ordenId: null,
-          mensaje:
-            `Margen ${entrada.margenActual} → ${entrada.margenResultante}. ` +
-            'Bitget rechazó el envío como transitorio, pero el margen ya constaba aplicado: no se reenvió.'
-        };
-      },
-
-      resolver: async (cuenta, entrada) => {
-        const verbo = plan.direccion === 'quitar' ? 'retirado' : 'agregado';
-        if (await this.margenYaAplicado(cuenta, plan, entrada)) {
+        /*
+         * Antes de **reenviar** tras un fallo transitorio: ¿ya se aplico?
+         *
+         * Es la red que `set-margin` no trae de fabrica. Un 429 o un `45001` se
+         * clasifican como transitorios y casi siempre significan «no se hizo»,
+         * pero «casi siempre» no basta cuando repetirse mueve el doble del margen
+         * que el operador aprobo y nada lo rechaza. Ver `Maniobra.yaHecha`.
+         */
+        yaHecha: async (cuenta, entrada) => {
+          if (!(await this.margenYaAplicado(cuenta, plan, entrada))) return null;
           return {
-            estado: 'exito',
             ordenId: null,
-            mensaje: `Se cortó la conexión al enviar, pero el margen sí quedó ${verbo}.`
+            mensaje:
+              `Margen ${entrada.margenActual} → ${entrada.margenResultante}. ` +
+              'Bitget rechazó el envío como transitorio, pero el margen ya constaba aplicado: no se reenvió.'
+          };
+        },
+
+        resolver: async (cuenta, entrada) => {
+          const verbo = plan.direccion === 'quitar' ? 'retirado' : 'agregado';
+          if (await this.margenYaAplicado(cuenta, plan, entrada)) {
+            return {
+              estado: 'exito',
+              ordenId: null,
+              mensaje: `Se cortó la conexión al enviar, pero el margen sí quedó ${verbo}.`
+            };
+          }
+
+          return {
+            estado: 'fallo',
+            ordenId: null,
+            mensaje: `Se cortó la conexión al enviar y el margen no consta ${verbo}. Se puede reintentar.`
           };
         }
-
-        return {
-          estado: 'fallo',
-          ordenId: null,
-          mensaje: `Se cortó la conexión al enviar y el margen no consta ${verbo}. Se puede reintentar.`
-        };
       }
-    });
+    );
   }
 
   /**
@@ -2071,6 +2133,131 @@ export class MotorLotes {
    * equivocado -`isolatedLongLever` en una cuenta cruzada- devuelve un numero
    * cierto que no es el que se aplica. `null` es «Bitget no lo informa».
    */
+  /**
+   * Como esta configurado este simbolo en cada una de las cuentas del plan.
+   *
+   * --------------------------------------------------------------------------
+   * Una lectura por cuenta, y por que se paga
+   * --------------------------------------------------------------------------
+   * En Bitget el modo de margen y el apalancamiento son **por simbolo**, y la
+   * ficha de la cuenta guarda los del primer simbolo del mercado. Planificar
+   * con la ficha es planificar con el modo de otro activo, que es exactamente
+   * lo que hacia fallar una casilla y no la de al lado sin que nada las
+   * distinguiera salvo cuando se verifico cada credencial.
+   *
+   * Es una lectura por cuenta, no por casilla: long y short de la misma
+   * subcuenta comparten el modo del simbolo.
+   *
+   * `null` en el mapa es «no se pudo leer», que **no** es lo mismo que cruzado.
+   * Quien no lo sabe, no opera.
+   *
+   * `exigirModoDeclarado` distingue a los dos que llaman. La apertura acepta
+   * que Bitget no declare el modo y asume cruzado -su comportamiento de
+   * siempre-; el apalancamiento no puede, porque de ese dato depende con que
+   * forma se pide, y adivinarlo es el defecto que se esta corrigiendo. Importa
+   * de verdad en UTA, donde `obtenerCuentaSimbolo` devuelve cadena vacia si el
+   * simbolo no esta en `symbolConfigList`.
+   */
+  /**
+   * El descarte de una casilla cuya cuenta no se puede operar, con su motivo.
+   *
+   * Estaba escrito seis veces, una por planificacion, y las seis decian «ya no
+   * está registrada» aunque la causa fuera otra. Tenerlo en un sitio es lo que
+   * permite que el mensaje mejore para las seis a la vez.
+   */
+  private descarteDeCuenta(cuentaId: string, lado: Lado): DescartePlan {
+    const motivo = this.fuente.motivoNoEjecutable?.(cuentaId) ?? 'desconocida';
+
+    if (motivo === 'transicion') {
+      return {
+        cuentaId,
+        etiqueta: cuentaId,
+        lado,
+        motivo: 'cuenta-en-transicion',
+        mensaje:
+          'Bitget está migrando esta subcuenta a UTA. No se opera mientras dure, ' +
+          'porque la superficie que responde ahora puede dejar de hacerlo a mitad de la orden. ' +
+          'Inténtelo de nuevo en unos minutos.'
+      };
+    }
+
+    return {
+      cuentaId,
+      etiqueta: cuentaId,
+      lado,
+      motivo: 'cuenta-desconocida',
+      mensaje:
+        motivo === 'bloqueada'
+          ? 'El panel está bloqueado: desbloquéelo para poder operar esta subcuenta.'
+          : 'La subcuenta ya no está registrada o no tiene credencial.'
+    };
+  }
+
+  private async leerConfiguracionPorCuenta(
+    objetivos: readonly { cuentaId: string }[],
+    mercado: Mercado,
+    simbolo: string,
+    opciones: { exigirModoDeclarado?: boolean } = {}
+  ): Promise<{
+    configuracion: Map<string, ConfiguracionSimbolo | null>;
+    motivoIlegible: Map<string, string>;
+  }> {
+    const configuracion = new Map<string, ConfiguracionSimbolo | null>();
+    /*
+     * Por que no se pudo leer, cuenta por cuenta.
+     *
+     * El `catch` se tragaba el motivo y el descarte decia solo «no se pudo
+     * comprobar», sin el mensaje de Bitget. Es el mismo dato que ya llevan
+     * `posiciones-ilegibles` y `planes-ilegibles`, y sin el no hay forma de
+     * distinguir un corte de red de una credencial sin permiso.
+     */
+    const motivoIlegible = new Map<string, string>();
+    const cuentaIds = [...new Set(objetivos.map((o) => o.cuentaId))];
+
+    /* Por bloques, como los envios: cien cuentas no encolan cien lecturas de golpe. */
+    for (let i = 0; i < cuentaIds.length; i += this.tamanoBloque) {
+      await Promise.all(
+        cuentaIds.slice(i, i + this.tamanoBloque).map(async (cuentaId) => {
+          const cuenta = this.fuente.cuentaEjecutable(cuentaId);
+          if (cuenta === null) return;
+          try {
+            const r = await obtenerCuentaSimbolo(
+              this.cliente,
+              cuenta.credencial,
+              simbolo,
+              mercado.productType,
+              mercado.marginCoin
+            );
+
+            if (
+              opciones.exigirModoDeclarado === true &&
+              r.datos.marginMode !== 'isolated' &&
+              r.datos.marginMode !== 'crossed'
+            ) {
+              configuracion.set(cuentaId, null);
+              motivoIlegible.set(cuentaId, 'Bitget no declaró el modo de margen de este activo.');
+              return;
+            }
+
+            configuracion.set(cuentaId, {
+              modoMargen: r.datos.marginMode === 'isolated' ? 'isolated' : 'crossed',
+              apalancamiento: {
+                long: r.datos.isolatedLongLever ?? null,
+                short: r.datos.isolatedShortLever ?? null,
+                cruzado: r.datos.crossedMarginLeverage ?? null
+              }
+            });
+          } catch (e) {
+            configuracion.set(cuentaId, null);
+            motivoIlegible.set(cuentaId, e instanceof Error ? e.message : String(e));
+          }
+        })
+      );
+    }
+
+    return { configuracion, motivoIlegible };
+  }
+
   private async apalancamientoDelSimbolo(
     cuenta: CuentaEjecutable,
     mercado: Mercado,
@@ -2113,13 +2300,22 @@ export class MotorLotes {
    *  - **Manda `holdSide` solo en aislado.** En cruzado hay un apalancamiento y
    *    no tiene lado.
    *  - **Confirma contra el campo del modo que Bitget declara** en la propia
-   *    respuesta. Si no cuadra, prueba la otra forma -el modo de la ficha es el
-   *    del primer simbolo del mercado y puede no ser el de este- y, si tampoco,
-   *    la casilla **falla**. Un `exito` que no cambio nada es peor que un fallo:
+   *    respuesta. Si no cuadra, prueba la otra forma -entre planificar y enviar
+   *    el modo puede haber cambiado desde la app de Bitget- y, si tampoco, la
+   *    casilla **falla**. Un `exito` que no cambio nada es peor que un fallo:
    *    manda al operador a abrir con un apalancamiento que no es el suyo.
    *
    * Sigue siendo la mas benigna de las cinco: fijar 150x dos veces deja 150x,
    * asi que ni el segundo intento ni un reenvio tienen consecuencia.
+   *
+   * --------------------------------------------------------------------------
+   * Por que deja rastro en la bitacora
+   * --------------------------------------------------------------------------
+   * `anotarPeticion` registra ruta, cuenta y codigo, pero **no el cuerpo**, asi
+   * que del log no se podia deducir lo unico que importa cuando alguien dice
+   * «en esa cuenta no cambio»: con que forma se pidio, en que modo estaba el
+   * simbolo y en que quedo. Sin eso, la unica salida es intentar reproducirlo
+   * -y el 10/09/2026 no se pudo-. Va sin secretos: la cuenta viaja enmascarada.
    */
   async ejecutarApalancamiento(
     plan: PlanApalancamiento,
@@ -2146,36 +2342,104 @@ export class MotorLotes {
          * La segunda solo se envia si la primera no cambio nada, asi que el
          * caso normal sigue costando una peticion.
          */
+        /*
+         * El modo sale de la entrada -leido del simbolo al planificar- y no de
+         * la ficha de la cuenta. La segunda forma se conserva igualmente: entre
+         * planificar y enviar el operador puede haber cambiado el modo en la
+         * app de Bitget, y ahi es donde sigue salvando la casilla.
+         */
         const formas: (Lado | null)[] =
-          cuenta.modoMargen === 'crossed' ? [null, entrada.lado] : [entrada.lado, null];
+          entrada.modoMargen === 'crossed' ? [null, entrada.lado] : [entrada.lado, null];
 
+        /*
+         * Un rechazo de la primera forma no puede cerrar la puerta a la otra.
+         *
+         * Antes, un `throw` en la primera se llevaba por delante el intento
+         * bueno: la casilla salia en fallo sin haber probado la forma que
+         * habria funcionado. La segunda forma solo se alcanzaba si la primera
+         * respondia `00000` sin efecto.
+         *
+         * Que lo provoquen o no los parametros depende del modo y de la
+         * cuenta -ver la tabla medida en
+         * `test/fisica/apalancamiento-dos-cuentas.test.ts`- pero el rechazo
+         * puede venir igualmente de un 429 agotado, de un corte, o de una
+         * superficie V3 que pide otra cosa. Sobrevivir a el no cuesta ninguna
+         * peticion en el caso normal.
+         */
+        const rechazos: ErrorBitget[] = [];
+        let respondioAlguna = false;
         let puesto: number | null = null;
         for (const lado of formas) {
-          const r = await fijarApalancamiento(this.cliente, cuenta.credencial, {
-            simbolo: plan.simbolo,
-            productType: plan.mercado.productType,
-            marginCoin: plan.mercado.marginCoin,
-            apalancamiento: entrada.apalancamiento,
-            lado
-          });
+          let respuesta;
+          try {
+            respuesta = await fijarApalancamiento(this.cliente, cuenta.credencial, {
+              simbolo: plan.simbolo,
+              productType: plan.mercado.productType,
+              marginCoin: plan.mercado.marginCoin,
+              apalancamiento: entrada.apalancamiento,
+              lado
+            });
+          } catch (e) {
+            /* Lo que no viene del exchange no se interpreta: sube tal cual. */
+            if (!(e instanceof ErrorBitget)) throw e;
+            rechazos.push(e);
+            anotarEvento({
+              evento: 'apalancamiento',
+              datos: {
+                cuenta: cuentaDe(cuenta.credencial.apiKey),
+                simbolo: plan.simbolo,
+                modoLeido: entrada.modoMargen,
+                forma: lado === null ? 'sin-lado' : 'con-lado',
+                objetivo: entrada.apalancamiento,
+                rechazo: e.codigo ?? 'sin-codigo'
+              }
+            });
+            continue;
+          }
 
+          respondioAlguna = true;
           puesto =
-            puestoSegun(r.datos, entrada.lado) ??
+            puestoSegun(respuesta.datos, entrada.lado) ??
             (await this.apalancamientoDelSimbolo(cuenta, plan.mercado, plan.simbolo, entrada.lado));
+
+          anotarEvento({
+            evento: 'apalancamiento',
+            datos: {
+              cuenta: cuentaDe(cuenta.credencial.apiKey),
+              simbolo: plan.simbolo,
+              modoLeido: entrada.modoMargen,
+              modoDeclarado: respuesta.datos.marginMode ?? null,
+              forma: lado === null ? 'sin-lado' : 'con-lado',
+              objetivo: entrada.apalancamiento,
+              puesto
+            }
+          });
 
           if (puesto === entrada.apalancamiento) {
             return { ordenId: null, mensaje: `Apalancamiento ${puesto}x` };
           }
         }
 
+        /*
+         * Ninguna de las dos llego a respuesta de negocio. Hay que propagar un
+         * error que **conserve la clase**, no envolverlo en `fatal-cuenta`: de
+         * la clase dependen el reintento de `retryable` y la resolucion de
+         * `indeterminada`, y aplanarlas aqui convertiria un corte de red en un
+         * fallo definitivo. Se elige el mas grave de los dos.
+         */
+        if (!respondioAlguna) throw elMasGrave(rechazos, plan.simbolo);
+
+        const rechazada =
+          rechazos.length > 0 ? ` La otra forma fue rechazada: ${rechazos[0]?.message ?? ''}` : '';
+
         throw new ErrorBitget(
           `Bitget aceptó la petición pero ${plan.simbolo} sigue a ${puesto ?? '?'}x en esta cuenta, ` +
-            `no a ${entrada.apalancamiento}x. No se abrió nada. Compruebe en Bitget el modo de margen ` +
-            'de este activo y que la API Key tenga permiso de futuros.',
+            `no a ${entrada.apalancamiento}x. No se abrió nada.${rechazada} Compruebe en Bitget el ` +
+            'modo de margen de este activo y que la API Key tenga permiso de futuros.',
           {
             clase: 'fatal-cuenta',
-            codigo: null,
-            mensajeOriginal: null,
+            codigo: rechazos[0]?.codigo ?? null,
+            mensajeOriginal: rechazos[0]?.mensajeOriginal ?? null,
             httpStatus: null,
             reintentarEnMs: null
           }

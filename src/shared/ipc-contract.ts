@@ -62,6 +62,54 @@ export interface ResultadoImportacionIpc {
   cuentas: number | null;
 }
 
+/**
+ * Un respaldo `.pcbak` encontrado en la carpeta de Documentos.
+ *
+ * Es solo para enseñarlo: **la ruta del archivo no sale del proceso principal**.
+ * El renderer no puede señalar que restaurar, solo pedir que se restaure el que
+ * se le ha enseñado. Mismo criterio que `credenciales:importar`.
+ */
+export interface RespaldoDisponibleIpc {
+  nombre: string;
+  /** Carpeta que lo contiene, para el texto de ayuda de la pantalla. */
+  carpeta: string;
+  creadoEn: string;
+  appVersion: string;
+  cuentas: number | null;
+  mercado: 'real' | 'simulado' | null;
+  /** Numero del panel que lo creo. Se enseña; nunca se restaura. */
+  panelOrigen: number | null;
+  /** Lo hizo una version mas nueva del panel: se enseña, no se ofrece restaurar. */
+  demasiadoNuevo: boolean;
+}
+
+export interface ResultadoRespaldoIpc {
+  ok: boolean;
+  motivo: string | null;
+  mensaje: string;
+  nombre: string | null;
+  carpeta: string | null;
+  cuentas: number | null;
+}
+
+/**
+ * Resultado de restaurar un respaldo.
+ *
+ * `cancelado` solo lo puede traer `respaldo:restaurar-archivo`, que abre un
+ * selector; el automatico nunca cancela. Por eso son dos canales y no uno con
+ * una bandera: un campo que significa algo «a veces» se lee mal seis meses
+ * despues.
+ */
+export interface ResultadoRestauracionIpc {
+  cancelado: boolean;
+  ok: boolean;
+  motivo: string | null;
+  mensaje: string;
+  cuentas: number | null;
+  /** Habia almacen y se aparto. La pantalla lo dice y nombra el archivo. */
+  reemplazo: string | null;
+}
+
 export interface EstadoApp {
   vault: EstadoVault;
   /** Intentos de PIN restantes; `null` si el desbloqueo rapido esta desactivado. */
@@ -354,10 +402,7 @@ export interface PlanTraspasoIpc {
  * lleva un `clientOid` nuevo y reenviarlo moveria el dinero dos veces-.
  */
 export type MotivoFalloTraspaso =
-  | 'paso-incorrecto'
-  | 'sin-credencial'
-  | 'rechazado'
-  | 'indeterminado';
+  'paso-incorrecto' | 'sin-credencial' | 'rechazado' | 'indeterminado';
 
 export interface ResultadoTraspaso {
   ok: boolean;
@@ -834,7 +879,15 @@ export interface EntradaApalancamientoIpc {
   etiqueta: string;
   lado: Lado;
   apalancamiento: number;
-  /** El que el panel cree que tiene ahora, o `null` si no lo sabe. */
+  /**
+   * El modo en que esta **este simbolo** en esta cuenta, leido al planificar.
+   *
+   * Se enseña por el mismo motivo que `modoMargenActual` en la apertura: para
+   * un operador que trabaja en aislado, ver «cruzado» en una casilla es el
+   * primer aviso de que ese activo no esta como cree.
+   */
+  modoMargen: ModoMargenIpc;
+  /** El que tiene ahora, recien leido, o `null` si Bitget no lo informa. */
   apalancamientoActual: number | null;
 }
 
@@ -869,12 +922,45 @@ export interface PeticionesIpc {
    * principal, asi que el renderer no puede señalar una ruta. Ver el manejador.
    */
   'credenciales:importar': () => Promise<ResultadoImportacionIpc>;
+  /**
+   * Guarda todas las credenciales en un `.pcbak` dentro de Documentos.
+   *
+   * No descifra nada: copia el almacen cifrado tal cual. Por eso no pide la
+   * contrasena maestra y por eso funciona con el panel bloqueado.
+   */
+  'respaldo:crear': () => Promise<ResultadoRespaldoIpc>;
+  /** El respaldo que se ofrecera restaurar, o `null` si no hay ninguno. */
+  'respaldo:buscar': () => Promise<RespaldoDisponibleIpc | null>;
+  'respaldo:abrir-carpeta': () => Promise<void>;
+  /**
+   * Restaura el respaldo detectado en Documentos.
+   *
+   * **Exige el panel bloqueado.** Con el almacen abierto en memoria, la
+   * siguiente escritura del vault volcaria el contenido viejo sobre el archivo
+   * recien restaurado y la restauracion se perderia en silencio.
+   *
+   * La maestra solo hace falta si ya hay un almacen que reemplazar: es lo que
+   * demuestra que el almacen que se va a apartar es de quien lo aparta. En un
+   * panel recien estrenado no hay nada que destruir y no se pide.
+   */
+  'respaldo:restaurar': (contrasenaMaestra?: string) => Promise<ResultadoRestauracionIpc>;
+  /** Igual, pero el archivo lo elige el operador en un selector del proceso principal. */
+  'respaldo:restaurar-archivo': (contrasenaMaestra?: string) => Promise<ResultadoRestauracionIpc>;
   'vault:estado': () => Promise<EstadoVault>;
   'vault:crear': (contrasena: string) => Promise<ResultadoVault>;
   'vault:abrir': (contrasena: string) => Promise<ResultadoVault>;
   'vault:cerrar': () => Promise<void>;
   /** Confirma la maestra sin dar acceso: solo para acciones sensibles. */
   'vault:comprobar': (contrasena: string) => Promise<boolean>;
+  /**
+   * Milisegundos que faltan para poder volver a probar la maestra. `0` si ya.
+   *
+   * Tras tres fallos seguidos el panel impone una espera que crece -3, 6, 12,
+   * 24, 48 minutos y tope de una hora- y se borra al acertar. La cuenta la
+   * lleva el proceso principal en disco: la pantalla solo la enseña, y no puede
+   * levantarla recargandose ni cerrando el panel. Ver `security/freno-maestra.ts`.
+   */
+  'vault:espera': () => Promise<number>;
   'cuentas:listar': () => Promise<FilaCuenta[]>;
   'cuentas:agregar': (alta: AltaCuenta) => Promise<ResultadoAlta>;
   /**
@@ -1060,11 +1146,18 @@ export interface ApiPcb {
   sistemaEstado(): Promise<EstadoApp>;
   sistemaFijarNumeroPanel(numero: number): Promise<void>;
   credencialesImportar(): Promise<ResultadoImportacionIpc>;
+  respaldoCrear(): Promise<ResultadoRespaldoIpc>;
+  respaldoBuscar(): Promise<RespaldoDisponibleIpc | null>;
+  respaldoAbrirCarpeta(): Promise<void>;
+  respaldoRestaurar(contrasenaMaestra?: string): Promise<ResultadoRestauracionIpc>;
+  respaldoRestaurarArchivo(contrasenaMaestra?: string): Promise<ResultadoRestauracionIpc>;
   vaultEstado(): Promise<EstadoVault>;
   vaultCrear(contrasena: string): Promise<ResultadoVault>;
   vaultAbrir(contrasena: string): Promise<ResultadoVault>;
   vaultCerrar(): Promise<void>;
   vaultComprobar(contrasena: string): Promise<boolean>;
+  /** Milisegundos que faltan para poder volver a probar la maestra. `0` si ya. */
+  vaultEspera(): Promise<number>;
   cuentasListar(): Promise<FilaCuenta[]>;
   cuentasAgregar(alta: AltaCuenta): Promise<ResultadoAlta>;
   cuentasEliminar(cuentaId: string, contrasenaPaso: string): Promise<ResultadoBaja>;

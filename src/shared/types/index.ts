@@ -50,10 +50,30 @@ export type HoldMode = 'one_way_mode' | 'hedge_mode';
 
 export type EstadoConexion = 'conectada' | 'conectando' | 'desconectada' | 'modo-rest';
 
+/** Una cuenta principal del panel: la etiqueta A..O que agrupa subcuentas. */
 export interface Grupo {
   id: string;
   nombre: string;
+  /**
+   * Indice alfabetico de la cuenta principal. **No lo lee nadie.**
+   *
+   * Quien quiera ordenar cuentas principales usa `compararCuentaMadre`, que
+   * compara por nombre. Este campo se conserva por dos razones y ninguna es
+   * ordenar: que el archivo sea legible, y que un binario anterior pueda seguir
+   * leyendo el `cuentas.json` -su esquema lo exige sin valor por defecto, y sin
+   * el arrancaria con el panel vacio-.
+   *
+   * **No es de fiar.** Hasta el 10/09/2026 se escribia el orden de insercion, y
+   * ademas podia repetirse; los archivos guardados antes de esa fecha lo traen
+   * asi. Ordenar por el es el fallo que se corrigio.
+   */
   orden: number;
+  /**
+   * Vestigio de la especificacion de pestañas de `docs/03-modelo-de-datos.md`
+   * §9, que no se construyo. Se escribe `false` y no se lee jamas: el plegado
+   * real es estado local de `PantallaApis` y se pierde al recargar. Si algun
+   * dia se persiste, este es su sitio.
+   */
   colapsado: boolean;
 }
 
@@ -218,14 +238,21 @@ export interface PosicionMonitor {
   /** Ganancia o perdida no realizada, tal como la informa Bitget. Cadena vacia si no llego. */
   pnl: Decimal;
   /**
-   * Retorno sobre el margen actual, en porcentaje: `pnl / margenActual * 100`.
+   * Retorno sobre el margen inicial, en porcentaje.
    *
    * Bitget no manda este numero -a diferencia del P&L, no hay campo `roe` en
    * `all-position` ni en el canal `positions`-, asi que lo deriva el proceso
-   * principal contra el margen que el exchange informa ahora mismo, no contra
-   * `margenInicial`: ese es del panel y sale `null` en una posicion que ya
-   * estaba abierta al arrancar, y el ROE tiene que poder leerse en cualquier
-   * posicion viva. `null` sin P&L conocido o con margen cero o desconocido.
+   * principal: `pnl / (tamano x entrada / apalancamiento) x 100`.
+   *
+   * El divisor es el margen con el que se abrio la posicion, que es el que usa
+   * Bitget, y **no** `margenActual`: agregar margen a una punta no mueve su ROE
+   * en la app. Tampoco es el campo `margenInicial` de aqui al lado, que es del
+   * panel y sale `null` en una posicion que ya estaba abierta al arrancar; este
+   * se deriva de tres campos que el exchange manda siempre, asi que se puede
+   * leer en cualquier posicion viva. Ver `Sesion.roeDe` para la medicion que lo
+   * fija y el fallo del 10/09/2026 que corrige.
+   *
+   * `null` sin P&L conocido o cuando no se puede formar el divisor.
    */
   roe: number | null;
   apalancamiento: number;

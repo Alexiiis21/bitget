@@ -46,6 +46,9 @@ import type {
   PlanDiscard,
   PlanKind,
   ImportResult,
+  BackupInfo,
+  BackupResult,
+  RestoreResult,
   Position,
   PositionSnapshot,
   SystemInfo,
@@ -302,6 +305,26 @@ const MOTIVO_VAULT_A_TEXTO: Record<string, string> = {
   'no-existe': 'No hay ningún almacén de credenciales en este equipo.',
   'ya-existe': 'Ya existe un almacén de credenciales en este equipo.'
 };
+
+/**
+ * Los dos canales de restauración devuelven lo mismo; solo cambia de dónde sale
+ * el archivo. La traducción se escribe una vez.
+ */
+const aRestauracion = (r: {
+  cancelado: boolean;
+  ok: boolean;
+  motivo: string | null;
+  mensaje: string;
+  cuentas: number | null;
+  reemplazo: string | null;
+}): RestoreResult => ({
+  cancelled: r.cancelado,
+  ok: r.ok,
+  reason: r.motivo,
+  message: r.mensaje,
+  accounts: r.cuentas,
+  replaced: r.reemplazo
+});
 
 export class IpcPanelService implements PanelService {
   /* ---------------- sistema ---------------- */
@@ -933,6 +956,45 @@ export class IpcPanelService implements PanelService {
     };
   }
 
+  async backupAccounts(): Promise<BackupResult> {
+    const r = await window.pcb.respaldoCrear();
+    return {
+      ok: r.ok,
+      reason: r.motivo,
+      message: r.mensaje,
+      fileName: r.nombre,
+      folder: r.carpeta,
+      accounts: r.cuentas
+    };
+  }
+
+  async findBackup(): Promise<BackupInfo | null> {
+    const r = await window.pcb.respaldoBuscar();
+    if (r === null) return null;
+    return {
+      fileName: r.nombre,
+      folder: r.carpeta,
+      createdAt: r.creadoEn,
+      appVersion: r.appVersion,
+      accounts: r.cuentas,
+      market: r.mercado,
+      panel: r.panelOrigen,
+      tooNew: r.demasiadoNuevo
+    };
+  }
+
+  async openBackupFolder(): Promise<void> {
+    return window.pcb.respaldoAbrirCarpeta();
+  }
+
+  async restoreBackup(masterPassword?: string): Promise<RestoreResult> {
+    return aRestauracion(await window.pcb.respaldoRestaurar(masterPassword));
+  }
+
+  async restoreBackupFromFile(masterPassword?: string): Promise<RestoreResult> {
+    return aRestauracion(await window.pcb.respaldoRestaurarArchivo(masterPassword));
+  }
+
   async unlockVault(masterPassword: string): Promise<UnlockResult> {
     const estado = await window.pcb.vaultEstado();
     const resultado =
@@ -945,6 +1007,10 @@ export class IpcPanelService implements PanelService {
 
   async verifyMasterPassword(masterPassword: string): Promise<boolean> {
     return window.pcb.vaultComprobar(masterPassword);
+  }
+
+  async masterCooldownMs(): Promise<number> {
+    return window.pcb.vaultEspera();
   }
 
   async verifyStepPassword(pwd: string): Promise<boolean> {

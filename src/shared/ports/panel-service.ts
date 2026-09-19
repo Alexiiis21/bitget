@@ -54,6 +54,9 @@ import type {
   TransferRecord,
   TransferResult,
   ImportResult,
+  BackupInfo,
+  BackupResult,
+  RestoreResult,
   PositionSnapshot,
   SystemInfo,
   TpRequest,
@@ -250,9 +253,43 @@ export interface PanelService {
    */
   importCredentials(): Promise<ImportResult>;
 
+  /**
+   * Guarda todas las subcuentas en un archivo dentro de Documentos.
+   *
+   * No descifra nada: el almacén va cifrado tal cual, así que la contraseña
+   * maestra **no está dentro del archivo** y sin ella no sirve de nada. La
+   * pantalla tiene que decirlo donde el operador lo lea.
+   */
+  backupAccounts(): Promise<BackupResult>;
+
+  /** El respaldo que el panel ha encontrado solo, o `null` si no hay ninguno. */
+  findBackup(): Promise<BackupInfo | null>;
+
+  openBackupFolder(): Promise<void>;
+
+  /**
+   * Restaura el respaldo detectado. **Solo con el panel bloqueado.**
+   *
+   * `masterPassword` es la de *este* panel y solo hace falta si ya hay un
+   * almacén que reemplazar; en un panel recién estrenado no hay nada que
+   * destruir y se restaura de un clic.
+   */
+  restoreBackup(masterPassword?: string): Promise<RestoreResult>;
+
+  /** Igual, pero el archivo lo elige el operador en un selector del sistema. */
+  restoreBackupFromFile(masterPassword?: string): Promise<RestoreResult>;
+
   unlockVault(masterPassword: string): Promise<UnlockResult>;
   /** Confirma la maestra sin dar acceso: para acciones sensibles con la sesión ya abierta. */
   verifyMasterPassword(masterPassword: string): Promise<boolean>;
+  /**
+   * Milisegundos que faltan para poder volver a probar la maestra. `0` si ya.
+   *
+   * Tras tres fallos seguidos hay una espera que crece con cada uno. La cuenta
+   * la lleva el proceso principal y sobrevive a cerrar el panel: esto solo la
+   * consulta para poder enseñarla. Ver `shared/espera-maestra.ts`.
+   */
+  masterCooldownMs(): Promise<number>;
   verifyStepPassword(pwd: string): Promise<boolean>;
   setStepPassword(pwd: string): Promise<void>;
 }

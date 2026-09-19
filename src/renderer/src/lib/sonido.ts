@@ -1,5 +1,5 @@
 /**
- * El «ka-ching» de caja registradora que suena al abrir posiciones.
+ * El «ka-ching» de caja registradora que suena al abrir y al cerrar posiciones.
  *
  * --------------------------------------------------------------------------
  * Suena una vez por lote, no una vez por posición
@@ -10,6 +10,9 @@
  * oír es «el lote entró», y eso ocurre una sola vez: en `enviarPlan`, cuando
  * vuelve el informe. Por eso este módulo no sabe nada de órdenes ni de
  * casillas, y `reproducirCajaRegistradora` no lleva argumentos.
+ *
+ * Quién lo dispara y con qué condición está en `store/panel.ts`, junto al
+ * informe del lote: aquí solo se sabe sonar.
  *
  * --------------------------------------------------------------------------
  * El archivo se descubre, no se importa

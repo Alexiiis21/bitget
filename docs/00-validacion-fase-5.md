@@ -137,13 +137,18 @@ A cambio, ninguna clave entra en silencio:
 
 Dos cosas que se pidieron juntas.
 
-**Desmarcar tras abrir:**
+**Desmarcar tras abrir y tras cerrar:**
 
 - [ ] **13a.** Marcar varias casillas y abrir. *Debe verse:* al terminar, **ninguna queda marcada**.
       La siguiente acción ya no puede caer sobre ellas por descuido.
+- [ ] **13a-bis.** Marcar varias casillas **con posición abierta** y cerrar. *Debe verse:* al
+      terminar, **ninguna queda marcada** —tampoco si el lote salió a medias: las fallidas se
+      recuperan con «Reintentar solo las fallidas», no con las casillas tildadas—. Añadido el
+      11/09/2026: hasta entonces solo desmarcaba la apertura y había que destildar a mano tras cada
+      cierre.
 - [ ] **13b.** Marcar casillas y usar otra operación —poner Take Profit, o apalancamiento—. *Debe
-      verse:* la selección **se conserva**. Solo abrir la deshace, para poder encadenar dos ajustes
-      sobre las mismas casillas.
+      verse:* la selección **se conserva**. Solo abrir y cerrar la deshacen, para poder encadenar
+      dos ajustes sobre las mismas casillas.
 
 **Margen adicional sin saldo:**
 

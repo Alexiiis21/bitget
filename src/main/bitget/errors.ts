@@ -30,6 +30,16 @@ export type ClaseError = 'retryable' | 'fatal-cuenta' | 'fatal-lote' | 'omitida'
 /** Codigo que devuelve Bitget cuando todo fue bien. */
 export const CODIGO_EXITO = '00000';
 
+/**
+ * Bitget rechazo la firma porque su marca de tiempo quedo fuera de ventana.
+ *
+ * Se exporta -y no se deja como literal suelto en el catalogo- porque el
+ * cliente REST lo mira por su cuenta: es el unico codigo ante el que vuelve a
+ * medir el desfase de reloj antes de que nadie reintente. Ver
+ * `rest/client.ts`, `corregirReloj`.
+ */
+export const CODIGO_MARCA_CADUCADA = '40008';
+
 export interface DatosErrorBitget {
   clase: ClaseError;
   /** Codigo crudo del exchange, o `null` si el fallo fue de transporte. */
@@ -122,7 +132,7 @@ const CATALOGO: Record<string, { clase: ClaseError; mensaje: string }> = {
   '40037': { clase: 'fatal-cuenta', mensaje: 'La API Key no existe.' },
 
   /* ---- reloj: se corrige solo, conviene reintentar ---- */
-  '40008': {
+  [CODIGO_MARCA_CADUCADA]: {
     clase: 'retryable',
     mensaje: 'La marca de tiempo expiro. Se reintenta con el reloj corregido.'
   },

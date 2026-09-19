@@ -1,5 +1,5 @@
 import { useId, useState, type CSSProperties } from 'react';
-import { NOMBRES_CUENTA_MADRE, SUBCUENTAS_POR_GRUPO } from '@shared/constants';
+import { compararCuentaMadre, NOMBRES_CUENTA_MADRE, SUBCUENTAS_POR_GRUPO } from '@shared/constants';
 import type { Account, ApiKeyRow } from '@shared/domain/panel-view';
 import { BOTON_PRIMARIO, DISTINTIVO_API, DISTINTIVO_MODO, FUENTE, T } from '@/lib/tokens';
 import { usarPanel } from '@/store/panel';
@@ -223,14 +223,17 @@ function Detectado({
  * el que busca. La casilla no viaja en `ApiKeyRow`, asi que sale de la matriz;
  * lo que no este en ella —una ficha recien dada de alta, antes del refresco—
  * cae al final del bloque en vez de desaparecer.
+ *
+ * El orden **entre** bloques ya no se decide aqui. Vivio en esta pantalla hasta
+ * el 10/09/2026, y esa fue justo la razon de que la matriz —que lo resolvia por
+ * su cuenta, por antiguedad— acabara enseñando las cuentas principales en otro
+ * orden y el cliente lo reportara. Ahora lo pone `compararCuentaMadre`, que
+ * usan las dos, asi que no pueden discrepar.
  */
 interface BloqueApis {
   nombre: string;
   filas: ApiKeyRow[];
 }
-
-/** Donde va cada cuenta principal en la lista. Las de fuera de A–O, al final. */
-const ORDEN_MADRE = new Map(NOMBRES_CUENTA_MADRE.map((n, i) => [n, i]));
 
 /** La casilla de cada subcuenta, tal como la ordena la matriz. */
 function casillasDe(cuentas: readonly Account[]): Map<string, number> {
@@ -255,10 +258,9 @@ function agruparPorCuenta(
   /* Sin casilla conocida, al final del bloque: `MAX_SAFE_INTEGER` y no `Infinity`
      porque la resta de dos infinitos es `NaN` y desordenaría el bloque entero. */
   const casilla = (id: string): number => casillas.get(id) ?? Number.MAX_SAFE_INTEGER;
-  const posicion = (nombre: string): number => ORDEN_MADRE.get(nombre) ?? NOMBRES_CUENTA_MADRE.length;
 
   return [...bloques.entries()]
-    .sort(([a], [b]) => posicion(a) - posicion(b) || a.localeCompare(b, 'es'))
+    .sort(([a], [b]) => compararCuentaMadre(a, b))
     .map(([nombre, suyas]) => ({
       nombre,
       filas: [...suyas].sort(
@@ -379,6 +381,9 @@ export function PantallaApis() {
   const carga = usarPanel((s) => s.cargaApis);
   const motivo = usarPanel((s) => s.motivoApis);
   const refrescarApis = usarPanel((s) => s.refrescarApis);
+  const respaldarCuentas = usarPanel((s) => s.respaldarCuentas);
+  const respaldando = usarPanel((s) => s.respaldando);
+  const abrirCarpetaRespaldos = usarPanel((s) => s.abrirCarpetaRespaldos);
   const cuentas = usarPanel((s) => s.cuentas);
   /* Qué bloques están plegados. Vacío = todos abiertos, que es como se entra. */
   const [plegados, fijarPlegados] = useState<ReadonlySet<string>>(new Set());
@@ -403,6 +408,23 @@ export function PantallaApis() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 12, color: '#95c9ea', fontFamily: FUENTE.mono, whiteSpace: 'nowrap' }}>{conectadas} de {apiKeys.length} conectadas</span>
+          {/*
+            * Respaldar es una acción sobre *todas* las claves, no sobre una
+            * fila: por eso está en la cabecera y no en la tabla ni en el
+            * formulario de alta. Y va con el estilo secundario de la barra
+            * porque no destruye nada; el botón que sí lo haría —restaurar—
+            * vive en la pantalla de desbloqueo.
+            */}
+          <button
+            type="button"
+            className="pcb-boton-barra"
+            onClick={() => void respaldarCuentas()}
+            disabled={respaldando}
+            title="Guarda todas sus subcuentas en un archivo dentro de Documentos. El archivo va cifrado: sin su contraseña maestra no sirve de nada."
+            style={{ padding: '8px 14px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: respaldando ? 'default' : 'pointer', border: '1px solid #ffffff2e', background: '#ffffff14', color: '#ffffff', whiteSpace: 'nowrap', opacity: respaldando ? 0.6 : 1 }}
+          >
+            {respaldando ? 'Respaldando…' : 'Respaldar mis cuentas'}
+          </button>
           <button
             type="button"
             className="pcb-boton-barra"
@@ -416,6 +438,35 @@ export function PantallaApis() {
       </div>
 
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 20, padding: '20px 26px', overflow: 'auto' }}>
+        {/*
+          * Dónde se dice que la contraseña no viaja dentro del respaldo.
+          *
+          * Va aquí, a todo lo ancho y antes que la tabla, porque es donde el
+          * operador está pensando en sus API keys, y porque el respaldo vive en
+          * Documentos —una carpeta que suele estar sincronizada a OneDrive—. Lo
+          * único que protege ese archivo es la contraseña maestra, así que la
+          * frase no es tranquilizadora: es la frontera de seguridad, y tiene que
+          * leerse antes de pulsar.
+          *
+          * «Abrir la carpeta» está siempre, no solo después de respaldar: un
+          * botón que aparece y desaparece se lee como un fallo de la pantalla.
+          */}
+        <div style={{ flex: '1 1 100%', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10, padding: '10px 14px', background: T.superficie2, border: `1px solid ${T.borde}`, borderRadius: 10, fontSize: 12, lineHeight: 1.5, color: T.texto2 }}>
+          <span style={{ flex: '1 1 320px', minWidth: 0 }}>
+            Sus credenciales están cifradas en este equipo. Para llevarlas a otra versión del panel, pulse{' '}
+            <strong>Respaldar mis cuentas</strong>: se guarda un archivo en <em>Documentos › Panel de Control Bitget › respaldos</em>.{' '}
+            <strong>La contraseña maestra no va dentro del archivo</strong>: sin ella el respaldo no sirve de nada, ni a usted ni a nadie.
+          </span>
+          <button
+            type="button"
+            className="pcb-boton-claro"
+            onClick={() => void abrirCarpetaRespaldos()}
+            style={{ padding: '7px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: `1px solid ${T.bordeFuerte}`, background: T.superficie, color: T.texto, whiteSpace: 'nowrap' }}
+          >
+            Abrir la carpeta
+          </button>
+        </div>
+
         <div style={{ flex: '1 1 620px', minWidth: 0, background: T.superficie, border: `1px solid ${T.bordeFuerte}`, borderRadius: 12, overflow: 'hidden', alignSelf: 'stretch' }}>
           {/*
             * Aquí sí se puede seleccionar texto con el ratón.

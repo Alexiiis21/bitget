@@ -693,6 +693,59 @@ archivo real de la versión anterior en `test/fixtures/`.
 
 ---
 
+## 16 bis. `respaldo-*.pcbak` — el respaldo en un archivo
+
+**Fuera de la carpeta de datos**, en `Documentos\Panel de Control Bitget[-staging]\respaldos\`.
+Es el único archivo del sistema que vive ahí, y por un motivo concreto: el respaldo existe
+para sobrevivir a que el operador borre la carpeta del panel viejo al cambiar de versión.
+Guardarlo dentro de ella sería guardarlo en el sitio que se va a borrar. Ver
+[ADR 0008](adr/0008-respaldo-en-un-archivo.md).
+
+```jsonc
+{
+  "formato": "pcb-respaldo",
+  "version": 1,
+  "aviso": "Este archivo NO contiene la contrasena maestra. Sin ella no se puede abrir.",
+  "creadoEn": "2026-09-13T14:25:07.412Z",
+  "appVersion": "0.9.0", "entorno": "staging", "mercado": "real", "panelOrigen": 3,
+  "cuentas": 37,
+  "esquemas": { "vault": 2, "cuentas": 4 },
+  "archivos": {
+    "vault.enc":    { "bytes": 48213, "sha256": "9f3c…", "contenido": "<base64>" },
+    "cuentas.json": { "bytes": 12044, "sha256": "a17b…", "contenido": "<base64>" },
+    "activos.json": { "bytes": 210,   "sha256": "c002…", "contenido": "<base64>" }
+  }
+}
+```
+
+| Campo | Para qué |
+|---|---|
+| `aviso` | Lo lee quien abra el archivo con el Bloc de notas, que es cuando la frase sirve |
+| `sha256` por archivo | GCM solo cubre el vault y solo tras medio segundo de scrypt; `cuentas.json` y `activos.json` no tienen otra protección |
+| `esquemas.*` | Rechazar un respaldo de una versión futura **antes** de escribir, no al abrirlo |
+| `entorno`, `mercado`, `panelOrigen` | Rótulos que la pantalla enseña. `panelOrigen` **nunca se restaura** |
+
+**Dos nombres:** `respaldo-pcb-AAAA-MM-DD-HHMMSS.pcbak` y el alias estable
+`respaldo-pcb-ultimo.pcbak`, idénticos byte a byte. El alias hace la detección determinista
+—sin ordenar por `mtime`, que se falsea al copiar carpetas—; los fechados son la historia,
+porque el respaldo automático dispara también en cada baja. Se conservan 10.
+
+**No entra:** `instancia.json` (dos paneles con el mismo número es lo que ese número evita),
+`vault.enc.bak` (reinstalaría en silencio una credencial recién dada de baja), `traspasos/`,
+`logs/`, `cache/`, `ordenes/`, y **nada descifrado**: crear un respaldo no abre el vault ni
+necesita la contraseña maestra, es una copia de bytes.
+
+**Cuándo se escribe:** al pulsar «Respaldar mis cuentas», y solo —3 s tras el último cambio,
+agrupando la ráfaga— en cada alta y baja de subcuenta o de cuenta madre.
+
+**Al restaurar:** todo el rechazo ocurre antes de escribir un byte (zod → `version` →
+`esquemas` → checksums). Si hay almacén en destino se **aparta**, no se pisa:
+`vault.enc.reemplazado-<sello>`, junto con su `.bak`. Exige la contraseña maestra del panel
+actual y **el panel bloqueado** — con el vault abierto en memoria, la siguiente escritura
+volcaría el contenido viejo sobre lo recién restaurado.
+
+---
+
 ## 17. Qué NO se persiste (deliberadamente)
 
 | No se guarda | Motivo |

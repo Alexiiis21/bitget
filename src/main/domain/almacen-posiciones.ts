@@ -101,6 +101,31 @@ const CAMPOS_COTEJADOS = [
   ['apalancamiento', (p: Posicion) => String(p.apalancamiento)]
 ] as const;
 
+/**
+ * Campos que repintan la pantalla pero **no** son deriva.
+ *
+ * --------------------------------------------------------------------------
+ * Por que existe esta segunda lista, y el fallo que arregla
+ * --------------------------------------------------------------------------
+ * `anunciar` solo dispara si hubo alta, cierre o deriva, y el P&L no estaba en
+ * ninguna de las tres. En una posicion abierta y quieta lo unico que cambia
+ * entre dos barridos es `unrealizedPL` -tamano, entrada y apalancamiento son
+ * constantes, y el margen tambien en modo aislado-, asi que la lectura nueva se
+ * guardaba en `vivas` y **no se emitia `monitor:posiciones`**: el dato quedaba
+ * fresco en el proceso principal y viejo en pantalla. El operador veia el P&L y
+ * el ROE congelados hasta que abria o cerraba algo, que es cuando por fin habia
+ * deriva. Reportado por el cliente el 10/09/2026.
+ *
+ * No se arregla metiendo `pnl` en `CAMPOS_COTEJADOS` porque las dos listas
+ * responden a preguntas distintas. Una deriva es el sintoma de un push mal
+ * aplicado -memoria y exchange discrepan en algo que no deberia haber cambiado
+ * solo- y se escribe en el log de sesion para poder investigarla. El P&L cambia
+ * cada 45 segundos porque el precio se mueve: eso es su comportamiento normal, y
+ * anotarlo como divergencia llenaria el log de ruido hasta ahogar las derivas de
+ * verdad, que son justo lo que ese log existe para hacer visible.
+ */
+const CAMPOS_VOLATILES = [(p: Posicion) => p.pnl] as const;
+
 /** `true` si el tamano de la posicion es cero: en Bitget eso es un cierre. */
 function estaCerrada(tamano: Cantidad): boolean {
   const n = Number.parseFloat(tamano);
@@ -214,6 +239,10 @@ export class AlmacenPosiciones {
               enLectura: nuevo
             });
           }
+        }
+        /* Cambian solos con el precio: repintan, pero no son divergencia. */
+        for (const leer of CAMPOS_VOLATILES) {
+          if (leer(antes) !== leer(ahora)) hubo = true;
         }
       }
       /*

@@ -3,6 +3,12 @@
  *
  * Todo numero magico del proyecto vive aqui, con la referencia al documento que
  * lo justifica. Si un valor no tiene justificacion escrita, no deberia existir.
+ *
+ * Y, cuando una regla **se deriva** de uno de estos valores y la necesitan los
+ * dos procesos, la funcion que la aplica vive al lado del valor. Separarlas es
+ * como se desincronizan: el orden de las cuentas principales estuvo escrito
+ * solo en el renderer y la matriz -que lo resolvia por su cuenta- acabo
+ * pintandolas en un orden distinto del de la pantalla de API Keys.
  */
 
 /* ---------- Techos que impone Bitget ---------- */
@@ -227,6 +233,42 @@ export const NOMBRES_CUENTA_MADRE: readonly string[] = Array.from(
   { length: CUENTAS_MADRE_MAX },
   (_, i) => String.fromCharCode('A'.charCodeAt(0) + i)
 );
+
+/** Donde va cada cuenta principal. Las de fuera de A-O, al final. */
+const ORDEN_CUENTA_MADRE = new Map(NOMBRES_CUENTA_MADRE.map((n, i) => [n, i]));
+
+/**
+ * El orden en que se enseñan las cuentas principales: A, B, C...
+ *
+ * --------------------------------------------------------------------------
+ * Por que no vale el orden de alta
+ * --------------------------------------------------------------------------
+ * Porque no es un orden: es el rastro de en que orden se tecleo. El operador lo
+ * pidio el 05/09/2026 para la pantalla de API Keys -una subcuenta de la B
+ * quedaba entre dos de la A- y se arreglo solo alli; la matriz siguio pintando
+ * por antiguedad, asi que quien daba de alta la B antes que la A veia la B
+ * arriba. Con los nombres fijos de la A a la O, cualquier orden que no sea el
+ * alfabetico es un orden que el operador no puede predecir.
+ *
+ * Se compara por **nombre** y no por ningun campo guardado a proposito: es lo
+ * unico que no depende de cuando se creo la ficha, asi que corrige tambien las
+ * instalaciones que ya existen, sin migrar el archivo.
+ *
+ * El nombre se normaliza antes de buscarlo porque `grupoPorNombre` empareja sin
+ * distinguir mayusculas pero guarda lo que llego, y antes del 28/08/2026 se
+ * escribia a mano: un `cuentas.json` viejo puede traer «a», que sin normalizar
+ * caeria al final en vez de encabezar. No puede haber «A» y «a» a la vez, asi
+ * que normalizar no crea empates nuevos.
+ *
+ * El desempate va sobre las cadenas originales y solo entra en juego entre dos
+ * nombres de fuera de A-O -una instalacion antigua, un registro importado-,
+ * donde lo que se quiere es orden alfabetico humano.
+ */
+export function compararCuentaMadre(a: string, b: string): number {
+  const pa = ORDEN_CUENTA_MADRE.get(a.trim().toUpperCase()) ?? NOMBRES_CUENTA_MADRE.length;
+  const pb = ORDEN_CUENTA_MADRE.get(b.trim().toUpperCase()) ?? NOMBRES_CUENTA_MADRE.length;
+  return pa - pb || a.localeCompare(b, 'es');
+}
 /**
  * Casillas de activo del selector. Ocho, ni una mas.
  *

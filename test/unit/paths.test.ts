@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { archivoLogDeHoy } from '@main/storage/paths';
+import { archivoLogDeHoy, carpetaRespaldos } from '@main/storage/paths';
 import { clavePosicion } from '@shared/types';
 import {
   MONITOR_REFRESCO_MS_DEFECTO,
@@ -15,6 +15,30 @@ describe('rotacion del log de sesion', () => {
   it('nombra el archivo por dia local, con ceros a la izquierda', () => {
     expect(archivoLogDeHoy(new Date(2026, 6, 5))).toBe('session-20260705.jsonl');
     expect(archivoLogDeHoy(new Date(2026, 11, 31))).toBe('session-20261231.jsonl');
+  });
+});
+
+describe('carpeta de respaldos', () => {
+  /*
+   * En Documentos y no junto al `.exe`. El respaldo existe justamente para
+   * sobrevivir a que el operador borre la carpeta del panel viejo; guardarlo
+   * dentro de ella sería guardarlo en el sitio que se va a borrar.
+   */
+  it('cuelga de Documentos, no de la carpeta de datos', () => {
+    /* El doble de `electron` devuelve `/stub/<nombre>` para cada ruta del sistema. */
+    expect(carpetaRespaldos().replace(/\\/g, '/')).toContain('/stub/documents');
+    expect(carpetaRespaldos()).toContain('respaldos');
+  });
+
+  /*
+   * Las pruebas corren en entorno `dev` (ver `vitest.config.ts`). En staging la
+   * carpeta lleva sufijo: sin él, el panel de staging —que guarda credenciales
+   * reales— reescribiría el respaldo del panel de producción y la detección
+   * automática ofrecería restaurar el juego de claves equivocado.
+   */
+  it('no comparte carpeta con el otro entorno', () => {
+    expect(carpetaRespaldos()).toContain('Panel de Control Bitget');
+    expect(carpetaRespaldos()).not.toContain('-staging');
   });
 });
 

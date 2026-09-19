@@ -41,7 +41,6 @@ import type {
   Lote,
   PosicionMonitor
 } from '@shared/types';
-import Decimal from 'decimal.js';
 import { ErrorBitget } from '../bitget/errors';
 import type { ModoMargenApi } from '../bitget/rest/endpoints/ordenes';
 import { MERCADOS, type ClaveMercado } from '../bitget/mercado';
@@ -58,6 +57,7 @@ import {
 } from '../bitget/rest/endpoints/subcuentas';
 import { MONEDA_TRASPASOS, resumirSaldos } from '../domain/saldos-subcuentas';
 import { planificarTraspaso, type PlanTraspaso } from '../domain/plan-traspaso';
+import { roeDe } from '../domain/roe';
 import {
   planificarRecogida,
   planificarReparto,
@@ -103,6 +103,8 @@ import {
   type PlanTakeProfit
 } from '../execution/motor-lotes';
 import { ErrorVault, Vault, estadoEnDisco } from '../security/vault';
+import { FrenoMaestra } from '../security/freno-maestra';
+import { textoEspera } from '@shared/espera-maestra';
 
 export interface RutasSesion {
   vault: string;
@@ -116,6 +118,12 @@ export interface RutasSesion {
    * de la carpeta del vault, que es donde vive el resto del estado.
    */
   traspasos?: string;
+  /**
+   * `intentos.json`: los fallos contra la maestra y la espera en curso.
+   *
+   * Se deriva de la carpeta del vault cuando falta, igual que `traspasos`.
+   */
+  intentos?: string;
 }
 
 export interface OpcionesSesion {
@@ -137,6 +145,11 @@ export interface OpcionesSesion {
    * Mismo patron que `OpcionesVault.parametrosKdf`, del que es la continuacion.
    */
   parametrosKdf?: Partial<Omit<ParametrosKdf, 'algoritmo'>>;
+  /**
+   * Freno de intentos contra la maestra. Se inyecta en las pruebas para poder
+   * mover el reloj; en produccion lo carga la sesion de `rutas.intentos`.
+   */
+  freno?: FrenoMaestra;
   ahora?: () => number;
   /**
    * Espera entre lecturas de la posicion recien abierta. Se inyecta en las
@@ -216,18 +229,7 @@ const mensajeMargen = (estado: Job['estado']): string =>
  * haya vuelto, y una cuenta caida hace irrelevante que estuviera en modo REST.
  * Se resuelve de lo mas grave a lo menos.
  */
-/**
- * Retorno sobre el margen actual, en %. Ver `PosicionMonitor.roe`.
- *
- * `null` sin P&L conocido -cadena vacia, Bitget no lo mando- o con un margen
- * que no sirve de divisor: cero, negativo o tambien desconocido.
- */
-function roeDe(pnl: Cantidad, margenActual: Cantidad): number | null {
-  if (pnl === '') return null;
-  const margen = new Decimal(margenActual || '0');
-  if (!margen.isFinite() || margen.lessThanOrEqualTo(0)) return null;
-  return new Decimal(pnl).dividedBy(margen).times(100).toNumber();
-}
+/* El ROE lo calcula `domain/roe.ts`: es aritmetica, y alli se prueba sin electron. */
 
 function estadoDePunta(
   estadoPosicion: 'viva' | 'indeterminada',
@@ -255,8 +257,34 @@ function estadoDePunta(
   return { estado: 'ok', motivo: null };
 }
 
+/**
+ * La respuesta cuando el freno esta echado.
+ *
+ * El motivo es propio -`espera-activa`- y no `contrasena-incorrecta`: la clave
+ * que se acaba de teclear puede ser la buena, y decirle a alguien que su
+ * contrasena es incorrecta cuando lo que pasa es que hay que esperar es como se
+ * empieza a dudar de una clave que estaba bien.
+ */
+function esperaActiva(restanteMs: number): ResultadoVault {
+  return {
+    ok: false,
+    motivo: 'espera-activa',
+    mensaje:
+      `Demasiados intentos seguidos con la contraseña maestra. Vuelva a intentarlo dentro de ` +
+      `${textoEspera(restanteMs)}. La espera crece con cada fallo y se borra en cuanto acierte.`
+  };
+}
+
 export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
   private readonly rutas: RutasSesion;
+  /**
+   * Se carga la primera vez que alguien teclea la maestra y se conserva.
+   *
+   * Una promesa y no el objeto: dos pantallas que prueben la clave a la vez
+   * -desbloqueo y restauracion- tienen que compartir **el mismo** freno, y
+   * cargarlo dos veces daria dos contadores con la mitad del cupo cada uno.
+   */
+  private frenoCargando: Promise<FrenoMaestra> | null = null;
   private readonly cliente: ClienteBitget;
   private readonly mercado: ClaveMercado;
   private readonly motor: MotorLotes;
@@ -377,6 +405,8 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
   private readonly oyentes = new Set<() => void>();
   private readonly oyentesLote = new Set<(lote: Lote) => void>();
   private readonly oyentesCuentasTocadas = new Set<(cuentaIds: readonly string[]) => void>();
+  /** Quien quiere enterarse de que las credenciales cambiaron. Ver `alCambiarCredenciales`. */
+  private readonly oyentesCredenciales = new Set<() => void>();
   private desuscribirConexiones: (() => void) | null = null;
 
   constructor(rutas: RutasSesion, cliente: ClienteBitget, opciones: OpcionesSesion = {}) {
@@ -388,6 +418,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     this.mercado = opciones.mercado ?? 'simulado';
     this.ahoraMs = opciones.ahora ?? Date.now;
     this.parametrosKdf = opciones.parametrosKdf;
+    if (opciones.freno !== undefined) this.frenoCargando = Promise.resolve(opciones.freno);
     this.dormir =
       opciones.dormir ??
       ((ms) =>
@@ -435,6 +466,39 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     for (const oyente of this.oyentes) oyente();
   }
 
+  /**
+   * Avisa cuando el juego de credenciales de este panel ha cambiado en disco.
+   *
+   * Lo consume el respaldo automatico, que vive en `index.ts`: la sesion no sabe
+   * donde estan los Documentos del operador ni que forma tiene un `.pcbak`, y no
+   * tiene por que saberlo. Aqui solo se dice **que** algo cambio.
+   */
+  alCambiarCredenciales(oyente: () => void): () => void {
+    this.oyentesCredenciales.add(oyente);
+    return () => {
+      this.oyentesCredenciales.delete(oyente);
+    };
+  }
+
+  /**
+   * Sincrono y a prueba de oyentes rotos.
+   *
+   * Un respaldo que falla **no puede** romper un alta: cuando esto se llama, el
+   * alta ya escribio en disco y ya tiene su resultado. Por eso no se espera a
+   * nadie y por eso cada oyente va en su propio `try`: lo unico que puede pasar
+   * si el respaldo automatico revienta es que no haya respaldo, y de eso el
+   * operador se entera al pulsar el boton manual, que es el momento honesto.
+   */
+  private avisarCredenciales(): void {
+    for (const oyente of this.oyentesCredenciales) {
+      try {
+        oyente();
+      } catch {
+        /* El respaldo se apaña solo; la operacion que lo disparo no se entera. */
+      }
+    }
+  }
+
   /** Reengancha el aviso al registro de conexiones vigente. */
   private escucharConexiones(): void {
     this.desuscribirConexiones?.();
@@ -459,8 +523,52 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     );
   }
 
+  /**
+   * El freno de la maestra, cargado una sola vez para todo el proceso.
+   *
+   * Las tres puertas que piden la clave -desbloqueo, pantalla de seguridad y
+   * restauracion de respaldo- comparten este objeto a proposito: es la misma
+   * contrasena, y un contador por puerta seria tres cupos de tres intentos que
+   * se recorren cambiando de pantalla.
+   */
+  private frenoMaestra(): Promise<FrenoMaestra> {
+    this.frenoCargando ??= FrenoMaestra.cargar(
+      this.rutas.intentos ?? join(dirname(this.rutas.vault), 'intentos.json')
+    );
+    return this.frenoCargando;
+  }
+
+  /** Lo que falta de espera, para que la pantalla pueda contarlo. */
+  async esperaMaestraMs(): Promise<number> {
+    return (await this.frenoMaestra()).restanteMs();
+  }
+
+  /**
+   * Abre el almacen, con el freno por delante.
+   *
+   * --------------------------------------------------------------------------
+   * Que cuenta como fallo y que no
+   * --------------------------------------------------------------------------
+   * Solo `contrasena-incorrecta`. Un `archivo-danado` o un `no-existe` no dicen
+   * nada sobre la clave que se tecleo, y contarlos acabaria castigando con una
+   * hora de espera a quien tiene un vault roto -que es justo cuando mas falta
+   * hace poder intentarlo-.
+   */
   async abrir(contrasena: string): Promise<ResultadoVault> {
-    return this.abrirCon(() => Vault.abrir(this.rutas.vault, contrasena));
+    const freno = await this.frenoMaestra();
+    const restante = freno.restanteMs();
+    if (restante > 0) return esperaActiva(restante);
+
+    const resultado = await this.abrirCon(() => Vault.abrir(this.rutas.vault, contrasena));
+
+    if (resultado.ok) {
+      await freno.anotarAcierto();
+    } else if (resultado.motivo === 'contrasena-incorrecta') {
+      const espera = await freno.anotarFallo();
+      if (espera > 0) return esperaActiva(espera);
+    }
+
+    return resultado;
   }
 
   /**
@@ -500,7 +608,36 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
    */
   async comprobarMaestra(contrasena: string): Promise<boolean> {
     if (this.vault === null || this.vault.estaCerrado) return false;
-    return Vault.comprobarContrasena(this.rutas.vault, contrasena);
+    return this.comprobarConFreno(contrasena);
+  }
+
+  /**
+   * La misma comprobacion, pero **con el panel bloqueado**.
+   *
+   * La usa la restauracion de un respaldo, que ocurre antes de desbloquear
+   * nada: pide la maestra de este panel para no dejar que cualquiera reemplace
+   * el `vault.enc` con otro. Pasa por el mismo freno que las otras dos puertas.
+   */
+  async comprobarMaestraEnDisco(contrasena: string): Promise<boolean> {
+    return this.comprobarConFreno(contrasena);
+  }
+
+  /**
+   * Comprueba la clave contra el archivo y mueve el contador.
+   *
+   * Devuelve `false` tanto si la clave no era como si habia espera en curso: no
+   * es un descuido, es que quien pregunta solo necesita saber si puede seguir.
+   * El motivo -y cuanto falta- se consulta aparte con `esperaMaestraMs`, que es
+   * lo que la pantalla usa para escribir la cuenta atras.
+   */
+  private async comprobarConFreno(contrasena: string): Promise<boolean> {
+    const freno = await this.frenoMaestra();
+    if (freno.restanteMs() > 0) return false;
+
+    const ok = await Vault.comprobarContrasena(this.rutas.vault, contrasena);
+    if (ok) await freno.anotarAcierto();
+    else await freno.anotarFallo();
+    return ok;
   }
 
   /** Cierra el almacen y borra de memoria lo que se pueda. */
@@ -572,6 +709,13 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
   /**
    * La matriz de seleccion: cuentas principales con sus subcuentas.
    *
+   * Las cuentas principales salen por el abecedario -A, B, C...- y de eso se
+   * encarga `listarGrupos()`. Aqui **no se reordenan**: un segundo criterio
+   * encima del suyo seria el que mandaria, y tener el orden escrito en dos
+   * sitios es como la matriz acabo enseñandolo distinto de la pantalla de API
+   * Keys. Este JSDoc callaba el orden de los grupos, y ese silencio es por
+   * donde se colo el fallo.
+   *
    * Las subcuentas van ordenadas por casilla y no por antiguedad ni por nombre,
    * porque la casilla es lo que el operador tiene memorizado. Con el panel
    * bloqueado devuelve una lista vacia en lugar de fallar: es la respuesta
@@ -581,28 +725,25 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     if (this.vault === null || this.registro === null || this.vault.estaCerrado) return [];
     const registro = this.registro;
 
-    return registro
-      .listarGrupos()
-      .sort((a, b) => a.orden - b.orden)
-      .map((grupo) => ({
-        id: grupo.id,
-        nombre: grupo.nombre,
-        subcuentas: registro
-          .listarCuentas()
-          .filter((c) => c.grupoId === grupo.id)
-          .sort((a, b) => a.slot - b.slot)
-          .map((cuenta) => {
-            const estado = this.conexiones.estado(cuenta.id);
-            return {
-              id: cuenta.id,
-              etiqueta: cuenta.etiqueta,
-              slot: cuenta.slot,
-              saldo: this.saldos.get(cuenta.id) ?? '0',
-              estado: estado?.estado ?? 'desconectada',
-              motivo: estado?.motivo ?? null
-            };
-          })
-      }));
+    return registro.listarGrupos().map((grupo) => ({
+      id: grupo.id,
+      nombre: grupo.nombre,
+      subcuentas: registro
+        .listarCuentas()
+        .filter((c) => c.grupoId === grupo.id)
+        .sort((a, b) => a.slot - b.slot)
+        .map((cuenta) => {
+          const estado = this.conexiones.estado(cuenta.id);
+          return {
+            id: cuenta.id,
+            etiqueta: cuenta.etiqueta,
+            slot: cuenta.slot,
+            saldo: this.saldos.get(cuenta.id) ?? '0',
+            estado: estado?.estado ?? 'desconectada',
+            motivo: estado?.motivo ?? null
+          };
+        })
+    }));
   }
 
   /* ---------------- posiciones vivas ---------------- */
@@ -876,7 +1017,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         margenAdicional: viva.aporte?.margenAdicional ?? null,
         margenActual: viva.margen,
         pnl: viva.pnl,
-        roe: roeDe(viva.pnl, viva.margen),
+        roe: roeDe(viva.pnl, viva.tamano, viva.precioEntrada, viva.apalancamiento),
         apalancamiento: viva.apalancamiento,
         tamano: viva.tamano,
         origen: viva.origen,
@@ -1086,6 +1227,21 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
    * bloqueado, porque para el motor eso es un objetivo que se descarta con su
    * motivo, no un fallo del lote.
    */
+  /**
+   * Por que `cuentaEjecutable` diria que no.
+   *
+   * Existe para que el descarte del motor no llame «ya no está registrada» a
+   * una cuenta que esta perfectamente y solo esta migrando a UTA. Sigue el
+   * mismo orden de comprobaciones que `cuentaEjecutable`, para que las dos
+   * respuestas no puedan separarse.
+   */
+  motivoNoEjecutable(cuentaId: string): 'transicion' | 'bloqueada' | 'desconocida' {
+    if (this.vault === null || this.registro === null || this.vault.estaCerrado) return 'bloqueada';
+    if (this.registro.cuenta(cuentaId) === undefined) return 'desconocida';
+    if (this.enTransicion.has(cuentaId)) return 'transicion';
+    return 'desconocida';
+  }
+
   cuentaEjecutable(cuentaId: string): CuentaEjecutable | null {
     if (this.vault === null || this.registro === null || this.vault.estaCerrado) return null;
 
@@ -2274,6 +2430,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
      */
     await vault.guardar();
     await registro.guardar();
+    this.avisarCredenciales();
 
     this.anotarSaldo(cuentaId, verificacion);
     this.conexiones.registrarVerificacion(cuentaId, verificacion);
@@ -2348,6 +2505,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
 
     await vault.guardar();
     await registro.guardar();
+    this.avisarCredenciales();
     this.anunciar();
     return 'borrada';
   }
@@ -2601,6 +2759,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
       }
     });
     await vault.guardar();
+    this.avisarCredenciales();
     this.anunciar();
 
     return {
@@ -2644,6 +2803,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     if (!vault.eliminarMadre(uidMadre)) return 'no-estaba';
 
     await vault.guardar();
+    this.avisarCredenciales();
     this.anunciar();
     return 'borrada';
   }

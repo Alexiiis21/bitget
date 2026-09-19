@@ -45,7 +45,7 @@ const FORMATO = 'pcb-vault';
  * campo, y la credencial de la madre desapareceria sin que nadie lo notase
  * hasta necesitarla. Prefiere negarse a abrir. docs/03-modelo-de-datos.md 15.
  */
-const VERSION_ACTUAL = 2;
+export const VERSION_ACTUAL = 2;
 const ALGORITMO = 'aes-256-gcm';
 /** Texto que cifra el verificador. Su contenido da igual; que sea fijo, no. */
 const TESTIGO = 'pcb-ok';

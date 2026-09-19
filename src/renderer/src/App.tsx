@@ -6,6 +6,7 @@ import { Avisos } from '@/features/panel/Avisos';
 import { BarraLateral } from '@/features/panel/BarraLateral';
 import { BuscadorActivos } from '@/features/panel/BuscadorActivos';
 import { DialogoBajaApi } from '@/features/panel/DialogoBajaApi';
+import { DialogoRestaurarRespaldo } from '@/features/panel/DialogoRestaurarRespaldo';
 import { DialogoColores } from '@/features/panel/DialogoColores';
 import { DialogoPlan } from '@/features/panel/DialogoPlan';
 import { DialogoSeguridad } from '@/features/panel/DialogoSeguridad';
@@ -88,6 +89,8 @@ export default function App() {
       <DialogoPlan />
       <ModalDetalleSubcuenta />
       {pantalla === 'login' && <PantallaDesbloqueo />}
+      {/* Va sobre el velo del desbloqueo, que es desde donde se pide restaurar. */}
+      <DialogoRestaurarRespaldo />
       <Avisos />
     </div>
   );

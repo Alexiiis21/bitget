@@ -23,6 +23,7 @@ import { create } from 'zustand';
 import type {
   Account,
   Asset,
+  BackupInfo,
   BatchPlan,
   BatchResult,
   BatchTarget,
@@ -38,6 +39,7 @@ import { NotImplementedError } from '@shared/ports/panel-service';
 import { panelService } from '@/services/panel-service';
 import { casillas } from '@/lib/formato';
 import { reproducirCajaRegistradora } from '@/lib/sonido';
+import { textoEspera } from '@shared/espera-maestra';
 import { ESTADO_ACCION_FABRICA, type ClaveColorEstado } from '@/lib/tokens';
 import type {
   AlcanceLado,
@@ -156,6 +158,76 @@ const textoDeError = (e: unknown): string => {
   return e instanceof Error ? e.message : 'Fallo inesperado del panel.';
 };
 
+/**
+ * El acto de restaurar, compartido por los dos caminos que llegan a él.
+ *
+ * Lo llaman `pedirRestauracion` —panel recién estrenado, un clic, sin
+ * contraseña— y `confirmarRestauracion` —con almacén que reemplazar, tras
+ * teclear la maestra—. Es el mismo acto y se escribe una vez; lo único que
+ * cambia es si hay contraseña y de dónde sale el archivo.
+ *
+ * El `cancelled` del selector no es un fallo y no deja aviso: el operador cerró
+ * la ventana y no pasó nada.
+ */
+async function ejecutarRestauracion(
+  set: (parcial: Partial<EstadoPanel>) => void,
+  get: () => EstadoPanel,
+  desdeArchivo: boolean,
+  maestra: string | undefined
+): Promise<void> {
+  set({ restaurando: true, errorRestauracion: '' });
+  try {
+    const r = desdeArchivo
+      ? await panelService.restoreBackupFromFile(maestra)
+      : await panelService.restoreBackup(maestra);
+
+    if (r.cancelled) return;
+
+    if (!r.ok) {
+      /*
+       * Una contraseña equivocada deja el diálogo abierto con el error dentro:
+       * cerrarlo obligaría a volver a empezar por un fallo de tecleo. Lo demás
+       * —un respaldo dañado, una versión futura— no se arregla insistiendo, así
+       * que se cierra y se cuenta en la pantalla.
+       */
+      if (r.reason === 'maestra-incorrecta' || r.reason === 'espera-activa') {
+        set({ errorRestauracion: r.message });
+        /*
+         * `espera-activa` se queda en el diálogo por la misma razón que la
+         * clave equivocada: no hay nada que corregir fuera de él, solo esperar,
+         * y cerrarlo obligaría a volver a buscar el respaldo.
+         */
+        await get().refrescarEsperaMaestra();
+      } else set({ restauracion: null, avisoRestauracion: { ok: false, texto: r.message } });
+      return;
+    }
+
+    const apartado =
+      r.replaced === null
+        ? ''
+        : ` El almacén que tenía antes no se ha borrado: está al lado, como «${r.replaced}».`;
+    set({
+      restauracion: null,
+      maestraRestauracion: '',
+      avisoRestauracion: {
+        ok: true,
+        texto:
+          (r.accounts === null
+            ? r.message
+            : `${r.message} Se restauraron ${r.accounts} ${r.accounts === 1 ? 'subcuenta' : 'subcuentas'}.`) +
+          apartado
+      }
+    });
+  } catch (e) {
+    set({ errorRestauracion: textoDeError(e) });
+    if (get().restauracion === null) {
+      set({ avisoRestauracion: { ok: false, texto: textoDeError(e) } });
+    }
+  } finally {
+    set({ restaurando: false });
+  }
+}
+
 const CLAVE_TEMA = 'pcb.tema';
 
 const temaInicial = (): 'light' | 'dark' => {
@@ -201,11 +273,32 @@ let cancelarPrecios: (() => void) | undefined;
 let cancelarPosiciones: (() => void) | undefined;
 let cancelarCuentas: (() => void) | undefined;
 
+/**
+ * El tic de la cuenta atrás de la maestra.
+ *
+ * Vive fuera del store por lo mismo que `cancelarCuentas`: es un recurso del
+ * navegador, no un dato de la pantalla, y dejarlo en el estado haría que cada
+ * segundo se comparase un número de temporizador contra el anterior.
+ *
+ * Solo corre mientras hay espera. Un `setInterval` permanente para enseñar un
+ * cero es un render por segundo durante toda la sesión.
+ */
+let ticEspera: ReturnType<typeof setInterval> | null = null;
+
 export interface EstadoPanel {
   /* ---- sesión ---- */
   pantalla: 'login' | 'panel';
   contrasena: string;
   errorContrasena: string;
+  /**
+   * Milisegundos que faltan para poder volver a probar la contraseña maestra.
+   *
+   * Lo manda el proceso principal —que es quien impone la espera y la guarda en
+   * disco— y aquí solo se descuenta para pintar la cuenta atrás. Poner esto a
+   * cero desde las herramientas del navegador no abre nada: el siguiente
+   * intento se lo encuentra igual. Ver `shared/espera-maestra.ts`.
+   */
+  esperaMaestraMs: number;
   numeroPanel: number;
   ocupado: boolean;
   tema: 'light' | 'dark';
@@ -309,6 +402,8 @@ export interface EstadoPanel {
   motivoPosiciones: string | null;
   cargaApis: EstadoCarga;
   motivoApis: string | null;
+  /** Hay un respaldo escribiéndose. Frena la segunda pulsación del botón. */
+  respaldando: boolean;
   /** Por `accountId`: el historial se pide al desplegar el acordeón de cada cuenta. */
   cargaHistorial: Record<string, EstadoCarga>;
 
@@ -383,6 +478,28 @@ export interface EstadoPanel {
   errorBaja: string;
   intentosBaja: number;
 
+  /* ---- respaldo y restauración ---- */
+
+  /** Lo que el panel encontró solo en Documentos, o `null` si no hay nada. */
+  respaldoDetectado: BackupInfo | null;
+  /**
+   * La confirmación de reemplazo, abierta solo cuando **hay algo que perder**.
+   *
+   * En un panel recién estrenado se restaura de un clic: no hay almacén que
+   * destruir y pedir una contraseña ahí sería ceremonia sin motivo.
+   */
+  restauracion: {
+    nombre: string;
+    creadoEn: string;
+    cuentas: number | null;
+    desdeArchivo: boolean;
+  } | null;
+  maestraRestauracion: string;
+  errorRestauracion: string;
+  restaurando: boolean;
+  /** El desenlace de la última restauración, para que la pantalla lo enseñe. */
+  avisoRestauracion: { ok: boolean; texto: string } | null;
+
   /* ---- avisos ---- */
   avisos: Aviso[];
 
@@ -390,6 +507,14 @@ export interface EstadoPanel {
   iniciar: () => Promise<void>;
   escribirContrasena: (v: string) => void;
   desbloquear: () => Promise<void>;
+  /**
+   * Pregunta al proceso principal cuánta espera queda y arranca la cuenta atrás.
+   *
+   * Se llama al arrancar —no solo tras fallar— porque la espera sobrevive a
+   * cerrar el panel: quien lo reabra a los dos minutos tiene que ver el minuto
+   * que le queda antes de teclear, en vez de gastar un intento para enterarse.
+   */
+  refrescarEsperaMaestra: () => Promise<void>;
   bloquear: () => void;
   fijarTema: (t: 'light' | 'dark') => void;
   fijarNumeroPanel: (n: number) => Promise<void>;
@@ -436,6 +561,20 @@ export interface EstadoPanel {
   cerrarSaldos: () => void;
   escribirFormulario: (clave: keyof FormularioApiKey, v: string) => void;
   refrescarApis: () => Promise<void>;
+  /** Guarda todas las subcuentas en un archivo dentro de Documentos. */
+  respaldarCuentas: () => Promise<void>;
+  abrirCarpetaRespaldos: () => Promise<void>;
+  /** Sondea Documentos en busca de un respaldo. No restaura nada. */
+  buscarRespaldo: () => Promise<void>;
+  /**
+   * Restaura, o pide confirmación antes si hay un almacén que reemplazar.
+   *
+   * `desdeArchivo` abre el selector del sistema en vez de usar el detectado.
+   */
+  pedirRestauracion: (desdeArchivo: boolean) => Promise<void>;
+  escribirMaestraRestauracion: (v: string) => void;
+  confirmarRestauracion: () => Promise<void>;
+  cancelarRestauracion: () => void;
   guardarApi: () => Promise<void>;
   probarApi: (id: string) => Promise<void>;
   /** Abre la confirmación de la baja. No borra: para eso está `confirmarBajaApi`. */
@@ -524,6 +663,34 @@ const CAMPO_DE: Record<PlanKind, keyof ValoresHerramientas | null> = {
 export const PIDE_PASO = new Set<PlanKind>(['open', 'close']);
 
 /**
+ * Las operaciones tras las cuales la selección se deshace sola.
+ *
+ * --------------------------------------------------------------------------
+ * Abrir y cerrar, no solo abrir
+ * --------------------------------------------------------------------------
+ * Hasta el 11/09/2026 solo la apertura. El argumento de entonces —«solo abrir
+ * cambia lo que hay en la casilla»— era el correcto, pero se aplicó a medias:
+ * cerrar es la otra operación que cambia lo que la casilla contiene, porque la
+ * vacía. El cliente lo reportó teniendo que destildar a mano tras cada cierre.
+ *
+ * El peligro es el mismo en espejo. Tras abrir, esas casillas tienen posición y
+ * la siguiente acción caería sobre ellas; tras cerrar están vacías, y la
+ * siguiente apertura abriría cuarenta posiciones que nadie pidió. Destildar
+ * cuarenta casillas a mano es justamente lo que nadie hace.
+ *
+ * Las otras cinco no entran: ajustar el Take Profit, el margen o el
+ * apalancamiento no cambia lo que hay en la casilla, y encadenar dos ajustes
+ * sobre la misma selección —poner el Take Profit y luego subir el
+ * apalancamiento— es un uso legítimo que desmarcar rompería.
+ *
+ * Lista aparte de `PIDE_PASO` aunque hoy tengan los mismos dos elementos: son
+ * dos reglas distintas —una frena, la otra ordena— y fundirlas haría que una
+ * operación futura que pida clave heredase el desmarcado sin que nadie lo
+ * decidiera.
+ */
+const DESMARCA_TRAS = new Set<PlanKind>(['open', 'close']);
+
+/**
  * Qué campos se vacían tras enviar, salvo que estén fijados.
  *
  * El apalancamiento nunca se borra: el operador lo deja puesto porque casi
@@ -550,6 +717,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   pantalla: 'login',
   contrasena: '',
   errorContrasena: '',
+  esperaMaestraMs: 0,
   numeroPanel: 1,
   ocupado: false,
   tema: temaInicial(),
@@ -592,6 +760,13 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   motivoPosiciones: null,
   cargaApis: 'inicial',
   motivoApis: null,
+  respaldando: false,
+  respaldoDetectado: null,
+  restauracion: null,
+  maestraRestauracion: '',
+  errorRestauracion: '',
+  restaurando: false,
+  avisoRestauracion: null,
   cargaHistorial: {},
 
   cmpAbierto: {},
@@ -648,6 +823,13 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
      * Separadas, la insignia depende solo de una llamada que no puede fallar
      * por red, y el catalogo puede caerse sin arrastrar nada mas.
      */
+    /*
+     * La espera pendiente, antes que nada. Es lo único de la pantalla de
+     * desbloqueo que puede venir de una sesión anterior, y enseñarla tarde
+     * significa que el operador ya habrá tecleado para descubrirla.
+     */
+    void get().refrescarEsperaMaestra();
+
     try {
       const info = await panelService.getSystemInfo();
       set({ numeroPanel: info.panelNumber, mercado: info.market });
@@ -686,6 +868,37 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
   escribirContrasena: (v) => set({ contrasena: v, errorContrasena: '' }),
 
+  refrescarEsperaMaestra: async () => {
+    let ms: number;
+    try {
+      ms = await panelService.masterCooldownMs();
+    } catch {
+      /*
+       * Sin respuesta no se inventa una espera: el freno de verdad está al otro
+       * lado y el siguiente intento se lo encontrará igual. Enseñar aquí una
+       * cuenta atrás que nadie ha confirmado sería peor que no enseñar ninguna.
+       */
+      return;
+    }
+
+    set({ esperaMaestraMs: ms });
+
+    if (ticEspera !== null) {
+      clearInterval(ticEspera);
+      ticEspera = null;
+    }
+    if (ms <= 0) return;
+
+    ticEspera = setInterval(() => {
+      const quedan = Math.max(0, get().esperaMaestraMs - 1_000);
+      set({ esperaMaestraMs: quedan });
+      if (quedan === 0 && ticEspera !== null) {
+        clearInterval(ticEspera);
+        ticEspera = null;
+      }
+    }, 1_000);
+  },
+
   desbloquear: async () => {
     const { contrasena, ocupado, avisar, numeroPanel, refrescarApis } = get();
     if (ocupado) return;
@@ -702,10 +915,20 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
         set({
           errorContrasena: resultado.reason ?? 'No se pudo abrir el almacén de credenciales.'
         });
+        /*
+         * El tercer fallo abre una espera, y la pantalla tiene que empezar a
+         * contarla en ese mismo momento: el mensaje dice «dentro de 3 minutos»
+         * una vez, y sin la cuenta atrás el operador no sabe cuánto lleva.
+         */
+        await get().refrescarEsperaMaestra();
         return;
       }
 
-      set({ pantalla: 'panel', contrasena: '', errorContrasena: '' });
+      set({ pantalla: 'panel', contrasena: '', errorContrasena: '', esperaMaestraMs: 0 });
+      if (ticEspera !== null) {
+        clearInterval(ticEspera);
+        ticEspera = null;
+      }
       avisar(
         'ok',
         'Sesión iniciada',
@@ -1436,6 +1659,22 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
    */
   enviarPlan: async (plan, soloEstos) => {
     const { avisar } = get();
+
+    /*
+     * Un lote nuevo deja sin valor el informe del anterior.
+     *
+     * Solo cuando es un lote nuevo: un reintento -que llega con `soloEstos`-
+     * tiene que conservar visible la lista de fallidas hasta que salga bien.
+     *
+     * Sin esto, un envío que revienta dejaba en pantalla la banda del lote
+     * anterior —no es un modal, no bloquea nada— con su botón «Reintentar solo
+     * las fallidas» activo y ligado por closure a aquel plan. El operador leía
+     * «No se pudo enviar» y pulsaba el botón que tenía al lado creyendo que
+     * reintentaba lo que acababa de fallar: reenviaba el lote de antes, sobre
+     * una casilla que ya no estaba mirando.
+     */
+    if (soloEstos === undefined) set({ batch: null, reintentarFallidas: null });
+
     try {
       const r = await panelService.executePlan(plan, soloEstos);
 
@@ -1466,24 +1705,33 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       });
 
       /*
-       * La caja registradora: una vez por lote de apertura que haya entrado.
+       * La caja registradora: una vez por lote que mueva posiciones de verdad.
        *
-       * `plan.kind === 'open'` y no las otras cinco porque solo abrir estrena
-       * posición; cerrar, ajustar apalancamiento o quitar el Take Profit no son
-       * lo que este sonido anuncia.
+       * `open` y `close`, y no las otras cinco, porque son las dos que estrenan
+       * o liquidan posición —el cierre lo pidió el cliente el 17/09/2026, y es
+       * donde el «ka-ching» encaja mejor: es el momento en que el resultado se
+       * realiza—. Ajustar apalancamiento, mover margen o cambiar el Take Profit
+       * no son lo que este sonido anuncia.
        *
        * `r.ok > 0` y no `r.failures.length === 0` porque un lote a medias
-       * también abrió: si veinte casillas entraron y tres fallaron, hay
+       * también movió dinero: si veinte casillas entraron y tres fallaron, hay
        * diecisiete mil dólares en el mercado que no estaban hace un segundo, y
        * el aviso de error que sale justo debajo ya cuenta la otra mitad.
+       *
+       * Y `ok`, no `ok + skipped`: una casilla que se cierra sin tener posición
+       * abierta vuelve con `22002 · no había ninguna posición que cerrar` y cae
+       * en `skipped`. Sonaría la caja sin haberse cerrado nada, que es justo la
+       * confirmación que el operador no debe recibir.
        *
        * Las indeterminadas no suenan por sí solas: no se sabe si entraron, y
        * ese caso se resuelve mirando Bitget, no oyendo el panel.
        *
        * Vale igual para el reintento de fallidas, que vuelve a pasar por aquí:
-       * si el reintento entra, entró una posición, y suena.
+       * si el reintento entra, se movió una posición, y suena.
        */
-      if (plan.kind === 'open' && r.ok > 0) reproducirCajaRegistradora();
+      if ((plan.kind === 'open' || plan.kind === 'close') && r.ok > 0) {
+        reproducirCajaRegistradora();
+      }
 
       if (r.undetermined.length > 0) {
         avisar(
@@ -1517,24 +1765,18 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       }
 
       /*
-       * Tras abrir, la selección se deshace sola.
-       *
-       * Lo pidió el cliente, y el peligro que evita es concreto: al terminar una
-       * apertura esas casillas ya tienen posición, así que la siguiente acción
-       * —cerrar, agregar margen, cambiar apalancamiento— caería sobre ellas si
-       * el operador olvida destildarlas. Destildar 40 casillas a mano es
-       * justamente lo que nadie hace.
-       *
-       * Solo tras `open`, y no tras las otras cinco, porque solo la apertura
-       * cambia lo que hay en la casilla. Encadenar dos ajustes sobre la misma
-       * selección —poner Take Profit y luego agregar margen— es un uso legítimo
-       * que se rompería si esto se aplicara a todo.
-       *
        * Va después del informe y no antes: el resultado del lote se lee sobre la
        * matriz, y vaciar la selección mientras se dibuja el informe haría
-       * parpadear las casillas que se están mirando.
+       * parpadear las casillas que se están mirando. El porqué de la lista, en
+       * `DESMARCA_TRAS`.
+       *
+       * Desmarca aunque el lote haya salido a medias. Las fallidas se recuperan
+       * con «Reintentar solo las fallidas», que se alimenta del informe y no de
+       * la selección; y `BatchResult` no sabe cuáles salieron bien —`ok` y
+       * `skipped` son recuentos sin identidad—, así que desmarcar solo esas
+       * sería adivinar sobre una matriz que mueve dinero real.
        */
-      if (plan.kind === 'open') get().limpiarSeleccion();
+      if (DESMARCA_TRAS.has(plan.kind)) get().limpiarSeleccion();
     } catch (e) {
       set({ enviando: false, mensaje: '' });
       avisar(
@@ -1610,6 +1852,108 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       get().avisar('error', 'No se pudo leer el registro', textoDeError(e), 'Gestión de API keys');
     }
   },
+
+  /*
+   * Respaldar es una acción sobre todas las claves y no toca ninguna: no entra
+   * en `ocupado`, que frena las operaciones que mueven dinero. Su propio
+   * `respaldando` es lo que impide la doble pulsación.
+   */
+  respaldarCuentas: async () => {
+    if (get().respaldando) return;
+    set({ respaldando: true });
+    try {
+      const r = await panelService.backupAccounts();
+      if (r.ok) {
+        const cuantas =
+          r.accounts === null
+            ? 'Sus credenciales están'
+            : `Sus ${r.accounts} ${r.accounts === 1 ? 'subcuenta está' : 'subcuentas están'}`;
+        get().avisar(
+          'ok',
+          'Respaldo guardado',
+          `${cuantas} en «${r.fileName ?? ''}», dentro de ${r.folder ?? 'Documentos'}. ` +
+            'Para pasarlas a otra versión del panel, esa carpeta es la que hay que tener a mano. ' +
+            'Recuerde que la contraseña maestra no va dentro del archivo.',
+          'Respaldo'
+        );
+      } else {
+        get().avisar('error', 'No se pudo respaldar', r.message, 'Respaldo');
+      }
+    } catch (e) {
+      get().avisar('error', 'No se pudo respaldar', textoDeError(e), 'Respaldo');
+    } finally {
+      set({ respaldando: false });
+    }
+  },
+
+  abrirCarpetaRespaldos: async () => {
+    try {
+      await panelService.openBackupFolder();
+    } catch (e) {
+      get().avisar('error', 'No se pudo abrir la carpeta', textoDeError(e), 'Respaldo');
+    }
+  },
+
+  /* Sondear no puede fallar hacia el operador: sin respaldo, la pantalla sigue igual. */
+  buscarRespaldo: async () => {
+    try {
+      set({ respaldoDetectado: await panelService.findBackup() });
+    } catch {
+      set({ respaldoDetectado: null });
+    }
+  },
+
+  /*
+   * El diálogo aparece **solo cuando hay algo que perder**.
+   *
+   * En un panel recién estrenado no hay almacén que destruir: se restaura de un
+   * clic, sin preguntar nada. Con almacén hace falta la maestra de *este*
+   * panel, que es lo que demuestra que lo que se va a apartar es suyo.
+   */
+  pedirRestauracion: async (desdeArchivo) => {
+    if (get().restaurando) return;
+    set({ avisoRestauracion: null, errorRestauracion: '' });
+
+    let hayVault: boolean;
+    try {
+      hayVault = !(await panelService.isFirstRun());
+    } catch (e) {
+      set({ avisoRestauracion: { ok: false, texto: textoDeError(e) } });
+      return;
+    }
+
+    if (!hayVault) {
+      await ejecutarRestauracion(set, get, desdeArchivo, undefined);
+      return;
+    }
+
+    const detectado = get().respaldoDetectado;
+    set({
+      restauracion: {
+        nombre: desdeArchivo ? '' : (detectado?.fileName ?? ''),
+        creadoEn: desdeArchivo ? '' : (detectado?.createdAt ?? ''),
+        cuentas: desdeArchivo ? null : (detectado?.accounts ?? null),
+        desdeArchivo
+      },
+      maestraRestauracion: '',
+      errorRestauracion: ''
+    });
+  },
+
+  escribirMaestraRestauracion: (v) => set({ maestraRestauracion: v, errorRestauracion: '' }),
+
+  confirmarRestauracion: async () => {
+    const { restauracion, maestraRestauracion, restaurando } = get();
+    if (restauracion === null || restaurando) return;
+    if (maestraRestauracion === '') {
+      set({ errorRestauracion: 'Escriba la contraseña maestra de este panel.' });
+      return;
+    }
+    await ejecutarRestauracion(set, get, restauracion.desdeArchivo, maestraRestauracion);
+  },
+
+  cancelarRestauracion: () =>
+    set({ restauracion: null, maestraRestauracion: '', errorRestauracion: '' }),
 
   guardarApi: async () => {
     const { formulario, ocupado, avisar, refrescarApis } = get();
@@ -1896,7 +2240,21 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     try {
       const ok = await panelService.verifyMasterPassword(maestraSeguridad);
       if (!ok) {
-        set({ maestraSeguridad: '', errorSeguridad: 'La contraseña maestra no es correcta.' });
+        /*
+         * Aquí `false` significa dos cosas —clave equivocada, o espera en
+         * curso— y hay que separarlas antes de escribir nada: decirle «no es
+         * correcta» a quien acaba de teclear la buena es como se empieza a
+         * dudar de una contraseña que estaba bien.
+         */
+        await get().refrescarEsperaMaestra();
+        const espera = get().esperaMaestraMs;
+        set({
+          maestraSeguridad: '',
+          errorSeguridad:
+            espera > 0
+              ? `Demasiados intentos seguidos. Vuelva a intentarlo dentro de ${textoEspera(espera)}.`
+              : 'La contraseña maestra no es correcta.'
+        });
         return;
       }
       set({ etapaSeguridad: 'editar', maestraSeguridad: '', errorSeguridad: '' });

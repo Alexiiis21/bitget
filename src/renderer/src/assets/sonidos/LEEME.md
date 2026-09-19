@@ -1,9 +1,12 @@
 # Sonidos del panel
 
-## `caja-registradora.*` — apertura de posiciones
+## `caja-registradora.*` — apertura y cierre de posiciones
 
-Suena una vez cuando un lote de apertura entra en Bitget con al menos una casilla
-correcta. Lo dispara `lib/sonido.ts` desde `store/panel.ts`.
+Suena una vez cuando un lote de **apertura o de cierre** entra en Bitget con al
+menos una casilla correcta. Lo dispara `lib/sonido.ts` desde `store/panel.ts`.
+
+Una casilla que se cierra sin tener posición abierta no cuenta: vuelve como
+omitida, no como correcta, y el lote no suena si no se cerró nada.
 
 ### Cómo se cambia
 

@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ClienteBitget } from '@main/bitget/rest/client';
 import { CUENTAS_MADRE_MAX, NOMBRES_CUENTA_MADRE } from '@shared/constants';
 import { Sesion } from '@main/ipc/sesion';
+import { FrenoMaestra } from '@main/security/freno-maestra';
 import {
   iniciarExchangeSimulado,
   sobreError,
@@ -517,6 +518,77 @@ describe('proyeccion de la matriz', () => {
   });
 
   /*
+   * ==========================================================================
+   * Las cuentas principales van por el abecedario, no por antiguedad
+   * ==========================================================================
+   * Lo reporto el cliente: dio de alta el grupo B antes que el A y el panel le
+   * pinto la B arriba. La de arriba crea A y luego B, asi que el orden de alta
+   * y el alfabetico coinciden y no distingue un criterio del otro; esta invierte
+   * el alta a proposito, que es lo unico que reproduce el fallo.
+   *
+   * No es la primera vez que aparece: el mismo problema se arreglo el
+   * 05/09/2026 en la pantalla de API Keys, y quedo sin arreglar en la matriz.
+   */
+  it('ordena las cuentas principales alfabeticamente, no por orden de alta', async () => {
+    await sesion.crear(MAESTRA);
+    verificacionCorrecta(exchange);
+    await sesion.agregar({ ...ALTA, grupoNombre: 'B', etiqueta: 'Sub-01' });
+    verificacionCorrecta(exchange);
+    await sesion.agregar({ ...ALTA, grupoNombre: 'A', etiqueta: 'Sub-02' });
+
+    expect(sesion.cuentasPanel().map((c) => c.nombre)).toEqual(['A', 'B']);
+
+    /*
+     * Y sigue igual tras reabrir el almacen: el orden sale del camino de
+     * lectura y no de un efecto colateral de la insercion en memoria. Es lo
+     * que separa «arregla las instalaciones que ya existen» de «arregla solo
+     * las altas nuevas».
+     */
+    sesion.cerrar();
+    await sesion.abrir(MAESTRA);
+    expect(sesion.cuentasPanel().map((c) => c.nombre)).toEqual(['A', 'B']);
+  });
+
+  /* Con tres se descarta un arreglo que solo intercambie el primer par. */
+  it('con tres cuentas principales en desorden salen A, B y C', async () => {
+    await sesion.crear(MAESTRA);
+    for (const grupoNombre of ['C', 'A', 'B']) {
+      verificacionCorrecta(exchange);
+      await sesion.agregar({ ...ALTA, grupoNombre, etiqueta: `Sub-${grupoNombre}` });
+    }
+
+    expect(sesion.cuentasPanel().map((c) => c.nombre)).toEqual(['A', 'B', 'C']);
+  });
+
+  /*
+   * La segunda via al mismo sintoma, y la que demuestra que el orden de alta
+   * no era ni siquiera un orden de alta.
+   *
+   * `Grupo.orden` se asignaba con `this.grupos.length`, y los grupos se retiran
+   * del array sin renumerar: vaciar la A y volver a crearla la dejaba con el
+   * mismo numero que la B. A partir de ahi el orden lo decidia la estabilidad
+   * del `sort`, que no es una respuesta.
+   */
+  it('una cuenta principal dada de baja y vuelta a crear no se va al final', async () => {
+    await sesion.crear(MAESTRA);
+    await sesion.fijarPaso(PASO);
+
+    verificacionCorrecta(exchange);
+    const primera = await sesion.agregar({ ...ALTA, grupoNombre: 'A', etiqueta: 'Sub-01' });
+    verificacionCorrecta(exchange);
+    await sesion.agregar({ ...ALTA, grupoNombre: 'B', etiqueta: 'Sub-02' });
+
+    /* Al irse su ultima subcuenta, el grupo A desaparece del registro. */
+    expect(await sesion.eliminar(primera.cuenta?.id ?? '', PASO)).toBe('borrada');
+    expect(sesion.cuentasPanel().map((c) => c.nombre)).toEqual(['B']);
+
+    verificacionCorrecta(exchange);
+    await sesion.agregar({ ...ALTA, grupoNombre: 'A', etiqueta: 'Sub-03' });
+
+    expect(sesion.cuentasPanel().map((c) => c.nombre)).toEqual(['A', 'B']);
+  });
+
+  /*
    * El saldo llega dentro de la respuesta que confirma la credencial. Que
    * aparezca aqui sin una peticion mas es justo lo que hace que la matriz pueda
    * mostrarlo sin gastar cupo.
@@ -593,6 +665,76 @@ describe('proyeccion de la matriz', () => {
     await sesion.verificar(alta.cuenta?.id ?? '');
 
     expect(sesion.cuentasPanel()[0]?.subcuentas[0]?.estado).toBe('desconectada');
+  });
+});
+
+/**
+ * El aviso que dispara el respaldo automatico.
+ *
+ * La sesion no respalda nada: solo dice que sus credenciales cambiaron en
+ * disco. Lo que se prueba aqui es cuando lo dice —y, sobre todo, que decirlo
+ * no puede romper la operacion que lo provoco—.
+ */
+describe('aviso de que las credenciales cambiaron', () => {
+  it('lo dispara un alta', async () => {
+    await sesion.crear(MAESTRA);
+    let veces = 0;
+    sesion.alCambiarCredenciales(() => {
+      veces += 1;
+    });
+    verificacionCorrecta(exchange);
+
+    await sesion.agregar(ALTA);
+
+    expect(veces).toBe(1);
+  });
+
+  it('lo dispara una baja', async () => {
+    await sesion.crear(MAESTRA);
+    await sesion.fijarPaso(PASO);
+    verificacionCorrecta(exchange);
+    const alta = await sesion.agregar(ALTA);
+    let veces = 0;
+    sesion.alCambiarCredenciales(() => {
+      veces += 1;
+    });
+
+    await sesion.eliminar(alta.cuenta?.id ?? '', PASO);
+
+    expect(veces).toBe(1);
+  });
+
+  /* No se escribio nada, asi que no hay nada que respaldar. */
+  it('un alta rechazada no lo dispara', async () => {
+    await sesion.crear(MAESTRA);
+    let veces = 0;
+    sesion.alCambiarCredenciales(() => {
+      veces += 1;
+    });
+    exchange.responder({ cuerpo: sobreError('40012', 'apikey/password is incorrect') });
+
+    const r = await sesion.agregar(ALTA);
+
+    expect(r.ok).toBe(false);
+    expect(veces).toBe(0);
+  });
+
+  /*
+   * La garantia que sostiene todo el enganche: el respaldo es un añadido, el
+   * alta es el trabajo. Si respaldar revienta, el alta sigue siendo un alta
+   * correcta —ya esta escrita en disco cuando esto se avisa—.
+   */
+  it('un oyente que revienta no rompe el alta', async () => {
+    await sesion.crear(MAESTRA);
+    sesion.alCambiarCredenciales(() => {
+      throw new Error('el disco de Documentos no responde');
+    });
+    verificacionCorrecta(exchange);
+
+    const r = await sesion.agregar(ALTA);
+
+    expect(r.ok).toBe(true);
+    expect(sesion.listar()).toHaveLength(1);
   });
 });
 
@@ -795,7 +937,7 @@ describe('planificar y ejecutar una apertura', () => {
       margenInicial: '100',
       apalancamiento: 10,
       precioLimite: null,
-      modoMargen: 'isolated',
+      modoMargen: 'isolated'
     });
 
     expect(plan.entradas).toHaveLength(1);
@@ -814,7 +956,7 @@ describe('planificar y ejecutar una apertura', () => {
       margenInicial: '100',
       apalancamiento: 10,
       precioLimite: null,
-      modoMargen: 'isolated',
+      modoMargen: 'isolated'
     });
     const lote = await sesion.ejecutarApertura(plan.id);
 
@@ -845,7 +987,7 @@ describe('planificar y ejecutar una apertura', () => {
       margenInicial: '100',
       apalancamiento: 10,
       precioLimite: null,
-      modoMargen: 'isolated',
+      modoMargen: 'isolated'
     });
     await sesion.ejecutarApertura(plan.id);
 
@@ -868,7 +1010,7 @@ describe('planificar y ejecutar una apertura', () => {
       margenInicial: '100',
       apalancamiento: 10,
       precioLimite: null,
-      modoMargen: 'isolated',
+      modoMargen: 'isolated'
     });
     await sesion.ejecutarApertura(plan.id);
 
@@ -954,7 +1096,7 @@ describe('planificar y ejecutar una apertura', () => {
       margenInicial: '100',
       apalancamiento: 10,
       precioLimite: null,
-      modoMargen: 'isolated',
+      modoMargen: 'isolated'
     });
 
     reloj += 10 * 60 * 1000;
@@ -971,7 +1113,7 @@ describe('planificar y ejecutar una apertura', () => {
       margenInicial: '100',
       apalancamiento: 10,
       precioLimite: null,
-      modoMargen: 'isolated',
+      modoMargen: 'isolated'
     });
 
     sesion.cerrar();
@@ -998,7 +1140,7 @@ describe('planificar y ejecutar una apertura', () => {
       margenInicial: '100',
       apalancamiento: 10,
       precioLimite: null,
-      modoMargen: 'isolated',
+      modoMargen: 'isolated'
     });
     const primero = await sesion.ejecutarApertura(plan.id);
     expect(primero.jobs[0]?.estado).toBe('fallo');
@@ -1018,7 +1160,7 @@ describe('planificar y ejecutar una apertura', () => {
         margenInicial: '100',
         apalancamiento: 10,
         precioLimite: null,
-        modoMargen: 'isolated',
+        modoMargen: 'isolated'
       })
     ).rejects.toThrow('bloqueado');
   });
@@ -1315,5 +1457,134 @@ describe('ajustar una posicion ya abierta', () => {
         direccion: 'quitar'
       })
     ).rejects.toThrow('bloqueado');
+  });
+});
+
+/**
+ * ==========================================================================
+ * El freno de la contrasena maestra
+ * ==========================================================================
+ * Lo pidio el cliente el 17/09/2026: en vez de bloquear el panel tras varios
+ * fallos -que deja al operador sin saber que hacer-, una espera que crece y se
+ * cumple sola. Aqui se comprueba que el freno esta **en la sesion** y no en la
+ * pantalla: quien llame a `abrir` por el IPC se lo encuentra igual.
+ */
+describe('la espera tras fallar la maestra', () => {
+  /** Un reloj que se puede mover: las esperas son de minutos. */
+  let reloj: number;
+
+  /** Una sesion con su propio freno sobre el reloj de mentira. */
+  async function sesionConFreno(): Promise<Sesion> {
+    const freno = await FrenoMaestra.cargar(join(carpeta, 'intentos.json'), {
+      ahora: () => reloj
+    });
+    return new Sesion(
+      { vault: rutaVault, cuentas: rutaCuentas, activos: rutaActivos },
+      cliente,
+      { parametrosKdf: KDF_PRUEBAS, freno }
+    );
+  }
+
+  beforeEach(async () => {
+    reloj = 1_700_000_000_000;
+    await sesion.crear(MAESTRA);
+    sesion.cerrar();
+  });
+
+  it('los dos primeros fallos no frenan nada', async () => {
+    const s = await sesionConFreno();
+
+    expect((await s.abrir('mal-1')).motivo).toBe('contrasena-incorrecta');
+    expect((await s.abrir('mal-2')).motivo).toBe('contrasena-incorrecta');
+    expect(await s.esperaMaestraMs()).toBe(0);
+
+    /* Y la buena sigue entrando: dos fallos no cierran la puerta. */
+    expect((await s.abrir(MAESTRA)).ok).toBe(true);
+    s.cerrar();
+  });
+
+  it('al tercer fallo impone tres minutos, y lo dice sin acusar a la clave', async () => {
+    const s = await sesionConFreno();
+    for (let i = 0; i < 3; i += 1) await s.abrir(`mal-${i}`);
+
+    expect(await s.esperaMaestraMs()).toBe(3 * 60_000);
+
+    const resultado = await s.abrir(MAESTRA);
+    expect(resultado.ok).toBe(false);
+    expect(resultado.motivo).toBe('espera-activa');
+    expect(resultado.mensaje).toContain('3 minutos');
+  });
+
+  it('cumplida la espera, la contrasena buena entra', async () => {
+    const s = await sesionConFreno();
+    for (let i = 0; i < 3; i += 1) await s.abrir(`mal-${i}`);
+
+    reloj += 3 * 60_000;
+
+    const resultado = await s.abrir(MAESTRA);
+    expect(resultado.ok).toBe(true);
+    /* Y acertar borra el castigo: el siguiente fallo vuelve a ser el primero. */
+    expect(await s.esperaMaestraMs()).toBe(0);
+    s.cerrar();
+  });
+
+  it('la espera dobla con cada fallo posterior', async () => {
+    const s = await sesionConFreno();
+    for (let i = 0; i < 3; i += 1) await s.abrir(`mal-${i}`);
+
+    reloj += 3 * 60_000;
+    await s.abrir('otra-mala');
+
+    expect(await s.esperaMaestraMs()).toBe(6 * 60_000);
+  });
+
+  /*
+   * Las tres puertas que piden la maestra comparten contador. Sin esto, gastar
+   * los tres intentos del desbloqueo y seguir probando en la pantalla de
+   * seguridad daria tres intentos mas por cada sitio donde se pregunta.
+   */
+  it('el contador es el mismo para el desbloqueo y para la pantalla de seguridad', async () => {
+    const s = await sesionConFreno();
+    await s.abrir('mal-1');
+    await s.abrir('mal-2');
+    expect((await s.abrir(MAESTRA)).ok).toBe(true);
+
+    /* Con la sesion ya abierta, dos fallos mas en la pantalla de seguridad. */
+    await s.comprobarMaestra('mal-3');
+    await s.comprobarMaestra('mal-4');
+    expect(await s.esperaMaestraMs()).toBe(0);
+
+    /* El tercero cae en la espera, aunque el primero fuera en otra pantalla. */
+    expect(await s.comprobarMaestra('mal-5')).toBe(false);
+    expect(await s.esperaMaestraMs()).toBe(3 * 60_000);
+
+    /* Y con el freno echado, tampoco vale la buena. */
+    expect(await s.comprobarMaestra(MAESTRA)).toBe(false);
+    s.cerrar();
+  });
+
+  /*
+   * Un vault que no existe no dice nada sobre la clave que se tecleo. Contarlo
+   * castigaria con una hora de espera a quien tiene el almacen roto, que es
+   * justo cuando mas falta hace poder intentarlo.
+   */
+  it('un fallo que no es de contrasena no gasta intentos', async () => {
+    const otraCarpeta = join(carpeta, 'sin-vault');
+    const s = new Sesion(
+      {
+        vault: join(otraCarpeta, 'vault.enc'),
+        cuentas: join(otraCarpeta, 'cuentas.json'),
+        activos: join(otraCarpeta, 'activos.json'),
+        intentos: join(otraCarpeta, 'intentos.json')
+      },
+      cliente,
+      { parametrosKdf: KDF_PRUEBAS }
+    );
+
+    for (let i = 0; i < 4; i += 1) {
+      expect((await s.abrir('lo-que-sea')).motivo).toBe('no-existe');
+    }
+
+    expect(await s.esperaMaestraMs()).toBe(0);
   });
 });

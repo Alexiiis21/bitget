@@ -10,7 +10,8 @@
  * pagina podria manipular, y una cadena donde se espera un objeto no debe
  * llegar viva hasta el vault. docs/02-arquitectura.html.
  */
-import { app, dialog, ipcMain } from 'electron';
+import { mkdir } from 'node:fs/promises';
+import { app, dialog, ipcMain, shell } from 'electron';
 import Decimal from 'decimal.js';
 import { z } from 'zod';
 import {
@@ -20,6 +21,8 @@ import {
   RANURAS_ACTIVO,
   SUBCUENTAS_POR_GRUPO
 } from '@shared/constants';
+import { entorno } from '@shared/entorno';
+import { textoEspera } from '@shared/espera-maestra';
 import type {
   EstadoApp,
   InfoSistema,
@@ -29,7 +32,10 @@ import type {
   PlanMargenIpc,
   PlanQuitarTpIpc,
   PlanTakeProfitIpc,
-  ResultadoImportacionIpc
+  ResultadoImportacionIpc,
+  RespaldoDisponibleIpc,
+  ResultadoRespaldoIpc,
+  ResultadoRestauracionIpc
 } from '@shared/ipc-contract';
 import type { PosicionMonitor } from '@shared/types';
 import { UNIDAD_OPERACION } from '../domain/dimension-orden';
@@ -41,8 +47,15 @@ import type {
   PlanQuitarTakeProfit,
   PlanTakeProfit
 } from '../execution/motor-lotes';
-import { carpetaDatos, esPortable, rutas } from '../storage/paths';
+import { carpetaDatos, carpetaRespaldos, esPortable, rutas } from '../storage/paths';
 import { importarCredenciales } from '../storage/importar-credenciales';
+import {
+  buscarRespaldo,
+  crearRespaldo,
+  leerCabecera,
+  restaurarRespaldo
+} from '../storage/respaldo-credenciales';
+import { existe } from '../storage/atomic-write';
 import { fijarNumeroPanel, type Instancia } from '../storage/instancia';
 import type { Sesion } from './sesion';
 
@@ -262,6 +275,7 @@ const aVistaApalancamiento = (plan: PlanApalancamiento): PlanApalancamientoIpc =
     etiqueta: e.etiqueta,
     lado: e.lado,
     apalancamiento: e.apalancamiento,
+    modoMargen: e.modoMargen,
     apalancamientoActual: e.apalancamientoActual
   })),
   descartes: descartesDe(plan),
@@ -516,6 +530,190 @@ export function registrarIpc(
     };
   });
 
+  /*
+   * Respaldo y restauracion en un archivo unico.
+   *
+   * Ninguno de estos cinco canales recibe una ruta del renderer, por lo mismo
+   * que `credenciales:importar`: el selector lo abre el proceso principal, y
+   * una pantalla comprometida no puede señalar un archivo a su antojo.
+   *
+   * Crear no pide la contrasena maestra porque no descifra nada: copia el
+   * almacen cifrado tal cual. Ver `respaldo-credenciales.ts`.
+   */
+  ipcMain.handle('respaldo:crear', async (): Promise<ResultadoRespaldoIpc> => {
+    const r = rutas();
+    const resultado = await crearRespaldo(
+      { vault: r.vault, cuentas: r.cuentas, activos: r.activos },
+      carpetaRespaldos(),
+      {
+        appVersion: app.getVersion(),
+        entorno: entorno(),
+        mercado,
+        panelOrigen: instancia.numero
+      }
+    );
+    return {
+      ok: resultado.ok,
+      motivo: resultado.motivo,
+      mensaje: resultado.mensaje,
+      nombre: resultado.meta?.nombre ?? null,
+      carpeta: resultado.meta?.carpeta ?? carpetaRespaldos(),
+      cuentas: resultado.meta?.cuentas ?? null
+    };
+  });
+
+  /* La ruta del archivo se queda aqui: solo sale lo que la pantalla enseña. */
+  ipcMain.handle('respaldo:buscar', async (): Promise<RespaldoDisponibleIpc | null> => {
+    const hallado = await buscarRespaldo(carpetaRespaldos());
+    if (hallado === null) return null;
+    return {
+      nombre: hallado.nombre,
+      carpeta: hallado.carpeta,
+      creadoEn: hallado.creadoEn,
+      appVersion: hallado.appVersion,
+      cuentas: hallado.cuentas,
+      mercado: hallado.mercado,
+      panelOrigen: hallado.panelOrigen,
+      demasiadoNuevo: hallado.demasiadoNuevo
+    };
+  });
+
+  /* Se crea la carpeta si no existe: un boton que no hace nada se lee como averiado. */
+  ipcMain.handle('respaldo:abrir-carpeta', async (): Promise<void> => {
+    const carpeta = carpetaRespaldos();
+    await mkdir(carpeta, { recursive: true });
+    await shell.openPath(carpeta);
+  });
+
+  /**
+   * Restaurar, con dos guardias que no son opcionales.
+   *
+   * La primera es la que importa: **el panel tiene que estar bloqueado**. Con
+   * el almacen abierto en memoria, `Sesion` sigue apuntando a la misma ruta, y
+   * la siguiente escritura del vault -un alta, fijar la contrasena de paso-
+   * volcaria el contenido VIEJO sobre el archivo recien restaurado. La
+   * restauracion se perderia en silencio y nadie se enteraria hasta necesitar
+   * una clave. La pantalla solo ofrece restaurar desde el desbloqueo, asi que
+   * esto es un tirante ademas del cinturon; pero es el tirante que impide que
+   * un canal invocable desde el renderer provoque eso.
+   *
+   * La segunda: si ya hay almacen, la maestra **de este panel**. Es lo que
+   * demuestra que lo que se va a apartar es de quien lo esta apartando.
+   */
+  const restaurarDesde = async (
+    archivo: string | null,
+    maestra: unknown
+  ): Promise<ResultadoRestauracionIpc> => {
+    const fallo = (motivo: string, mensaje: string): ResultadoRestauracionIpc => ({
+      cancelado: false,
+      ok: false,
+      motivo,
+      mensaje,
+      cuentas: null,
+      reemplazo: null
+    });
+
+    if ((await sesion.estadoVault()) === 'desbloqueado') {
+      return fallo(
+        'panel-abierto',
+        'Bloquee el panel antes de restaurar un respaldo. Con el almacén abierto, lo que hay en ' +
+          'memoria volvería a escribirse encima de lo restaurado.'
+      );
+    }
+
+    const r = rutas();
+    let elegido = archivo;
+    if (elegido === null) {
+      const hallado = await buscarRespaldo(carpetaRespaldos());
+      if (hallado === null) {
+        return fallo('no-existe', `No se encontró ningún respaldo en «${carpetaRespaldos()}».`);
+      }
+      elegido = hallado.archivo;
+    }
+
+    /* Antes de pedir nada: si el respaldo no sirve, no se pide una contraseña en balde. */
+    const cabecera = await leerCabecera(elegido);
+    if (cabecera !== null && cabecera.demasiadoNuevo) {
+      return fallo(
+        'version-futura',
+        `Ese respaldo lo hizo una versión más nueva del panel${
+          cabecera.appVersion === '' ? '' : ` (${cabecera.appVersion})`
+        }. Actualice el panel antes de restaurarlo.`
+      );
+    }
+
+    const hayVault = await existe(r.vault);
+    if (hayVault) {
+      const clave = esquemaContrasena.parse(maestra);
+      /*
+       * Pasa por el freno de la sesion, no por `Vault.comprobarContrasena` a
+       * secas. Es la misma maestra que la del desbloqueo, y dejar esta puerta
+       * sin contador convertiria la restauracion en el sitio por donde tantear
+       * sin limite mientras la otra espera.
+       */
+      if (!(await sesion.comprobarMaestraEnDisco(clave))) {
+        const espera = await sesion.esperaMaestraMs();
+        if (espera > 0) {
+          return fallo(
+            'espera-activa',
+            'Demasiados intentos seguidos con la contraseña maestra. Vuelva a intentarlo dentro ' +
+              `de ${textoEspera(espera)}.`
+          );
+        }
+        return fallo(
+          'maestra-incorrecta',
+          'Esa no es la contraseña maestra de este panel. Es la que usa para desbloquearlo ahora, ' +
+            'no la del respaldo.'
+        );
+      }
+    }
+
+    const resultado = await restaurarRespaldo(
+      elegido,
+      {
+        base: r.base,
+        vault: r.vault,
+        vaultBak: r.vaultBak,
+        cuentas: r.cuentas,
+        activos: r.activos
+      },
+      { sobrescribir: hayVault }
+    );
+
+    return {
+      cancelado: false,
+      ok: resultado.ok,
+      motivo: resultado.motivo,
+      mensaje: resultado.mensaje,
+      cuentas: resultado.cuentas,
+      reemplazo: resultado.vaultApartado
+    };
+  };
+
+  ipcMain.handle('respaldo:restaurar', (_e, maestra: unknown) => restaurarDesde(null, maestra));
+
+  ipcMain.handle('respaldo:restaurar-archivo', async (_e, maestra: unknown) => {
+    const eleccion = await dialog.showOpenDialog({
+      title: 'Elija el archivo de respaldo',
+      properties: ['openFile'],
+      filters: [{ name: 'Respaldo del panel', extensions: ['pcbak'] }],
+      buttonLabel: 'Restaurar credenciales',
+      defaultPath: carpetaRespaldos()
+    });
+
+    if (eleccion.canceled || eleccion.filePaths[0] === undefined) {
+      return {
+        cancelado: true,
+        ok: false,
+        motivo: null,
+        mensaje: '',
+        cuentas: null,
+        reemplazo: null
+      };
+    }
+    return restaurarDesde(eleccion.filePaths[0], maestra);
+  });
+
   ipcMain.handle('vault:estado', () => sesion.estadoVault());
   ipcMain.handle('vault:crear', (_e, contrasena: unknown) =>
     sesion.crear(esquemaContrasena.parse(contrasena))
@@ -529,6 +727,13 @@ export function registrarIpc(
   ipcMain.handle('vault:comprobar', (_e, contrasena: unknown) =>
     sesion.comprobarMaestra(esquemaContrasena.parse(contrasena))
   );
+  /*
+   * Lo que falta de espera. Se consulta aparte y no viaja en la respuesta de
+   * cada intento porque la pantalla lo necesita **sin haber intentado nada**:
+   * al abrir el panel con una espera en curso hay que enseñar la cuenta atras
+   * antes de que nadie teclee, y al volver de un reinicio, tambien.
+   */
+  ipcMain.handle('vault:espera', () => sesion.esperaMaestraMs());
 
   ipcMain.handle('cuentas:listar', () => sesion.listar());
   ipcMain.handle('cuentas:agregar', (_e, alta: unknown) => sesion.agregar(esquemaAlta.parse(alta)));

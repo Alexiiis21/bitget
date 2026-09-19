@@ -17,7 +17,8 @@ import { habilitarMenuContextual } from './menu-contextual';
 import { Sesion } from './ipc/sesion';
 import { cargarInstancia } from './storage/instancia';
 import { iniciarBitacora } from './diagnostico/bitacora';
-import { fijarCarpetaDeEntorno, rutas } from './storage/paths';
+import { carpetaRespaldos, fijarCarpetaDeEntorno, rutas } from './storage/paths';
+import { programarRespaldo, type RespaldoProgramado } from './storage/respaldo-automatico';
 
 /*
  * Lo primero de todo, antes del cerrojo de instancia unica y antes de que
@@ -32,6 +33,8 @@ let cliente: ClienteBitget | null = null;
 let supervisor: SupervisorReconexion | null = null;
 let barrido: BarridoPosiciones | null = null;
 let pool: PoolSockets | null = null;
+/** El respaldo automatico. Se vacia al cerrar; ver `window-all-closed`. */
+let respaldoAuto: RespaldoProgramado | null = null;
 
 function crearVentana(): void {
   ventana = new BrowserWindow({
@@ -210,8 +213,44 @@ if (!app.requestSingleInstanceLock()) {
     }
 
     cliente = new ClienteBitget();
+    const clienteVivo = cliente;
+
+    /*
+     * El reloj, antes de la primera firma.
+     *
+     * ======================================================================
+     * Por que se mide al arrancar y no cuando falla algo
+     * ======================================================================
+     * Bitget rechaza la firma cuya marca de tiempo se aleje de la suya, y el
+     * caso que lo produce en un panel de escritorio es de manual: el equipo
+     * lleva dias apagado o suspendido, Windows todavia no ha resincronizado su
+     * hora y el operador abre el panel. Sin esta medida, el primer sintoma son
+     * **todas** las cuentas rechazadas con una credencial que esta perfecta, y
+     * `Probar` devolviendo el mismo rechazo las veces que se pulse.
+     *
+     * No se espera a que termine: el endpoint es publico, no hay peticiones
+     * firmadas hasta que alguien desbloquea el vault, y bloquear el arranque de
+     * la ventana por una sonda de red seria pagar el peor caso -sin internet-
+     * en todos los arranques. Si llegara tarde, `corregirReloj` la repite ante
+     * el primer `40008`.
+     */
+    void clienteVivo.sincronizarReloj().then(
+      () => {
+        if (clienteVivo.relojDesviado) {
+          console.warn(
+            `[PCB] el reloj del equipo se desvia ${clienteVivo.desfaseActualMs} ms del de ` +
+              'Bitget. Se corrige al firmar, pero conviene sincronizar la hora de Windows.'
+          );
+        }
+      },
+      (e: unknown) => {
+        const detalle = e instanceof Error ? e.message : String(e);
+        console.warn(`[PCB] no se pudo medir el desfase de reloj con Bitget: ${detalle}`);
+      }
+    );
+
     sesion = new Sesion(
-      { vault: r.vault, cuentas: r.cuentas, activos: r.activos },
+      { vault: r.vault, cuentas: r.cuentas, activos: r.activos, intentos: r.intentos },
       cliente,
       { mercado }
     );
@@ -261,7 +300,16 @@ if (!app.requestSingleInstanceLock()) {
      * el presupuesto de 80 se quedan con el barrido y el panel lo dice: pierden
      * inmediatez, no informacion.
      */
-    pool = new PoolSockets(MERCADOS[mercado], sesion.almacenPosiciones, sesion);
+    /*
+     * Firma su login con el mismo reloj corregido que el REST. El socket manda
+     * su propio `timestamp` -en segundos, ver `ws/conexion.ts`- y un equipo con
+     * la hora desviada perderia tambien los sockets, con el agravante de que
+     * ahi el sintoma es mudo: la cuenta cae a modo REST y sigue funcionando mas
+     * lenta, sin que nada diga por que.
+     */
+    pool = new PoolSockets(MERCADOS[mercado], sesion.almacenPosiciones, sesion, {
+      conexion: { ahora: () => clienteVivo.ahora() }
+    });
     pool.iniciar();
 
     /*
@@ -272,6 +320,24 @@ if (!app.requestSingleInstanceLock()) {
      */
     const pulso = setInterval(() => sesion?.informarSockets(pool?.vivos.length ?? 0), WS_TICK_MS);
     pulso.unref();
+
+    /*
+     * El respaldo que se hace solo, cableado aqui como el resto de lo
+     * transversal: la sesion avisa de que sus credenciales cambiaron y esto
+     * decide que hacer con ello. Ella no sabe donde estan los Documentos del
+     * operador, y no tiene por que.
+     *
+     * Copia bytes ya cifrados: no necesita la contrasena maestra y no puede
+     * filtrar nada. Ver `respaldo-credenciales.ts`.
+     */
+    respaldoAuto = programarRespaldo({
+      origen: { vault: r.vault, cuentas: r.cuentas, activos: r.activos },
+      carpeta: carpetaRespaldos(),
+      respaldo: { appVersion: app.getVersion(), entorno: entorno(), mercado, panelOrigen: instancia.numero },
+      alFallar: (e) => console.warn(`[PCB] respaldo automatico fallido: ${e instanceof Error ? e.message : String(e)}`)
+    });
+    const auto = respaldoAuto;
+    sesion.alCambiarCredenciales(() => auto.pedir());
 
     registrarIpc(sesion, instancia, mercado, r.instancia);
     publicarCambios(sesion);
@@ -294,7 +360,17 @@ if (!app.requestSingleInstanceLock()) {
     pool?.detener();
     sesion?.cerrar();
     void cliente?.cerrar();
-    app.quit();
+
+    /*
+     * Se vacia lo que el respaldo automatico tuviera pendiente antes de salir:
+     * el ultimo alta es justo la que no puede quedarse sin respaldar, porque es
+     * la que el operador acaba de hacer.
+     *
+     * Con tope de dos segundos. Un disco atascado -o OneDrive sincronizando-
+     * no puede impedir que el panel se cierre.
+     */
+    const pendiente = respaldoAuto?.parar() ?? Promise.resolve();
+    void Promise.race([pendiente, new Promise((listo) => setTimeout(listo, 2_000))]).finally(() => app.quit());
   });
 }
 

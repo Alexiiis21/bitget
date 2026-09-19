@@ -16,6 +16,9 @@ import type {
   EstadoApp,
   EstadoVault,
   ResultadoImportacionIpc,
+  RespaldoDisponibleIpc,
+  ResultadoRespaldoIpc,
+  ResultadoRestauracionIpc,
   EventosIpc,
   FilaCuenta,
   InfoSistema,
@@ -50,6 +53,22 @@ export const api: ApiPcb = {
   credencialesImportar: () =>
     ipcRenderer.invoke('credenciales:importar') as Promise<ResultadoImportacionIpc>,
 
+  /* Mismo criterio: ninguna ruta viaja desde aqui. La decide el proceso principal. */
+  respaldoCrear: () => ipcRenderer.invoke('respaldo:crear') as Promise<ResultadoRespaldoIpc>,
+  respaldoBuscar: () =>
+    ipcRenderer.invoke('respaldo:buscar') as Promise<RespaldoDisponibleIpc | null>,
+  respaldoAbrirCarpeta: () => ipcRenderer.invoke('respaldo:abrir-carpeta') as Promise<void>,
+  respaldoRestaurar: (contrasenaMaestra) =>
+    ipcRenderer.invoke(
+      'respaldo:restaurar',
+      contrasenaMaestra
+    ) as Promise<ResultadoRestauracionIpc>,
+  respaldoRestaurarArchivo: (contrasenaMaestra) =>
+    ipcRenderer.invoke(
+      'respaldo:restaurar-archivo',
+      contrasenaMaestra
+    ) as Promise<ResultadoRestauracionIpc>,
+
   vaultEstado: () => ipcRenderer.invoke('vault:estado') as Promise<EstadoVault>,
   vaultCrear: (contrasena) =>
     ipcRenderer.invoke('vault:crear', contrasena) as Promise<ResultadoVault>,
@@ -58,6 +77,7 @@ export const api: ApiPcb = {
   vaultCerrar: () => ipcRenderer.invoke('vault:cerrar') as Promise<void>,
   vaultComprobar: (contrasena) =>
     ipcRenderer.invoke('vault:comprobar', contrasena) as Promise<boolean>,
+  vaultEspera: () => ipcRenderer.invoke('vault:espera') as Promise<number>,
 
   cuentasListar: () => ipcRenderer.invoke('cuentas:listar') as Promise<FilaCuenta[]>,
   cuentasAgregar: (alta: AltaCuenta) =>

@@ -604,14 +604,23 @@ describe('apalancamiento', () => {
   });
 
   /* No necesita posicion: es configuracion de la cuenta. */
-  it('planifica sin consultar posiciones', async () => {
+  it('planifica leyendo el modo por cuenta, y sin consultar posiciones', async () => {
     enrutar({});
 
     const plan = await motor.planificarApalancamiento(apalancar(5));
 
     expect(plan.entradas).toHaveLength(5);
     expect(plan.entradas[0]?.apalancamientoActual).toBe(10);
+    expect(plan.entradas[0]?.modoMargen).toBe('isolated');
     expect(exchange.peticiones.filter((p) => p.url.includes('all-position'))).toHaveLength(0);
+    /*
+     * Una lectura por cuenta, no por casilla: long y short de la misma
+     * subcuenta comparten el modo del simbolo. Si esto subiera a diez, un lote
+     * de trescientas casillas estaria pagando trescientas lecturas de mas.
+     */
+    expect(
+      exchange.peticiones.filter((p) => p.url.startsWith('/api/v2/mix/account/account?'))
+    ).toHaveLength(5);
   });
 
   /* Fuera del rango del simbolo, Bitget respondería «Leverage ratio exceeded». */
@@ -634,7 +643,7 @@ describe('apalancamiento', () => {
    * -sigue siendo correcto- pero un lote de trescientas casillas pasaria de
    * trescientas peticiones a seiscientas, y eso hay que enterarse aqui.
    */
-  it('en aislado confirma con la respuesta: una peticion por casilla y ninguna lectura extra', async () => {
+  it('en aislado confirma con la respuesta: una peticion por casilla y ninguna lectura extra al enviar', async () => {
     const cuerpos: Record<string, unknown>[] = [];
     enrutar({
       alApalancar: (c) => {
@@ -644,6 +653,11 @@ describe('apalancamiento', () => {
     });
 
     const plan = await motor.planificarApalancamiento(apalancar(3));
+    /*
+     * Desde el 10/09/2026 la planificacion lee el modo del simbolo por cuenta,
+     * asi que el corte se toma aqui: lo que esta prueba vigila es el **envio**.
+     */
+    const antesDeEnviar = exchange.peticiones.length;
     const lote = await motor.ejecutarApalancamiento(plan);
 
     expect(lote.accion).toBe('apalancamiento');
@@ -654,7 +668,9 @@ describe('apalancamiento', () => {
     /* Tres casillas, tres envios: ni uno de mas. */
     expect(cuerpos).toHaveLength(3);
     expect(
-      exchange.peticiones.filter((p) => p.url.startsWith('/api/v2/mix/account/account?'))
+      exchange.peticiones
+        .slice(antesDeEnviar)
+        .filter((p) => p.url.startsWith('/api/v2/mix/account/account?'))
     ).toHaveLength(0);
   });
 
@@ -664,9 +680,24 @@ describe('apalancamiento', () => {
    * bueno leyendo `longLeverage`: la incidencia del 05/09/2026.
    */
   it('en margen cruzado no manda el lado y confirma con el apalancamiento cruzado', async () => {
+    /*
+     * El modo lo decide **la lectura del simbolo**, no la ficha: desde el
+     * 10/09/2026 la planificacion lo consulta por cuenta. La ficha se deja
+     * puesta igualmente para dejar claro que ya no influye.
+     */
     cuentas.fijarModoMargen('cta_001', 'crossed');
     const cuerpos: Record<string, unknown>[] = [];
     enrutar({
+      cuentaDe: () => ({
+        marginCoin: 'SUSDT',
+        available: '3000',
+        accountEquity: '3000',
+        marginMode: 'crossed',
+        posMode: 'hedge_mode',
+        isolatedLongLever: 10,
+        isolatedShortLever: 10,
+        crossedMarginLeverage: 10
+      }),
       alApalancar: (c) => {
         cuerpos.push(c);
         return {
@@ -689,12 +720,16 @@ describe('apalancamiento', () => {
   });
 
   /*
-   * La ficha guarda el modo del primer simbolo del mercado, asi que puede no
-   * ser el de este. Cuando no lo es, la primera forma no cambia nada y se
-   * prueba la otra: son dos peticiones y ninguna consecuencia, porque fijar el
-   * mismo valor dos veces deja el mismo valor.
+   * Entre planificar y enviar esta la confirmacion del operador, y en esa
+   * ventana el modo puede cambiar desde la app de Bitget. Cuando pasa, la
+   * primera forma no cambia nada y se prueba la otra: son dos peticiones y
+   * ninguna consecuencia, porque fijar el mismo valor dos veces deja el mismo
+   * valor.
+   *
+   * Es lo que sigue justificando el bucle de dos formas ahora que el modo se
+   * lee al planificar: leerlo estrecha la ventana, no la cierra.
    */
-  it('si la ficha se equivoca de modo, lo reintenta con la otra forma y queda fijado', async () => {
+  it('si el modo cambia despues de planificar, lo reintenta con la otra forma y queda fijado', async () => {
     const cuerpos: Record<string, unknown>[] = [];
     let cruzado = 10;
     enrutar({

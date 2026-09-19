@@ -15,15 +15,13 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
-import { CUENTAS_MADRE_MAX, SUBCUENTAS_POR_GRUPO } from '@shared/constants';
-import type {
-  AccountMode,
-  Cuenta,
-  Grupo,
-  HoldMode,
-  ModoMargen,
-  ModoPosicion
-} from '@shared/types';
+import {
+  compararCuentaMadre,
+  CUENTAS_MADRE_MAX,
+  NOMBRES_CUENTA_MADRE,
+  SUBCUENTAS_POR_GRUPO
+} from '@shared/constants';
+import type { AccountMode, Cuenta, Grupo, HoldMode, ModoMargen, ModoPosicion } from '@shared/types';
 import { escribirAtomico, existe, rotarRespaldo } from '../storage/atomic-write';
 
 /**
@@ -47,7 +45,7 @@ import { escribirAtomico, existe, rotarRespaldo } from '../storage/atomic-write'
  * En ningun caso se convierte el archivo por las bravas: se reescribe con el
  * formato nuevo la proxima vez que se guarde.
  */
-const VERSION_ACTUAL = 4;
+export const VERSION_ACTUAL = 4;
 
 const esquemaGrupo = z.object({
   id: z.string(),
@@ -259,8 +257,29 @@ export class RegistroCuentas {
     return this.cuentas.map((c) => ({ ...c }));
   }
 
+  /**
+   * Las cuentas principales, **por el abecedario**.
+   *
+   * --------------------------------------------------------------------------
+   * Por que el orden se decide al leer y no al guardar
+   * --------------------------------------------------------------------------
+   * Porque asi se arreglan tambien las instalaciones que ya existen. El
+   * `cuentas.json` de quien dio de alta la B antes que la A la tiene guardada
+   * primero, y ordenar aqui la coloca bien sin migrar el archivo, sin subir la
+   * version del formato y sin escribir nada en el primer arranque.
+   *
+   * Se ordena la **copia**, nunca `this.grupos`: reordenar el array interno
+   * haria que `guardar()` reescribiera el archivo con otro orden -una escritura
+   * donde solo queriamos una lectura- y dejaria un metodo `listar...` con
+   * efectos secundarios.
+   *
+   * Hasta el 10/09/2026 el orden lo ponia el campo `Grupo.orden`, que no era un
+   * orden sino el rastro de en que orden se tecleo. Ver `compararCuentaMadre`.
+   */
   listarGrupos(): Grupo[] {
-    return this.grupos.map((g) => ({ ...g }));
+    return this.grupos
+      .map((g) => ({ ...g }))
+      .sort((a, b) => compararCuentaMadre(a.nombre, b.nombre));
   }
 
   cuenta(cuentaId: string): Cuenta | undefined {
@@ -281,7 +300,7 @@ export class RegistroCuentas {
   /** Busca la cuenta principal por nombre, y la crea si es la primera vez. */
   private grupoPorNombre(nombre: string): Grupo {
     const limpio = nombre.trim();
-    const existente = this.grupos.find((g) => g.nombre.toLowerCase() === limpio.toLowerCase());
+    const existente = this.grupoConNombre(limpio);
     if (existente !== undefined) return existente;
 
     if (this.grupos.length >= CUENTAS_MADRE_MAX) {
@@ -292,17 +311,33 @@ export class RegistroCuentas {
       );
     }
 
+    /*
+     * El indice alfabetico, no el de insercion.
+     *
+     * Nadie lee este campo -el orden lo pone `compararCuentaMadre` al listar-,
+     * pero un archivo que dice `orden: 1` en la cuenta A es un archivo que
+     * miente. Y con el contador de insercion que habia hasta el 10/09/2026 dos
+     * grupos podian acabar con el mismo numero: dar de baja la A entera y
+     * volver a crearla la dejaba empatada con la B.
+     *
+     * La guarda del `-1` no es teorica. `esquemaGrupo.orden` es `nonnegative()`
+     * y el alta de la sesion no valida el nombre contra A-O -eso solo ocurre en
+     * la frontera IPC-, asi que un nombre de fuera escribiria un `-1` que el
+     * propio panel no puede releer: `cargar()` se lo tragaria y arrancaria con
+     * el registro vacio.
+     */
+    const posicion = NOMBRES_CUENTA_MADRE.indexOf(limpio);
+
     const grupo: Grupo = {
       id: `grp_${randomUUID().slice(0, 8)}`,
       nombre: limpio,
-      orden: this.grupos.length,
+      orden: posicion === -1 ? NOMBRES_CUENTA_MADRE.length : posicion,
       colapsado: false
     };
     this.grupos.push(grupo);
     return grupo;
   }
 
-  /** La subcuenta que ya ocupa esa etiqueta en esa cuenta principal, si la hay. */
   /**
    * La ficha que ya corresponde a esta subcuenta, si la hay.
    *
@@ -319,8 +354,25 @@ export class RegistroCuentas {
    * la cuenta principal indicada: si el operador ademas se equivoco de grupo,
    * sigue siendo la misma subcuenta y hay que reconocerla.
    *
-   * El nombre queda como respaldo para las fichas de archivos antiguos, que
-   * pueden no tener UID hasta que se validen otra vez.
+   * --------------------------------------------------------------------------
+   * Por que el respaldo por nombre solo mira las fichas sin UID
+   * --------------------------------------------------------------------------
+   * Porque emparejar por nombre una ficha que **si** tiene UID es afirmar que
+   * dos subcuentas distintas de Bitget son la misma, y quien llama a esto
+   * -`reservarId`- convierte esa afirmacion en el id con el que `agregar`
+   * sustituye la ficha anterior y el vault sustituye su credencial.
+   *
+   * El cliente lo encontro el 18/09/2026 dando de alta las veinte subcuentas de
+   * una cuenta principal. La vigesima repetia la etiqueta de la septima -la
+   * comparacion ignora mayusculas y espacios, asi que «Sub 7» y «sub 7 » ya
+   * bastaban- y guardarla borro la septima de su casilla y su API Key del
+   * vault. El panel dijo «API key guardada» y el registro se quedo en
+   * diecinueve.
+   *
+   * Con el filtro, esa alta es una ficha nueva y la etiqueta repetida como
+   * mucho se ve fea en la rejilla. El respaldo sigue cubriendo su unico caso
+   * legitimo: la ficha de un archivo antiguo que todavia no tiene UID porque
+   * nadie ha vuelto a validar su credencial.
    */
   private existente(grupoNombre: string, etiqueta: string, uid?: string): Cuenta | undefined {
     if (uid !== undefined && uid !== '') {
@@ -328,11 +380,41 @@ export class RegistroCuentas {
       if (porUid !== undefined) return porUid;
     }
 
-    const nombre = grupoNombre.trim().toLowerCase();
-    const grupo = this.grupos.find((g) => g.nombre.toLowerCase() === nombre);
+    const grupo = this.grupoConNombre(grupoNombre);
+    if (grupo === undefined) return undefined;
+    const clave = etiqueta.trim().toLowerCase();
+    return this.cuentas.find(
+      (c) => c.grupoId === grupo.id && c.uid === '' && c.etiqueta.toLowerCase() === clave
+    );
+  }
+
+  /**
+   * Quien **podria** ser esta subcuenta mientras no se sabe su UID.
+   *
+   * Es con lo unico que cuenta `comprobarCabida`, que corre antes de salir a la
+   * red: el UID lo dice Bitget al verificar, y verificar es justo lo que ese
+   * chequeo intenta ahorrarse cuando el alta no cabe de todas formas.
+   *
+   * Empareja por etiqueta a secas -sin el filtro por UID de `existente`- y aqui
+   * eso es lo correcto, porque el resultado solo se usa para ser mas permisivo:
+   * entra como `exceptoId` de `casillaPedida`, de modo que rotar la clave de
+   * una subcuenta y dejarla en su casilla no se lea como un choque consigo
+   * misma. Equivocarse de ficha aqui no borra nada; a lo sumo deja pasar un
+   * alta que el chequeo de verdad -`agregar`, ya con el UID en la mano- va a
+   * rechazar, y el precio de ese error son las dos peticiones de la
+   * verificacion.
+   */
+  private posibleFicha(grupoNombre: string, etiqueta: string): Cuenta | undefined {
+    const grupo = this.grupoConNombre(grupoNombre);
     if (grupo === undefined) return undefined;
     const clave = etiqueta.trim().toLowerCase();
     return this.cuentas.find((c) => c.grupoId === grupo.id && c.etiqueta.toLowerCase() === clave);
+  }
+
+  /** La cuenta principal que ya existe con ese nombre. No la crea: ver `grupoPorNombre`. */
+  private grupoConNombre(nombre: string): Grupo | undefined {
+    const limpio = nombre.trim().toLowerCase();
+    return this.grupos.find((g) => g.nombre.toLowerCase() === limpio);
   }
 
   /**
@@ -344,10 +426,9 @@ export class RegistroCuentas {
    * Dar de alta una subcuenta que ya existe siempre cabe: es rotar su clave.
    */
   comprobarCabida(grupoNombre: string, etiqueta: string, slot?: number): ErrorRegistro | null {
-    const yaEsta = this.existente(grupoNombre, etiqueta);
-
-    const nombre = grupoNombre.trim().toLowerCase();
-    const grupo = this.grupos.find((g) => g.nombre.toLowerCase() === nombre);
+    /* Sin UID todavia: `posibleFicha` y no `existente`. Ver su JSDoc. */
+    const yaEsta = this.posibleFicha(grupoNombre, etiqueta);
+    const grupo = this.grupoConNombre(grupoNombre);
 
     if (grupo === undefined) {
       /* Cuenta principal nueva: sus veinte casillas están libres, incluida la pedida. */

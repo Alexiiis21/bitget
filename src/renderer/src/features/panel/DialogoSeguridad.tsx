@@ -27,13 +27,20 @@ export function DialogoSeguridad() {
   const cerrarSeguridad = usarPanel((s) => s.cerrarSeguridad);
   const escribirMaestra = usarPanel((s) => s.escribirMaestraSeguridad);
   const verificarMaestra = usarPanel((s) => s.verificarMaestra);
+  /*
+   * La misma espera del desbloqueo: es la misma contraseña y el mismo contador.
+   * Aquí no hace falta cuenta atrás —el mensaje de error ya dice cuánto queda—,
+   * pero sí apagar el botón: pulsarlo durante la espera solo gasta un viaje al
+   * proceso principal para recibir la misma negativa.
+   */
+  const frenado = usarPanel((s) => s.esperaMaestraMs) > 0;
   const escribirPasoNuevo = usarPanel((s) => s.escribirPasoNuevo);
   const guardarPaso = usarPanel((s) => s.guardarPaso);
 
   if (!abierta) return null;
 
   const alPulsarTecla = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') void verificarMaestra();
+    if (e.key === 'Enter' && !frenado) void verificarMaestra();
   };
 
   return (
@@ -72,7 +79,8 @@ export function DialogoSeguridad() {
               type="button"
               className="pcb-boton-oscuro"
               onClick={() => void verificarMaestra()}
-              style={{ padding: '11px 16px', borderRadius: 9, fontSize: 13.5, fontWeight: 600, cursor: 'pointer', border: `1px solid ${BOTON_PRIMARIO.borde}`, background: BOTON_PRIMARIO.fondo, color: BOTON_PRIMARIO.texto }}
+              disabled={frenado}
+              style={{ padding: '11px 16px', borderRadius: 9, fontSize: 13.5, fontWeight: 600, cursor: frenado ? 'not-allowed' : 'pointer', border: `1px solid ${BOTON_PRIMARIO.borde}`, background: BOTON_PRIMARIO.fondo, color: BOTON_PRIMARIO.texto, opacity: frenado ? 0.55 : 1 }}
             >
               Continuar
             </button>

@@ -55,6 +55,9 @@ import type {
   TransferRecord,
   TransferResult,
   ImportResult,
+  BackupInfo,
+  BackupResult,
+  RestoreResult,
   SystemInfo,
   TpRequest,
   UnlockResult,
@@ -63,6 +66,7 @@ import type {
 import type { Decimal } from '@shared/types';
 import type { PanelService, Unsubscribe } from '@shared/ports/panel-service';
 import { prohibidoEnStaging } from '@shared/entorno';
+import { esperaTrasFallos, textoEspera } from '@shared/espera-maestra';
 import { CASILLAS_POR_CUENTA, HISTORIAL_MAXIMO } from '@/lib/tokens';
 
 /**
@@ -1767,15 +1771,105 @@ export class MockPanelService implements PanelService {
     };
   }
 
+  /*
+   * El respaldo copia archivos de una carpeta del disco, y aquí no hay ninguna:
+   * las cuentas de la demostración viven en memoria. Se dice tal cual en vez de
+   * fingir un archivo que luego no estaría donde se prometió.
+   */
+  async backupAccounts(): Promise<BackupResult> {
+    await latencia(250, 150);
+    return {
+      ok: false,
+      reason: 'demostracion',
+      message: 'La demostración no escribe en el disco: no hay credenciales reales que respaldar.',
+      fileName: null,
+      folder: null,
+      accounts: null
+    };
+  }
+
+  async findBackup(): Promise<BackupInfo | null> {
+    return null;
+  }
+
+  async openBackupFolder(): Promise<void> {
+    return undefined;
+  }
+
+  async restoreBackup(): Promise<RestoreResult> {
+    await latencia(250, 150);
+    return {
+      cancelled: false,
+      ok: false,
+      reason: 'demostracion',
+      message: 'La demostración no lee archivos del disco: no hay ningún respaldo que restaurar.',
+      accounts: null,
+      replaced: null
+    };
+  }
+
+  async restoreBackupFromFile(): Promise<RestoreResult> {
+    return this.restoreBackup();
+  }
+
+  /*
+   * El freno de la maestra, tambien aqui.
+   *
+   * En el panel de demostracion no hay `vault.enc` ni disco que tocar, pero la
+   * espera se simula con la **misma** regla -`esperaTrasFallos`, compartida- en
+   * lugar de con números propios. Es lo que permite ver y probar la pantalla de
+   * espera sin backend; una demo que no frena nunca convertiria esta pantalla en
+   * la única que nadie mira antes de entregar.
+   *
+   * Vive en memoria y se va al recargar, a diferencia del freno de verdad.
+   */
+  private fallosMaestra = 0;
+  private esperaMaestraHasta = 0;
+
+  private esperaMaestra(): number {
+    return Math.max(0, this.esperaMaestraHasta - Date.now());
+  }
+
+  private anotarIntentoMaestra(ok: boolean): void {
+    if (ok) {
+      this.fallosMaestra = 0;
+      this.esperaMaestraHasta = 0;
+      return;
+    }
+    this.fallosMaestra += 1;
+    const duracion = esperaTrasFallos(this.fallosMaestra);
+    this.esperaMaestraHasta = duracion === 0 ? 0 : Date.now() + duracion;
+  }
+
   async unlockVault(masterPassword: string): Promise<UnlockResult> {
     await latencia(300, 200);
+
+    const espera = this.esperaMaestra();
+    if (espera > 0) {
+      return {
+        ok: false,
+        reason:
+          'Demasiados intentos seguidos con la contraseña maestra. Vuelva a intentarlo dentro ' +
+          `de ${textoEspera(espera)}.`
+      };
+    }
+
     const ok = masterPassword === this.maestra || masterPassword.length >= 4;
+    this.anotarIntentoMaestra(ok);
     return ok ? { ok: true, reason: null } : { ok: false, reason: 'Contraseña incorrecta.' };
   }
 
   async verifyMasterPassword(masterPassword: string): Promise<boolean> {
     await latencia(200, 150);
-    return masterPassword === this.maestra || masterPassword.length >= 4;
+    if (this.esperaMaestra() > 0) return false;
+
+    const ok = masterPassword === this.maestra || masterPassword.length >= 4;
+    this.anotarIntentoMaestra(ok);
+    return ok;
+  }
+
+  async masterCooldownMs(): Promise<number> {
+    return this.esperaMaestra();
   }
 
   async verifyStepPassword(pwd: string): Promise<boolean> {

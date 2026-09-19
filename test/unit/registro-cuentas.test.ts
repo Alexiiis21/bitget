@@ -84,7 +84,8 @@ describe('alta', () => {
 
     const primera = registro.agregar(alta(registro.reservarId('A', 'Sub-01'), 'Sub-01'));
     const segunda = registro.agregar({
-      ...alta(registro.reservarId('A', 'Sub-01'), 'Sub-01'),
+      /* Con el UID, que es como lo llama la sesion: quien reconoce la ficha es Bitget. */
+      ...alta(registro.reservarId('A', 'Sub-01', uidDe('Sub-01')), 'Sub-01'),
       credencialId: 'cred_2',
       apiKeyEnmascarada: 'bg••••9999'
     });
@@ -189,6 +190,78 @@ describe('el UID de Bitget como identidad', () => {
 
     expect(registro.listarCuentas()).toHaveLength(1);
     expect(segunda.id).toBe(primera.id);
+  });
+
+  /*
+   * ==========================================================================
+   * Etiqueta repetida con otro UID: son dos subcuentas, no una
+   * ==========================================================================
+   * Lo reporto el cliente el 18/09/2026. Al dar de alta la vigesima subcuenta
+   * de una cuenta principal repitio sin querer la etiqueta de la septima, y el
+   * respaldo por nombre -que esta para las fichas viejas todavia sin UID- la
+   * reconocio como esa misma ficha: la septima perdio su casilla y su
+   * credencial del vault, y el registro se quedo en diecinueve. El panel dijo
+   * «API key guardada».
+   */
+  it('una etiqueta repetida con otro UID no pisa la ficha anterior', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    for (let n = 1; n < SUBCUENTAS_POR_GRUPO; n += 1) {
+      const etiqueta = `Sub-${String(n).padStart(2, '0')}`;
+      registro.agregar({
+        ...alta(registro.reservarId('A', etiqueta, uidDe(etiqueta)), etiqueta),
+        slot: n
+      });
+    }
+
+    /* La vigesima es otra subcuenta de Bitget, con la etiqueta de la septima. */
+    const otroUid = '5476143999';
+    registro.agregar({
+      ...alta(registro.reservarId('A', 'Sub-07', otroUid), 'Sub-07', 'A', 'cred_20'),
+      uid: otroUid,
+      slot: SUBCUENTAS_POR_GRUPO
+    });
+
+    const cuentas = registro.listarCuentas();
+    expect(cuentas).toHaveLength(SUBCUENTAS_POR_GRUPO);
+    /* La septima sigue en su casilla, con su UID y su credencial. */
+    expect(cuentas.find((c) => c.slot === 7)?.uid).toBe(uidDe('Sub-07'));
+    expect(cuentas.find((c) => c.slot === 7)?.credencialId).toBe('cred_1');
+    expect(cuentas.find((c) => c.slot === SUBCUENTAS_POR_GRUPO)?.uid).toBe(otroUid);
+  });
+
+  /* La comparacion ignora mayusculas y espacios, que es por donde se colaba. */
+  it('« sub-07 » tampoco pisa a «Sub-07»', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    registro.agregar({
+      ...alta(registro.reservarId('A', 'Sub-07', uidDe('Sub-07')), 'Sub-07'),
+      slot: 7
+    });
+
+    const otroUid = '5476143999';
+    registro.agregar({
+      ...alta(registro.reservarId('A', ' sub-07 ', otroUid), ' sub-07 '),
+      uid: otroUid,
+      slot: 8
+    });
+
+    expect(registro.listarCuentas()).toHaveLength(2);
+  });
+
+  /*
+   * `comprobarCabida` corre antes de verificar, o sea sin UID, y por eso sigue
+   * mirando solo la etiqueta. Si dejara de reconocer la ficha, rotar una clave
+   * se rechazaria como «casilla ocupada» sin llegar a salir a la red.
+   */
+  it('el chequeo previo deja rotar la clave sobre la misma casilla', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    registro.agregar({
+      ...alta(registro.reservarId('A', 'Sub-07', uidDe('Sub-07')), 'Sub-07'),
+      slot: 7
+    });
+
+    expect(registro.comprobarCabida('A', 'Sub-07', 7)).toBeNull();
+    /* Y para cualquier otra subcuenta esa casilla sigue ocupada. */
+    expect(registro.comprobarCabida('A', 'Sub-08', 7)?.motivo).toBe('casilla-ocupada');
   });
 });
 
@@ -391,7 +464,7 @@ describe('casillas', () => {
     });
 
     const despues = registro.agregar({
-      ...alta(registro.reservarId('A', 'Sub-07'), 'Sub-07'),
+      ...alta(registro.reservarId('A', 'Sub-07', uidDe('Sub-07')), 'Sub-07'),
       slot: 7,
       credencialId: 'cred_2'
     });
@@ -406,7 +479,7 @@ describe('casillas', () => {
     registro.agregar({ ...alta(registro.reservarId('A', 'Sub-07'), 'Sub-07'), slot: 7 });
 
     const movida = registro.agregar({
-      ...alta(registro.reservarId('A', 'Sub-07'), 'Sub-07'),
+      ...alta(registro.reservarId('A', 'Sub-07', uidDe('Sub-07')), 'Sub-07'),
       slot: 12
     });
 
@@ -431,7 +504,7 @@ describe('casillas', () => {
     const antes = registro.agregar(alta(registro.reservarId('A', 'Sub-02'), 'Sub-02'));
 
     const despues = registro.agregar({
-      ...alta(registro.reservarId('A', 'Sub-02'), 'Sub-02'),
+      ...alta(registro.reservarId('A', 'Sub-02', uidDe('Sub-02')), 'Sub-02'),
       credencialId: 'cred_2'
     });
 
@@ -516,6 +589,91 @@ describe('formato anterior', () => {
     expect(registro.listarCuentas()).toHaveLength(2);
     expect(new Set(casillas).size).toBe(2);
     expect(casillas).toContain(4);
+  });
+});
+
+/*
+ * ==========================================================================
+ * El orden de las cuentas principales es el contrato de `listarGrupos()`
+ * ==========================================================================
+ * Antes lo ponia quien llamaba -`cuentasPanel()` ordenaba por `Grupo.orden`- y
+ * por eso salia distinto en la matriz y en la pantalla de API Keys. Ahora lo
+ * garantiza el registro, y estas pruebas son las que lo fijan: las de
+ * integracion comprueban que la matriz lo respeta, pero el contrato vive aqui,
+ * que es a donde tiene que mirar quien anada otro consumidor.
+ */
+describe('orden de las cuentas principales', () => {
+  it('las devuelve por el abecedario aunque se dieran de alta al reves', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+
+    registro.agregar(alta(registro.reservarId('B', 'Sub-01'), 'Sub-01', 'B'));
+    registro.agregar(alta(registro.reservarId('A', 'Sub-02'), 'Sub-02', 'A'));
+
+    expect(registro.listarGrupos().map((g) => g.nombre)).toEqual(['A', 'B']);
+  });
+
+  /*
+   * El archivo que ya tiene instalado quien reporto el fallo, y el caso que el
+   * arreglo tiene que curar **sin migrar nada**.
+   *
+   * Los dos grupos empatan a `orden: 1`, que es lo que producia vaciar la A y
+   * volver a crearla: `orden` se asignaba con `this.grupos.length` y los grupos
+   * se retiran del array sin renumerar. Con el empate, el orden lo decidia la
+   * estabilidad del `sort`.
+   */
+  it('un archivo con el `orden` empatado se sigue leyendo alfabetico', async () => {
+    await writeFile(
+      ruta,
+      JSON.stringify({
+        version: 4,
+        grupos: [
+          { id: 'g1', nombre: 'B', orden: 1, colapsado: false },
+          { id: 'g2', nombre: 'A', orden: 1, colapsado: false }
+        ],
+        cuentas: []
+      }),
+      'utf8'
+    );
+
+    const registro = await RegistroCuentas.cargar(ruta);
+
+    expect(registro.listarGrupos().map((g) => g.nombre)).toEqual(['A', 'B']);
+  });
+
+  /* Un nombre tecleado a mano, de antes de que fueran una lista cerrada. */
+  it('una cuenta principal de fuera de A-O va al final', async () => {
+    await writeFile(
+      ruta,
+      JSON.stringify({
+        version: 4,
+        grupos: [
+          { id: 'g1', nombre: 'Cuenta Madre 1', orden: 0, colapsado: false },
+          { id: 'g2', nombre: 'B', orden: 1, colapsado: false },
+          { id: 'g3', nombre: 'A', orden: 2, colapsado: false }
+        ],
+        cuentas: []
+      }),
+      'utf8'
+    );
+
+    const registro = await RegistroCuentas.cargar(ruta);
+
+    expect(registro.listarGrupos().map((g) => g.nombre)).toEqual(['A', 'B', 'Cuenta Madre 1']);
+  });
+
+  /* Ordenar al leer no puede reordenar lo que se guarda. */
+  it('no reescribe el archivo con el orden nuevo', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    registro.agregar(alta(registro.reservarId('B', 'Sub-01'), 'Sub-01', 'B'));
+    registro.agregar(alta(registro.reservarId('A', 'Sub-02'), 'Sub-02', 'A'));
+
+    expect(registro.listarGrupos().map((g) => g.nombre)).toEqual(['A', 'B']);
+    await registro.guardar();
+
+    const guardado = JSON.parse(await readFile(ruta, 'utf8')) as {
+      grupos: { nombre: string }[];
+    };
+    expect(guardado.grupos.map((g) => g.nombre)).toEqual(['B', 'A']);
   });
 });
 

@@ -62,6 +62,19 @@ const plan = (kind: BatchPlan['kind'], entradas: number): BatchPlan => ({
   blocker: null
 });
 
+/*
+ * El sonido se espia en vez de sonar.
+ *
+ * En `environment: 'node'` no existe `Audio` y el modulo real es un no-op, asi
+ * que sin este doble no habria forma de comprobar **cuando** se dispara, que es
+ * lo unico que puede romperse sin que nadie se entere: el operador que no lo
+ * oye no sabe si es el panel o su equipo.
+ */
+const sonidos = vi.fn();
+vi.mock('@/lib/sonido', () => ({
+  reproducirCajaRegistradora: () => sonidos()
+}));
+
 vi.mock('@/services/panel-service', () => ({
   panelService: {
     getSystemInfo: async () => ({ appVersion: '1.0.0', panelNumber: 1, portable: true }),
@@ -178,6 +191,7 @@ beforeEach(() => {
   pasoValido = true;
   falloAlEnviar = null;
   planDevuelto = plan('open', 3);
+  sonidos.mockClear();
   resultado = { label: 'Prueba', ok: 3, skipped: 0, failures: [], undetermined: [] };
   usarPanel.setState({ plan: null, batch: null, pinPaso: '', errorPaso: '', intentosPaso: 0, avisos: [] });
   prepararSeleccion();
@@ -398,14 +412,18 @@ describe('un plan impedido', () => {
 
 /*
  * ==========================================================================
- * La selección se deshace sola tras abrir.
+ * La selección se deshace sola tras abrir y tras cerrar.
  * ==========================================================================
- * Lo pidió el cliente, y evita un error concreto: al terminar la apertura esas
- * casillas ya tienen posición, así que la siguiente acción caería sobre ellas
- * si el operador olvida destildarlas. Destildar cuarenta a mano es justamente
- * lo que nadie hace.
+ * Lo pidió el cliente -primero para abrir, y el 11/09/2026 para cerrar, que se
+ * había quedado fuera-. Evita un error concreto, y es el mismo en espejo: tras
+ * abrir esas casillas tienen posición y la siguiente acción caería sobre ellas;
+ * tras cerrar están vacías, y la siguiente apertura abriría cuarenta posiciones
+ * que nadie pidió. Destildar cuarenta a mano es justamente lo que nadie hace.
+ *
+ * Las otras cinco conservan la selección: encadenar dos ajustes sobre las
+ * mismas casillas es un uso legítimo.
  */
-describe('desmarcar tras abrir', () => {
+describe('desmarcar tras abrir y tras cerrar', () => {
   it('tras abrir, no queda ninguna casilla marcada', async () => {
     expect(usarPanel.getState().contarSeleccion()).toBe(3);
 
@@ -417,20 +435,92 @@ describe('desmarcar tras abrir', () => {
     expect(usarPanel.getState().contarSeleccion()).toBe(0);
   });
 
-  /*
-   * Solo tras abrir. Encadenar dos ajustes sobre la misma selección -poner el
-   * Take Profit y luego el apalancamiento- es un uso legítimo, y desmarcar tras
-   * cada lote lo convertiría en volver a marcar cuarenta casillas.
-   */
-  it('tras las otras operaciones la selección se conserva', async () => {
-    planDevuelto = plan('leverage', 3);
+  it('tras cerrar, no queda ninguna casilla marcada', async () => {
+    planDevuelto = plan('close', 3);
 
-    await usarPanel.getState().planear('leverage');
+    await usarPanel.getState().planear('close');
+    usarPanel.getState().escribirPin('bg1');
     await usarPanel.getState().confirmarPlan();
 
     expect(enviados).toHaveLength(1);
-    expect(usarPanel.getState().contarSeleccion()).toBe(3);
+    expect(usarPanel.getState().contarSeleccion()).toBe(0);
   });
+
+  /*
+   * Un lote a medias desmarca igual, y es una decisión, no un descuido.
+   *
+   * `BatchResult` no sabe cuáles salieron bien -`ok` y `skipped` son recuentos
+   * sin identidad-, así que desmarcar solo esas sería adivinar. Las fallidas se
+   * recuperan con «Reintentar solo las fallidas», que se alimenta del informe y
+   * no de la selección: por eso se comprueba aquí que el botón existe.
+   */
+  it('un cierre a medias también desmarca del todo', async () => {
+    planDevuelto = plan('close', 3);
+    resultado = {
+      label: 'Prueba',
+      ok: 2,
+      skipped: 0,
+      failures: [
+        { subAccountId: 'sub_3', side: 'long', reason: 'Bitget rechazó la orden.', retryable: true }
+      ],
+      undetermined: []
+    };
+
+    await usarPanel.getState().planear('close');
+    usarPanel.getState().escribirPin('bg1');
+    await usarPanel.getState().confirmarPlan();
+
+    expect(usarPanel.getState().contarSeleccion()).toBe(0);
+    expect(usarPanel.getState().reintentarFallidas).not.toBeNull();
+  });
+
+  /*
+   * Con casillas sin confirmar, también. Se enviaron y no se sabe qué pasó: una
+   * casilla que se quedara tildada es una invitación a actuar otra vez sobre una
+   * posición de estado desconocido, que es justo lo que el aviso prohíbe.
+   */
+  it('un cierre con casillas sin confirmar también desmarca', async () => {
+    planDevuelto = plan('close', 3);
+    resultado = {
+      label: 'Prueba',
+      ok: 2,
+      skipped: 0,
+      failures: [],
+      undetermined: [
+        { subAccountId: 'sub_3', side: 'long', reason: 'Se cortó la conexión.', retryable: false }
+      ]
+    };
+
+    await usarPanel.getState().planear('close');
+    usarPanel.getState().escribirPin('bg1');
+    await usarPanel.getState().confirmarPlan();
+
+    expect(usarPanel.getState().contarSeleccion()).toBe(0);
+    expect(usarPanel.getState().avisos.at(-1)?.titulo).toContain('sin confirmar');
+  });
+
+  /*
+   * Las cinco que conservan. Es el guardarraíl de `DESMARCA_TRAS`: si alguien la
+   * amplía sin querer, cae aquí y no en producción.
+   */
+  it.each<BatchPlan['kind']>(['tp', 'tp-remove', 'margin-add', 'margin-remove', 'leverage'])(
+    'tras «%s» la selección se conserva',
+    async (kind) => {
+      planDevuelto = plan(kind, 3);
+      /*
+       * Los ajustes con campo propio no se planifican si está vacío -`CAMPO_DE`
+       * en el store-, y el fixture los deja así. Sin esto el test pasaría sin
+       * haber enviado nada, que es la peor forma de pasar.
+       */
+      usarPanel.setState((s) => ({ valores: { ...s.valores, tpAjuste: '20', mgAjuste: '5' } }));
+
+      await usarPanel.getState().planear(kind);
+      await usarPanel.getState().confirmarPlan();
+
+      expect(enviados).toHaveLength(1);
+      expect(usarPanel.getState().contarSeleccion()).toBe(3);
+    }
+  );
 
   /*
    * Si el envío revienta -el proceso principal no responde-, la selección se
@@ -441,6 +531,18 @@ describe('desmarcar tras abrir', () => {
     falloAlEnviar = new Error('el panel no responde');
 
     await usarPanel.getState().planear('open');
+    usarPanel.getState().escribirPin('bg1');
+    await usarPanel.getState().confirmarPlan();
+
+    expect(usarPanel.getState().contarSeleccion()).toBe(3);
+    expect(usarPanel.getState().avisos.at(-1)?.titulo).toContain('No se pudo enviar');
+  });
+
+  it('si el cierre no llega a enviarse, la selección tampoco se toca', async () => {
+    planDevuelto = plan('close', 3);
+    falloAlEnviar = new Error('el panel no responde');
+
+    await usarPanel.getState().planear('close');
     usarPanel.getState().escribirPin('bg1');
     await usarPanel.getState().confirmarPlan();
 
@@ -462,12 +564,21 @@ describe('reintentar solo las fallidas', () => {
 
     await usarPanel.getState().planear('close');
     await usarPanel.getState().confirmarPlan();
+
+    /*
+     * El cierre ya desmarcó. El reintento tiene que funcionar igual: se alimenta
+     * de `failures`, no de las casillas tildadas. Si algún día dependiera de la
+     * selección, este es el test que lo delata.
+     */
+    expect(usarPanel.getState().contarSeleccion()).toBe(0);
+
     await usarPanel.getState().reintentarFallidas?.();
 
     expect(enviados).toHaveLength(2);
     /* El mismo plan: mismos identificadores de orden, y por eso no duplica. */
     expect(enviados[1]?.planId).toBe('plan_close');
     expect(enviados[1]?.only).toEqual([{ subAccountId: 'sub_3', side: 'long' }]);
+    expect(usarPanel.getState().contarSeleccion()).toBe(0);
   });
 
   /*
@@ -763,5 +874,144 @@ describe('un activo suspendido', () => {
 
     expect(planificaciones).toBe(0);
     expect(enviados).toHaveLength(0);
+  });
+});
+
+/*
+ * ==========================================================================
+ * El informe del lote anterior no sobrevive al siguiente.
+ * ==========================================================================
+ * La banda del resultado no es un modal: no bloquea nada, así que se puede
+ * lanzar otro lote con ella en pantalla. Si el envío nuevo revienta, el `catch`
+ * solo reponía `enviando` y `mensaje`, de modo que quedaban a la vez el aviso
+ * «No se pudo enviar» y la banda del lote **anterior** con su botón de
+ * reintentar activo, ligado por closure a aquel plan. Pulsarlo reenviaba el lote
+ * de antes, sobre una casilla que el operador ya no estaba mirando.
+ */
+describe('el informe no sobrevive al lote siguiente', () => {
+  /** Deja un informe con una fallida reintentable en pantalla. */
+  async function dejarInformeConFallida(): Promise<void> {
+    planDevuelto = plan('close', 3);
+    resultado = {
+      label: 'Lote A',
+      ok: 2,
+      skipped: 0,
+      failures: [
+        { subAccountId: 'sub_3', side: 'long', reason: 'Bitget rechazó la orden.', retryable: true }
+      ],
+      undetermined: []
+    };
+
+    await usarPanel.getState().planear('close');
+    usarPanel.getState().escribirPin('bg1');
+    await usarPanel.getState().confirmarPlan();
+  }
+
+  it('un lote nuevo que revienta no deja en pie el informe del anterior', async () => {
+    await dejarInformeConFallida();
+    expect(usarPanel.getState().batch?.label).toBe('Lote A');
+    expect(usarPanel.getState().reintentarFallidas).not.toBeNull();
+
+    /* Lote B, que no llega a salir. */
+    prepararSeleccion();
+    planDevuelto = plan('close', 3);
+    falloAlEnviar = new Error('el panel no responde');
+
+    await usarPanel.getState().planear('close');
+    usarPanel.getState().escribirPin('bg1');
+    await usarPanel.getState().confirmarPlan();
+
+    expect(usarPanel.getState().batch).toBeNull();
+    expect(usarPanel.getState().reintentarFallidas).toBeNull();
+    expect(usarPanel.getState().avisos.at(-1)?.titulo).toContain('No se pudo enviar');
+  });
+
+  /*
+   * El reintento es la excepción: tiene que conservar la lista de fallidas
+   * visible hasta que salga bien. Si también la borrara, un reintento que
+   * revienta dejaría al operador sin la lista de lo que le falta por cerrar.
+   */
+  it('un reintento que revienta sí conserva el informe', async () => {
+    await dejarInformeConFallida();
+
+    falloAlEnviar = new Error('el panel no responde');
+    await usarPanel.getState().reintentarFallidas?.();
+
+    expect(usarPanel.getState().batch?.label).toBe('Lote A');
+    expect(usarPanel.getState().reintentarFallidas).not.toBeNull();
+  });
+});
+
+/*
+ * ==========================================================================
+ * La caja registradora
+ * ==========================================================================
+ * Suena en el renderer y nadie puede verla en una captura, asi que la regla se
+ * fija aqui: que lote suena y cual no. El cierre se anadio el 17/09/2026 a
+ * peticion del cliente; hasta entonces solo sonaba la apertura.
+ */
+describe('el sonido de caja registradora', () => {
+  /** Planifica, aprueba con la contrasena de paso y deja el informe puesto. */
+  async function enviar(kind: BatchPlan['kind']): Promise<void> {
+    planDevuelto = plan(kind, 2);
+    await usarPanel.getState().planear(kind);
+    usarPanel.getState().escribirPin('bg1');
+    await usarPanel.getState().confirmarPlan();
+  }
+
+  it('suena cuando entra un lote de apertura', async () => {
+    await enviar('open');
+
+    expect(sonidos).toHaveBeenCalledTimes(1);
+  });
+
+  it('suena cuando entra un lote de cierre', async () => {
+    await enviar('close');
+
+    expect(sonidos).toHaveBeenCalledTimes(1);
+  });
+
+  /*
+   * Un lote a medias movio dinero igual: diecisiete casillas dentro y tres
+   * fuera siguen siendo diecisiete posiciones que no existian.
+   */
+  it('suena aunque el lote entre a medias', async () => {
+    resultado = {
+      label: 'Prueba',
+      ok: 1,
+      skipped: 0,
+      failures: [
+        {
+          subAccountId: 'sub_2',
+          side: 'long',
+          reason: 'Saldo insuficiente',
+          retryable: true
+        }
+      ],
+      undetermined: []
+    };
+
+    await enviar('close');
+
+    expect(sonidos).toHaveBeenCalledTimes(1);
+  });
+
+  /*
+   * Cerrar una casilla que no tenia posicion vuelve como omitida, no como
+   * correcta. Sonar ahi confirmaria un cierre que no ocurrio.
+   */
+  it('no suena si el cierre no cerro nada', async () => {
+    resultado = { label: 'Prueba', ok: 0, skipped: 2, failures: [], undetermined: [] };
+
+    await enviar('close');
+
+    expect(sonidos).not.toHaveBeenCalled();
+  });
+
+  it('no suena al ajustar el Take Profit ni el apalancamiento', async () => {
+    await enviar('tp');
+    await enviar('leverage');
+
+    expect(sonidos).not.toHaveBeenCalled();
   });
 });

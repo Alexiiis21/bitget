@@ -66,6 +66,15 @@ export const rutas = () => {
     vault: join(base, 'vault.enc'),
     vaultBak: join(base, 'vault.enc.bak'),
     cuentas: join(base, 'cuentas.json'),
+    /**
+     * Intentos fallidos contra la contrasena maestra y la espera en curso.
+     *
+     * Fuera del `.pcbak` a proposito -ver `respaldo-credenciales.ts`-: el
+     * respaldo existe para recuperar credenciales, y restaurar uno hecho hace
+     * un mes no debe traerse de vuelta un castigo de entonces ni, al reves,
+     * servir para limpiar el de ahora.
+     */
+    intentos: join(base, 'intentos.json'),
     /** Que activo hay en cada una de las ocho casillas del selector, por mercado. */
     activos: join(base, 'activos.json'),
     ordenesPendientes: join(base, 'ordenes', 'pendientes.jsonl'),
@@ -73,6 +82,26 @@ export const rutas = () => {
     logs: join(base, 'logs')
   } as const;
 };
+
+/**
+ * Donde se guardan los respaldos `.pcbak`, y por que en Documentos.
+ *
+ * El respaldo existe justamente para sobrevivir a que el operador borre la
+ * carpeta del panel viejo. Guardarlo dentro de esa carpeta seria guardarlo en
+ * el unico sitio que se sabe que va a desaparecer.
+ *
+ * El sufijo `-staging` sigue el mismo criterio que `fijarCarpetaDeEntorno` y
+ * **no es cosmetico**: sin el, el panel de staging -que guarda credenciales
+ * reales de Bitget- reescribiria el `respaldo-pcb-ultimo.pcbak` del panel de
+ * produccion, y la deteccion automatica de la version nueva ofreceria restaurar
+ * el juego de claves equivocado.
+ */
+export const carpetaRespaldos = (): string =>
+  join(
+    app.getPath('documents'),
+    esStaging() ? 'Panel de Control Bitget-staging' : 'Panel de Control Bitget',
+    'respaldos'
+  );
 
 /** Nombre del archivo de log del dia, con rotacion diaria. docs/03 seccion 11. */
 export const archivoLogDeHoy = (ahora = new Date()): string => {

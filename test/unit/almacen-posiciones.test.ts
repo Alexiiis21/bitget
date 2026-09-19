@@ -112,6 +112,32 @@ describe('instantanea', () => {
     expect(oyente).not.toHaveBeenCalled();
   });
 
+  /*
+   * El fallo del 10/09/2026: P&L y ROE congelados en pantalla.
+   *
+   * En una posicion abierta y quieta, entre dos barridos solo cambia el P&L
+   * -tamano, entrada y apalancamiento son constantes, y el margen tambien en
+   * aislado-. Como `pnl` no disparaba el aviso, la lectura nueva se guardaba en
+   * memoria y nunca se emitia `monitor:posiciones`: el dato quedaba fresco en el
+   * proceso principal y viejo delante del operador, hasta que abria o cerraba
+   * algo. Las dos mitades de la regla se prueban juntas a proposito, porque
+   * arreglar la primera metiendo `pnl` en `CAMPOS_COTEJADOS` romperia la segunda
+   * y llenaria el log de deriva de ruido cada 45 segundos.
+   */
+  it('repinta cuando solo cambia el P&L, y no lo anota como deriva', () => {
+    const a = new AlmacenPosiciones();
+    const antes = posicion({ cuentaId: 'sub-01', simbolo: 'BTCUSDT', lado: 'long', pnl: '12.50' });
+    a.aplicarInstantanea('sub-01', [antes]);
+
+    const oyente = vi.fn();
+    a.alCambiar(oyente);
+    const derivas = a.aplicarInstantanea('sub-01', [{ ...antes, pnl: '18.75' }]);
+
+    expect(oyente).toHaveBeenCalledTimes(1);
+    expect(derivas).toEqual([]);
+    expect(a.instantanea()[0]?.pnl).toBe('18.75');
+  });
+
   it('descarta de la foto lo que viene con tamano cero', () => {
     const a = new AlmacenPosiciones();
 

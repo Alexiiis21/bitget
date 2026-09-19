@@ -12,7 +12,8 @@
  *     comprueba siempre, y se traduce a `ErrorBitget` clasificado.
  *  2. **Correccion de reloj.** El exchange rechaza peticiones cuya marca de
  *     tiempo se desvie de la suya. El cliente mide el desfase contra
- *     `/api/v2/public/time` y firma con el reloj corregido.
+ *     `/api/v2/public/time`, firma con el reloj corregido y **vuelve a medirlo
+ *     solo** cuando Bitget rechaza una firma por marca caducada.
  *  3. **Timeouts separados.** Conexion, cabeceras y cuerpo tienen limites
  *     propios: un socket colgado no puede bloquear una operacion sobre 100
  *     cuentas.
@@ -28,14 +29,15 @@ import type { z } from 'zod';
 import { esStaging } from '@shared/entorno';
 import { anotarPeticion, cuentaDe, superficieDeRuta } from '../../diagnostico/bitacora';
 import { LimitadorPeticiones, type DiagnosticoLimitador } from '../../execution/rate-limiter';
-import { enmascararApiKey } from '../../security/redact';
+import { enmascararApiKey, redactarTexto } from '../../security/redact';
 import {
   errorDeEsquema,
   errorDeHttp,
   errorDeRespuesta,
   errorDeTransporte,
   ErrorBitget,
-  CODIGO_EXITO
+  CODIGO_EXITO,
+  CODIGO_MARCA_CADUCADA
 } from '../errors';
 import { esquemaHoraServidor, esquemaSobre } from '../schemas/envelope';
 import {
@@ -65,6 +67,17 @@ const TIMEOUT_CUERPO_MS = 15_000;
 const CONEXIONES_POOL = 16;
 /** Desfase de reloj a partir del cual conviene resincronizar. */
 const DESFASE_TOLERADO_MS = 5_000;
+/**
+ * Separacion minima entre dos medidas del desfase.
+ *
+ * Un reloj desviado hace fallar **todas** las cuentas a la vez, asi que sin
+ * esta guarda un solo desbarajuste de reloj dispararia cien peticiones a
+ * `/api/v2/public/time` en el mismo segundo -y el cupo de ese endpoint es por
+ * IP-. Si la medida es de hace menos de esto, el desfase ya esta al dia y el
+ * rechazo viene de otra cosa: la latencia de la peticion, o un reloj que se
+ * mueve mientras se la mide.
+ */
+const RESINCRONIZACION_MINIMA_MS = 30_000;
 
 export interface OpcionesCliente {
   /**
@@ -115,6 +128,16 @@ export class ClienteBitget {
   /** Milisegundos a sumar al reloj local para obtener el del exchange. */
   private desfaseMs = 0;
   private sincronizado = false;
+  /**
+   * Instante -en reloj local- del ultimo **intento** de medir el desfase.
+   *
+   * Cuenta el intento y no el exito a proposito: si la medida falla por red, lo
+   * que no conviene es repetirla con cada una de las cien cuentas que estan
+   * fallando por el mismo motivo.
+   */
+  private ultimaSincronizacion: number | null = null;
+  /** Medida en curso, compartida por todas las peticiones que la pidieron. */
+  private resincronizando: Promise<void> | null = null;
 
   constructor(opciones: OpcionesCliente = {}) {
     const host = opciones.host ?? HOST_BITGET;
@@ -174,6 +197,7 @@ export class ClienteBitget {
    */
   async sincronizarReloj(): Promise<number> {
     const t0 = this.relojLocal();
+    this.ultimaSincronizacion = t0;
     const { datos } = await this.peticionPublica(
       { metodo: 'GET', ruta: '/api/v2/public/time', idempotente: true },
       esquemaHoraServidor
@@ -193,6 +217,56 @@ export class ClienteBitget {
   /** `true` cuando el desfase medido supera el margen comodo. */
   get relojDesviado(): boolean {
     return Math.abs(this.desfaseMs) > DESFASE_TOLERADO_MS;
+  }
+
+  /**
+   * Vuelve a medir el desfase despues de que Bitget rechazara una firma por
+   * marca de tiempo.
+   *
+   * ==========================================================================
+   * Por que hace falta, y que pasaba sin esto
+   * ==========================================================================
+   * `40008` esta catalogado como `retryable`, de modo que el motor y el
+   * supervisor lo reintentan. Pero reintentar **no arregla un reloj**: si el
+   * equipo lleva dias apagado y Windows aun no ha resincronizado su hora, cada
+   * reintento vuelve a firmar con la misma marca desviada y vuelve a recibir el
+   * mismo rechazo, con backoff, indefinidamente. El panel se quedaba con las
+   * cuentas caidas y sin nada que el operador pudiera corregir: su credencial
+   * estaba bien.
+   *
+   * Aqui se cierra ese lazo. El cliente sigue sin reintentar -eso es de
+   * `execution/`, ver la cabecera- pero deja el desfase medido **antes** de que
+   * llegue el reintento, que es lo unico que lo hace distinto del anterior.
+   *
+   * ==========================================================================
+   * Nunca puede cambiar el error que lo provoco
+   * ==========================================================================
+   * Si la medida falla -sin red, o `/api/v2/public/time` caido-, se traga el
+   * fallo: quien llamo estaba gestionando un rechazo del exchange y tiene que
+   * recibir **ese**, no uno de la sonda que se lanzo para diagnosticarlo.
+   */
+  private corregirReloj(): Promise<void> {
+    /* Ya hay una medida en vuelo: las cien cuentas que fallaron esperan esa. */
+    if (this.resincronizando !== null) return this.resincronizando;
+
+    if (
+      this.ultimaSincronizacion !== null &&
+      this.relojLocal() - this.ultimaSincronizacion < RESINCRONIZACION_MINIMA_MS
+    ) {
+      return Promise.resolve();
+    }
+
+    const tarea = this.sincronizarReloj()
+      .then(
+        () => undefined,
+        () => undefined
+      )
+      .finally(() => {
+        this.resincronizando = null;
+      });
+
+    this.resincronizando = tarea;
+    return tarea;
   }
 
   /**
@@ -235,32 +309,54 @@ export class ClienteBitget {
    * La ruta se le pasa al limitador para que aplique el techo propio de los
    * endpoints que lo tienen -V3 los publica por endpoint y por UID-. Para una
    * ruta sin techo declarado, que son casi todas, no cambia nada.
+   *
+   * --------------------------------------------------------------------------
+   * La correccion de reloj va FUERA del limitador, y no es un detalle de estilo
+   * --------------------------------------------------------------------------
+   * `corregirReloj` hace su propia peticion, que necesita un hueco de
+   * concurrencia. Llamarla dentro del callback -es decir, con el hueco de esta
+   * peticion todavia ocupado- se bloquearia a si misma en cuanto el reloj
+   * desviado hiciera fallar a la vez tantas cuentas como huecos hay: todas
+   * esperando una medida que no puede entrar porque las esperas la tienen
+   * tomada. Aqui el `finally` del limitador ya devolvio el hueco.
    */
   async peticionFirmada<E extends z.ZodType>(
     credencial: Credencial,
     peticion: PeticionRest,
     esquema: E
   ): Promise<RespuestaRest<z.infer<E>>> {
-    return this.limitador.ejecutar(
-      credencial.apiKey,
-      () => {
-        const firmable: PeticionFirmable = {
-          metodo: peticion.metodo,
-          ruta: peticion.ruta,
-          ...(peticion.consulta === undefined ? {} : { consulta: peticion.consulta }),
-          ...(peticion.cuerpo === undefined ? {} : { cuerpo: peticion.cuerpo })
-        };
+    try {
+      return await this.limitador.ejecutar(
+        credencial.apiKey,
+        () => {
+          const firmable: PeticionFirmable = {
+            metodo: peticion.metodo,
+            ruta: peticion.ruta,
+            ...(peticion.consulta === undefined ? {} : { consulta: peticion.consulta }),
+            ...(peticion.cuerpo === undefined ? {} : { cuerpo: peticion.cuerpo })
+          };
 
-        const firmada = firmarPeticion(credencial, firmable, () => this.ahora());
-        return this.enviar(
-          firmada,
-          peticion.idempotente,
-          esquema,
-          cuentaDe(credencial.apiKey)
-        );
-      },
-      peticion.ruta
-    );
+          const firmada = firmarPeticion(credencial, firmable, () => this.ahora());
+          return this.enviar(
+            firmada,
+            peticion.idempotente,
+            esquema,
+            cuentaDe(credencial.apiKey)
+          );
+        },
+        peticion.ruta
+      );
+    } catch (e) {
+      /*
+       * El reintento lo decide quien corresponda; lo que se hace aqui es dejar
+       * el reloj bien **antes** de que llegue, que es lo unico que puede hacer
+       * que el siguiente intento termine distinto. Ver `corregirReloj`.
+       */
+      if (e instanceof ErrorBitget && e.codigo === CODIGO_MARCA_CADUCADA) {
+        await this.corregirReloj();
+      }
+      throw e;
+    }
   }
 
   /**
@@ -329,8 +425,27 @@ export class ClienteBitget {
     } catch (e) {
       if (e instanceof ErrorBitget) {
         anotar(e.httpStatus, e.codigo, e.mensajeOriginal ?? e.message);
+        /*
+         * Ademas del archivo, a la consola: es lo que ve el operador en la
+         * terminal de `npm run dev`, y un codigo sin catalogar (fatal-cuenta
+         * por defecto) solo se puede diagnosticar con el texto crudo de
+         * Bitget, que la pantalla no ensena. Solo en staging: es donde hay
+         * respuestas reales del exchange que valga la pena leer aqui.
+         */
+        if (esStaging()) {
+          console.warn(
+            `[PCB] bitget rechazo ${firmada.rutaCompleta} codigo=${e.codigo ?? 'sin-codigo'} ` +
+              `http=${e.httpStatus ?? 'sin-http'} — ${redactarTexto(e.mensajeOriginal ?? e.message)}`
+          );
+        }
       } else {
-        anotar(null, null, e instanceof Error ? e.message : String(e));
+        const mensaje = e instanceof Error ? e.message : String(e);
+        anotar(null, null, mensaje);
+        if (esStaging()) {
+          console.warn(
+            `[PCB] fallo de transporte en ${firmada.rutaCompleta}: ${redactarTexto(mensaje)}`
+          );
+        }
       }
       throw e;
     }

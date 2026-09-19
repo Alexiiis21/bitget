@@ -123,9 +123,10 @@ export interface Position {
    */
   pnl: Decimal;
   /**
-   * Retorno sobre el margen actual, en %. Bitget no lo informa: lo calcula el
-   * proceso principal contra el margen que el exchange tiene ahora mismo, no
-   * contra `initialMarginAccum` -que puede ser `null`-. `null` sin P&L
+   * Retorno sobre el margen inicial, en %. Bitget no lo informa: lo calcula el
+   * proceso principal como `pnl / (tamaño x entrada / apalancamiento) x 100`,
+   * que es el divisor que usa la app -agregar margen no mueve el ROE-. No es
+   * `initialMarginAccum`, que es del panel y puede ser `null`. `null` sin P&L
    * conocido o sin margen contra el que dividir.
    */
   roe: number | null;
@@ -561,11 +562,7 @@ export interface TransferPlan {
  * La pantalla tiene que decirlo distinto, porque lo que puede hacer el operador
  * es distinto —ante un rechazo, repetir; ante esto, comprobar el saldo primero—.
  */
-export type TransferFailure =
-  | 'paso-incorrecto'
-  | 'sin-credencial'
-  | 'rechazado'
-  | 'indeterminado';
+export type TransferFailure = 'paso-incorrecto' | 'sin-credencial' | 'rechazado' | 'indeterminado';
 
 export interface TransferResult {
   ok: boolean;
@@ -685,6 +682,49 @@ export interface ImportResult {
   message: string;
   /** Cuántas subcuentas traía el registro importado, si venía. */
   accounts: number | null;
+}
+
+/**
+ * Un respaldo `.pcbak` que el panel ha encontrado por su cuenta en Documentos.
+ *
+ * No lleva la ruta del archivo: el renderer no elige qué restaurar, solo pide
+ * que se restaure lo que se le ha enseñado.
+ */
+export interface BackupInfo {
+  fileName: string;
+  folder: string;
+  createdAt: string;
+  appVersion: string;
+  accounts: number | null;
+  market: 'real' | 'simulado' | null;
+  panel: number | null;
+  /** Lo hizo una versión más nueva del panel: se enseña, no se ofrece restaurar. */
+  tooNew: boolean;
+}
+
+export interface BackupResult {
+  ok: boolean;
+  reason: string | null;
+  message: string;
+  fileName: string | null;
+  folder: string | null;
+  accounts: number | null;
+}
+
+/**
+ * Resultado de restaurar un respaldo.
+ *
+ * `replaced` lleva el nombre del almacén que se apartó, o `null` si no había
+ * ninguno: la pantalla lo nombra para que el operador sepa dónde está lo que
+ * tenía antes.
+ */
+export interface RestoreResult {
+  cancelled: boolean;
+  ok: boolean;
+  reason: string | null;
+  message: string;
+  accounts: number | null;
+  replaced: string | null;
 }
 
 /** Resultado de crear o abrir el almacén. `reason` distingue contraseña incorrecta de archivo dañado. */
