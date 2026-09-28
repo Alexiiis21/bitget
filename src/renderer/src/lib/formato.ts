@@ -32,6 +32,46 @@ export function cifraConSigno(v: Decimal | number | null | undefined, decimales 
   return (n > 0 ? '+' : '') + cifra(n, decimales);
 }
 
+/**
+ * Decimales que trae la cadena tal como la manda el exchange: `"0.0000043575"`
+ * → 10. Un número no trae ninguno que se pueda leer, y cae en 2.
+ */
+export function decimalesDe(v: Decimal | number | null | undefined): number {
+  if (typeof v !== 'string') return 2;
+  const punto = v.indexOf('.');
+  return punto < 0 ? 0 : Math.min(v.length - punto - 1, 12);
+}
+
+/**
+ * Un precio con los decimales del activo.
+ *
+ * `cifra` a secas redondea a dos, y con PEPE -diez decimales- eso convertía
+ * entrada, liquidación y Take Profit en «0,00». Sin `decimales` -un activo que
+ * no está en el selector y del que no se conoce `pricePlace`- se respetan los
+ * que trae la cadena del exchange, que ya viene a la precisión del contrato.
+ */
+export function precio(v: Decimal | number | null | undefined, decimales?: number): string {
+  return cifra(v, decimales ?? decimalesDe(v));
+}
+
+/** Igual que `precio`, con signo explícito. Se usa en la distancia L/S. */
+export function precioConSigno(v: Decimal | number | null | undefined, decimales?: number): string {
+  return cifraConSigno(v, decimales ?? decimalesDe(v));
+}
+
+/**
+ * Un importe en USDT: dos decimales, y hasta cuatro por debajo de 1.
+ *
+ * Se usa en el margen. El P&L no pasa por aquí: sigue con `cifraConSigno`, que
+ * es como lo validó el cliente.
+ */
+export function importe(v: Decimal | number | null | undefined): string {
+  const n = aNumero(v);
+  if (n === null) return '—';
+  const max = Math.abs(n) >= 1 ? 2 : 4;
+  return n.toLocaleString(LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: max });
+}
+
 /** Un porcentaje con signo explícito, para el ROE: «+35,00 %» / «−12,40 %». */
 export function porcentajeConSigno(v: number | null | undefined, decimales = 2): string {
   const n = aNumero(v);

@@ -27,7 +27,12 @@
 import { Pool } from 'undici';
 import type { z } from 'zod';
 import { esStaging } from '@shared/entorno';
-import { anotarPeticion, cuentaDe, superficieDeRuta } from '../../diagnostico/bitacora';
+import {
+  anotarPeticion,
+  cargaParaLog,
+  cuentaDe,
+  superficieDeRuta
+} from '../../diagnostico/bitacora';
 import { LimitadorPeticiones, type DiagnosticoLimitador } from '../../execution/rate-limiter';
 import { enmascararApiKey, redactarTexto } from '../../security/redact';
 import {
@@ -400,6 +405,13 @@ export class ClienteBitget {
     cuenta = 'publica'
   ): Promise<RespuestaRest<z.infer<E>>> {
     const arranque = this.relojLocal();
+    /*
+     * Las peticiones que cambian algo -ordenes, apalancamiento, modo de margen,
+     * traspasos- anotan tambien lo que contesto Bitget. Los GET no: son el
+     * sondeo de saldos y posiciones, con listas largas cada pocos segundos.
+     */
+    const muta = firmada.metodo !== 'GET';
+    let dataCruda: unknown;
 
     const anotar = (
       httpStatus: number | null,
@@ -414,13 +426,30 @@ export class ClienteBitget {
         httpStatus,
         codigo,
         ms: this.relojLocal() - arranque,
-        mensaje
+        mensaje,
+        cuerpo: firmada.cuerpo,
+        ...(muta && dataCruda !== undefined ? { respuesta: dataCruda } : {})
       });
     };
 
+    /*
+     * Lo enviado, a la consola de `npm run dev`. Solo lo que cambia algo y
+     * solo en staging, por lo mismo que los rechazos de abajo.
+     */
+    const cuerpoConsola = (): string =>
+      firmada.cuerpo === '' ? '' : ` cuerpo=${JSON.stringify(cargaParaLog(firmada.cuerpo))}`;
+
     try {
-      const r = await this.enviarSinAnotar(firmada, idempotente, esquema);
+      const r = await this.enviarSinAnotar(firmada, idempotente, esquema, (d) => {
+        dataCruda = d;
+      });
       anotar(200, r.codigo, null);
+      if (esStaging() && muta) {
+        console.warn(
+          `[PCB] ${firmada.metodo} ${firmada.rutaCompleta} cuenta=${cuenta}${cuerpoConsola()} ` +
+            `-> ${r.codigo} ${JSON.stringify(cargaParaLog(dataCruda))}`
+        );
+      }
       return r;
     } catch (e) {
       if (e instanceof ErrorBitget) {
@@ -434,7 +463,8 @@ export class ClienteBitget {
          */
         if (esStaging()) {
           console.warn(
-            `[PCB] bitget rechazo ${firmada.rutaCompleta} codigo=${e.codigo ?? 'sin-codigo'} ` +
+            `[PCB] bitget rechazo ${firmada.metodo} ${firmada.rutaCompleta} cuenta=${cuenta}` +
+              `${cuerpoConsola()} codigo=${e.codigo ?? 'sin-codigo'} ` +
               `http=${e.httpStatus ?? 'sin-http'} — ${redactarTexto(e.mensajeOriginal ?? e.message)}`
           );
         }
@@ -443,7 +473,8 @@ export class ClienteBitget {
         anotar(null, null, mensaje);
         if (esStaging()) {
           console.warn(
-            `[PCB] fallo de transporte en ${firmada.rutaCompleta}: ${redactarTexto(mensaje)}`
+            `[PCB] fallo de transporte en ${firmada.metodo} ${firmada.rutaCompleta} ` +
+              `cuenta=${cuenta}${cuerpoConsola()}: ${redactarTexto(mensaje)}`
           );
         }
       }
@@ -459,7 +490,9 @@ export class ClienteBitget {
       cabeceras: Record<string, string>;
     },
     idempotente: boolean,
-    esquema: E
+    esquema: E,
+    /** Recibe el `data` crudo del sobre, antes del esquema. Solo para la bitacora. */
+    alRecibirData?: (data: unknown) => void
   ): Promise<RespuestaRest<z.infer<E>>> {
     const inicio = this.relojLocal();
 
@@ -493,6 +526,7 @@ export class ClienteBitget {
     if (!sobre.success) {
       throw errorDeEsquema(firmada.rutaCompleta, sobre.error.message);
     }
+    alRecibirData?.(sobre.data.data);
 
     /*
      * El veredicto real. Un 200 con code distinto de 00000 es un rechazo, y

@@ -42,6 +42,7 @@ import type {
   PosicionMonitor
 } from '@shared/types';
 import { ErrorBitget } from '../bitget/errors';
+import { anotarEvento, cuentaDe } from '../diagnostico/bitacora';
 import type { ModoMargenApi } from '../bitget/rest/endpoints/ordenes';
 import { MERCADOS, type ClaveMercado } from '../bitget/mercado';
 import type { ClienteBitget } from '../bitget/rest/client';
@@ -52,8 +53,11 @@ import { verificarCredencial, type ResultadoVerificacion } from '../bitget/verif
 import { obtenerCuentasFuturos, obtenerInfoCuenta } from '../bitget/rest/endpoints/cuenta';
 import {
   buscarTraspaso,
+  buscarTraspasoV3,
   obtenerSaldosSubcuentas,
-  traspasarEntreSubcuentas
+  traspasarEntreSubcuentas,
+  traspasarEntreSubcuentasV3,
+  type Traspaso
 } from '../bitget/rest/endpoints/subcuentas';
 import { MONEDA_TRASPASOS, resumirSaldos } from '../domain/saldos-subcuentas';
 import { planificarTraspaso, type PlanTraspaso } from '../domain/plan-traspaso';
@@ -2368,7 +2372,63 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
      * que permite reconocer una subcuenta que se vuelve a registrar con otro
      * nombre en vez de duplicarla.
      */
-    const cuentaId = registro.reservarId(grupoNombre, etiqueta, verificacion.uid ?? undefined);
+    /*
+     * ==========================================================================
+     * El UID de V3 no se da por bueno si es el de una cuenta principal
+     * ==========================================================================
+     * En UTA el UID sale de `/api/v3/account/settings`, cuyo esquema no se ha
+     * capturado contra la API real. Si Bitget contestara ahi con el UID de la
+     * madre, todas las subcuentas de esa madre compartirian UID y cada alta
+     * reconoceria como suya la ficha de la anterior. Un UID que ya consta como
+     * cuenta principal no puede ser el de una subcuenta: se descarta y se anota.
+     */
+    const uidsMadre = new Set<string>([
+      ...vault.listarMadres().map((m) => m.uidMadre),
+      ...registro
+        .listarCuentas()
+        .map((c) => c.uidPadre)
+        .filter((u) => u !== '')
+    ]);
+    const uidDeMadre =
+      verificacion.accountMode === 'uta' &&
+      verificacion.uid !== null &&
+      uidsMadre.has(verificacion.uid);
+    const uid = uidDeMadre ? null : verificacion.uid;
+
+    const cuentaId = registro.reservarId(grupoNombre, etiqueta, uid ?? undefined);
+    const previa = registro.cuenta(cuentaId);
+
+    anotarEvento({
+      evento: 'alta-subcuenta',
+      datos: {
+        cuenta: cuentaDe(credencial.apiKey),
+        grupo: grupoNombre,
+        casilla: alta.casilla ?? null,
+        uid: verificacion.uid,
+        uidDescartadoPorSerDeMadre: uidDeMadre,
+        accountMode: verificacion.accountMode,
+        reutilizaFicha: previa !== undefined,
+        etiquetaPrevia: previa?.etiqueta ?? null,
+        casillaPrevia: previa?.slot ?? null
+      }
+    });
+
+    /*
+     * Antes de tocar el vault: `vault.agregar` sustituye por `cuentaId`, y si
+     * esta alta es la API Key de otra subcuenta pegada por error, sustituiria
+     * en memoria la credencial de esa subcuenta aunque el registro rechace el
+     * alta despues. Ver `RegistroCuentas.comprobarReubicacion`.
+     */
+    const reubicacion = registro.comprobarReubicacion(
+      cuentaId,
+      grupoNombre,
+      etiqueta,
+      alta.casilla
+    );
+    if (reubicacion !== null) {
+      return { ok: false, veredicto: null, motivo: reubicacion.message, advertencias: [], cuenta: null };
+    }
+
     const publica = vault.agregar({
       cuentaId,
       apiKey: credencial.apiKey,
@@ -2404,7 +2464,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         grupoNombre,
         etiqueta,
         ...(alta.casilla === undefined ? {} : { slot: alta.casilla }),
-        uid: verificacion.uid ?? '',
+        uid: uid ?? '',
         uidPadre: verificacion.uidPadre ?? '',
         credencialId: publica.id,
         apiKeyEnmascarada: publica.apiKeyEnmascarada,
@@ -3029,8 +3089,10 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
      */
     this.planesTraspaso.delete(planId);
 
+    const v3 = this.traspasoEsV3(plan.origen.uid, plan.destino.uid);
+
     try {
-      const respuesta = await traspasarEntreSubcuentas(this.cliente, credencial, {
+      const respuesta = await this.enviarTraspaso(credencial, {
         uidOrigen: plan.origen.uid,
         uidDestino: plan.destino.uid,
         importe: plan.importe,
@@ -3038,7 +3100,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         moneda: plan.moneda
       });
 
-      const transferId = respuesta.datos.transferId ?? null;
+      const transferId = respuesta.transferId ?? null;
       await this.traspasos.anotarResuelta({
         clientOid: plan.clientOid,
         resultado: 'exito',
@@ -3049,7 +3111,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
       return { ok: true, motivo: null, mensaje: null, transferId, plan };
     } catch (e) {
       const err = e instanceof ErrorBitget ? e : null;
-      const desenlace = await this.resolverEnvio(plan.clientOid, plan.moneda, credencial, err);
+      const desenlace = await this.resolverEnvio(plan.clientOid, plan.moneda, credencial, err, v3);
 
       if (desenlace.estado === 'entro') {
         return {
@@ -3076,6 +3138,59 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
   }
 
   /**
+   * Con que API habla una punta del traspaso, por su UID.
+   *
+   * Sale del registro de cuentas, que es donde la verificacion deja el
+   * `accountMode`. La madre y las subcuentas que el panel no tiene dadas de
+   * alta no estan en el registro y cuentan como Classic, el mismo valor por
+   * defecto que usa el registro.
+   */
+  private modoDeUid(uid: string): AccountMode {
+    return (
+      this.exigirAbierta()
+        .registro.listarCuentas()
+        .find((c) => c.uid === uid)?.accountMode ?? 'classic'
+    );
+  }
+
+  /** `true` si alguna punta es UTA: entonces el traspaso sale por V3. */
+  private traspasoEsV3(uidOrigen: string, uidDestino: string): boolean {
+    return this.modoDeUid(uidOrigen) === 'uta' || this.modoDeUid(uidDestino) === 'uta';
+  }
+
+  /**
+   * Envia un traspaso por la superficie que corresponde a sus dos puntas.
+   *
+   * Entre dos cuentas Classic sigue saliendo por V2, la ruta verificada con
+   * dinero real el 05/09/2026. En cuanto una punta es UTA sale por
+   * `/api/v3/account/sub-transfer`, con `uta` como tipo de esa punta: V2 no
+   * conoce ese monedero y Bitget lo rechazaba con `43127`.
+   */
+  private async enviarTraspaso(
+    credencial: Credencial,
+    datos: {
+      uidOrigen: string;
+      uidDestino: string;
+      importe: string;
+      clientOid: string;
+      moneda: string;
+    }
+  ): Promise<Traspaso> {
+    if (!this.traspasoEsV3(datos.uidOrigen, datos.uidDestino)) {
+      return (await traspasarEntreSubcuentas(this.cliente, credencial, datos)).datos;
+    }
+
+    const tipo = (uid: string) => (this.modoDeUid(uid) === 'uta' ? 'uta' : 'usdt_futures');
+    return (
+      await traspasarEntreSubcuentasV3(this.cliente, credencial, {
+        ...datos,
+        tipoOrigen: tipo(datos.uidOrigen),
+        tipoDestino: tipo(datos.uidDestino)
+      })
+    ).datos;
+  }
+
+  /**
    * Que hacer cuando un envio de dinero termina en excepcion.
    *
    * ==========================================================================
@@ -3097,7 +3212,8 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     clientOid: string,
     moneda: string,
     credencial: { apiKey: string; secretKey: string; passphrase: string },
-    err: ErrorBitget | null
+    err: ErrorBitget | null,
+    v3: boolean
   ): Promise<
     | { estado: 'entro'; transferId: string | null; mensaje: null }
     | { estado: 'rechazado'; mensaje: string }
@@ -3116,9 +3232,12 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     }
 
     try {
-      const encontrado = (
-        await buscarTraspaso(this.cliente, credencial, { clientOid, moneda })
-      ).datos.find((r) => r.clientOid === clientOid);
+      /* Se consulta en la misma superficie por la que salio el envio. */
+      const registros = v3
+        ? ((await buscarTraspasoV3(this.cliente, credencial, { clientOid, moneda })).datos.items ??
+          [])
+        : (await buscarTraspaso(this.cliente, credencial, { clientOid, moneda })).datos;
+      const encontrado = registros.find((r) => r.clientOid === clientOid);
 
       if (encontrado !== undefined) {
         const transferId = encontrado.transferId ?? null;
@@ -3293,8 +3412,10 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         moneda: plan.moneda
       });
 
+      const v3 = this.traspasoEsV3(m.uidOrigen, m.uidDestino);
+
       try {
-        const respuesta = await traspasarEntreSubcuentas(this.cliente, credencial, {
+        const respuesta = await this.enviarTraspaso(credencial, {
           uidOrigen: m.uidOrigen,
           uidDestino: m.uidDestino,
           importe: m.importe,
@@ -3302,7 +3423,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
           moneda: plan.moneda
         });
 
-        const transferId = respuesta.datos.transferId ?? null;
+        const transferId = respuesta.transferId ?? null;
         await this.traspasos.anotarResuelta({
           clientOid: m.clientOid,
           resultado: 'exito',
@@ -3319,7 +3440,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         enviados += 1;
       } catch (e) {
         const err = e instanceof ErrorBitget ? e : null;
-        const desenlace = await this.resolverEnvio(m.clientOid, plan.moneda, credencial, err);
+        const desenlace = await this.resolverEnvio(m.clientOid, plan.moneda, credencial, err, v3);
 
         /* Un envio sin respuesta que la consulta confirma cuenta como enviado. */
         if (desenlace.estado === 'entro') {

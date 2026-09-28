@@ -118,6 +118,15 @@ export interface Position {
    */
   initialMarginAccum: Decimal | null;
   /**
+   * Margen que la posición tiene ahora en Bitget -su `marginSize`, con el
+   * adicional dentro-. `null` si el exchange no lo mandó.
+   *
+   * No sustituye a `initialMarginAccum`: es lo que la columna «M. inicial»
+   * enseña cuando el panel no anotó la apertura -la posición ya estaba abierta
+   * al arrancar, o se abrió fuera del panel-, con un rótulo que lo dice.
+   */
+  currentMargin: Decimal | null;
+  /**
    * Ganancia o pérdida no realizada, tal como la informa Bitget. Cadena vacía
    * si el exchange no la mandó en la última lectura.
    */

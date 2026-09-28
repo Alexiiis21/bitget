@@ -440,6 +440,32 @@ describe('el apalancamiento de la cuenta', () => {
     expect(plan.avisos[0]?.mensaje).toContain('49.75');
   });
 
+  it('descarta, sin enviar, si al apalancamiento real la orden no cabe en el saldo', async () => {
+    /*
+     * El caso del 27/09/2026: 20x aplicado a BTC, apertura en DOGE que seguia a
+     * un apalancamiento menor. Bitget contestaba `40762` y no se sabia por que.
+     */
+    enrutar(ordenAceptada);
+    configDe('cta_002', { isolatedLongLever: 2, isolatedShortLever: 2 });
+    cuentas.fijarSaldo('cta_002', '150');
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: cuentas.objetivos(3),
+      margenInicial: '100',
+      apalancamiento: 10,
+      precioLimite: null,
+      modoMargen: 'isolated',
+    });
+
+    expect(plan.entradas.map((e) => e.cuentaId)).not.toContain('cta_002');
+    const descarte = plan.descartes.find((d) => d.cuentaId === 'cta_002');
+    expect(descarte?.motivo).toBe('margen-insuficiente');
+    expect(descarte?.mensaje).toContain('2x');
+    expect(descarte?.mensaje).toContain('Aplicar');
+  });
+
   it('no avisa cuando coincide', async () => {
     enrutar(ordenAceptada);
     configDe('cta_001', { isolatedLongLever: 10, isolatedShortLever: 10 });

@@ -1,7 +1,7 @@
 {
   "name": "pcb",
   "productName": "Panel de Control Bitget",
-  "version": "0.10.0",
+  "version": "0.12.0",
   "description": "Panel de control de escritorio para operar multiples cuentas de Bitget (futuros USDT-M) desde una sola interfaz.",
   "private": true,
   "license": "UNLICENSED",

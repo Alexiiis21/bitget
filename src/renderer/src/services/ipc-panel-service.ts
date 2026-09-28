@@ -190,6 +190,8 @@ const aPosicion = (p: PosicionMonitor): Position => ({
   liquidationPrice: p.liquidacion,
   takeProfitPrice: p.takeProfit,
   initialMarginAccum: p.margenInicial,
+  /* Cadena vacía es «Bitget no lo mandó» -pasa en UTA-, no un cero. */
+  currentMargin: p.margenActual === '' ? null : p.margenActual,
   pnl: p.pnl,
   roe: p.roe,
   leverage: p.apalancamiento,

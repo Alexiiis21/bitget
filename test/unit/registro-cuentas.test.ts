@@ -487,6 +487,75 @@ describe('casillas', () => {
     expect(registro.listarCuentas()).toHaveLength(1);
   });
 
+  /*
+   * El caso del 26/09/2026: el cliente dio de alta la 19 y la 18 desaparecio.
+   * La API Key de la «19» era la de la 18 -mismo UID-, y el registro lo tomo
+   * por rotar la clave: mudo la ficha de la 18 a la casilla 19 con el nombre
+   * nuevo, y el panel dijo «registrada en la casilla 19».
+   */
+  it('otro nombre con el UID de una subcuenta ya registrada se rechaza y no la mueve', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    const dieciocho = registro.agregar({
+      ...alta(registro.reservarId('B', 'Sub-18', uidDe('Sub-18')), 'Sub-18', 'B'),
+      slot: 18
+    });
+
+    /* La «19», con la clave de la 18: Bitget devuelve el UID de la 18. */
+    const id = registro.reservarId('B', 'Sub-19', uidDe('Sub-18'));
+    expect(registro.comprobarReubicacion(id, 'B', 'Sub-19', 19)?.motivo).toBe('misma-subcuenta');
+
+    let error: unknown;
+    try {
+      registro.agregar({
+        ...alta(id, 'Sub-19', 'B', 'cred_19'),
+        uid: uidDe('Sub-18'),
+        slot: 19
+      });
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ErrorRegistro);
+    expect((error as ErrorRegistro).motivo).toBe('misma-subcuenta');
+    expect((error as ErrorRegistro).message).toContain('Sub-18');
+
+    /* La 18 sigue en su casilla, con su nombre y su credencial. */
+    expect(registro.listarCuentas()).toEqual([dieciocho]);
+  });
+
+  it('otro nombre con un UID ya registrado tampoco se lleva la subcuenta a otra cuenta principal', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    registro.agregar({
+      ...alta(registro.reservarId('B', 'Sub-18', uidDe('Sub-18')), 'Sub-18', 'B'),
+      slot: 18
+    });
+
+    const id = registro.reservarId('C', 'Sub-01', uidDe('Sub-18'));
+    expect(() =>
+      registro.agregar({ ...alta(id, 'Sub-01', 'C'), uid: uidDe('Sub-18'), slot: 1 })
+    ).toThrow(ErrorRegistro);
+    /* Ni se muda ni se crea la cuenta principal C vacia. */
+    expect(registro.listarGrupos().map((g) => g.nombre)).toEqual(['B']);
+  });
+
+  it('otro nombre en la misma casilla sigue siendo rotar la clave', async () => {
+    const registro = await RegistroCuentas.cargar(ruta);
+    const antes = registro.agregar({
+      ...alta(registro.reservarId('B', 'Sub-18', uidDe('Sub-18')), 'Sub-18', 'B'),
+      slot: 18
+    });
+
+    const id = registro.reservarId('B', 'Renombrada', uidDe('Sub-18'));
+    const despues = registro.agregar({
+      ...alta(id, 'Renombrada', 'B', 'cred_2'),
+      uid: uidDe('Sub-18'),
+      slot: 18
+    });
+
+    expect(despues.id).toBe(antes.id);
+    expect(despues.etiqueta).toBe('Renombrada');
+    expect(registro.listarCuentas()).toHaveLength(1);
+  });
+
   it('una casilla fuera del 1 al 20 se rechaza', async () => {
     const registro = await RegistroCuentas.cargar(ruta);
 

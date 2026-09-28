@@ -21,9 +21,12 @@
  * superficie, estado HTTP, código de negocio, duración y qué cuenta la firmó.
  *
  * **No se anota ni un secreto.** Nunca las cabeceras —ahí viajan `ACCESS-KEY`,
- * `ACCESS-SIGN` y `ACCESS-PASSPHRASE`—, nunca el cuerpo de la petición, nunca la
- * respuesta completa. La cuenta se identifica con la API Key **enmascarada**, que
- * es lo mismo que ya se enseña en pantalla. RNF-001.
+ * `ACCESS-SIGN` y `ACCESS-PASSPHRASE`—. El cuerpo enviado sí se anota, y la
+ * respuesta de las peticiones que cambian algo, porque sin ellos no se puede
+ * saber qué tamaño, lado o apalancamiento salió de verdad; ambos pasan por
+ * `redactar` (por nombre de campo y por valor) y se recortan. La cuenta se
+ * identifica con la API Key **enmascarada**, que es lo mismo que ya se enseña
+ * en pantalla. RNF-001.
  *
  * El mensaje de Bitget sí se anota, recortado y pasado por `redactarTexto`: es
  * el dato que traduce un código a algo accionable, y el redactor cubre el caso
@@ -40,7 +43,7 @@
  */
 import { appendFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { enmascararApiKey, redactarTexto } from '../security/redact';
+import { enmascararApiKey, redactar, redactarTexto } from '../security/redact';
 import { archivoLogDeHoy, rutas } from '../storage/paths';
 
 /** Lo que se anota de una petición ya resuelta, bien o mal. */
@@ -58,6 +61,18 @@ export interface AnotacionPeticion {
   ms: number;
   /** Mensaje del exchange, recortado y redactado. `null` si no hubo. */
   mensaje: string | null;
+  /**
+   * Cuerpo enviado, tal cual salió hacia Bitget. `null` en las peticiones sin
+   * cuerpo (los GET llevan sus parámetros en `ruta`). Se redacta por nombre de
+   * campo y por valor antes de escribirse.
+   */
+  cuerpo?: string | null;
+  /**
+   * `data` con que contestó Bitget. Solo se pasa en las peticiones que cambian
+   * algo -órdenes, apalancamiento, traspasos-: las consultas de sondeo
+   * devuelven listas largas y llenarían el archivo sin ayudar a diagnosticar.
+   */
+  respuesta?: unknown;
 }
 
 /** Un hecho que no es una petición: una detección de modo, un veredicto. */
@@ -74,6 +89,28 @@ export interface AnotacionEvento {
  * degenerada no llene el disco.
  */
 const MAX_MENSAJE = 300;
+
+/** Tope del cuerpo enviado y de la respuesta, ya serializados. */
+const MAX_CARGA = 2_000;
+
+/**
+ * Cuerpo o respuesta, listo para la línea del log: se parsea si es JSON para
+ * que `redactar` pueda enmascarar por nombre de campo (`passphrase`,
+ * `secretKey`...), y se recorta.
+ */
+export function cargaParaLog(valor: unknown): unknown {
+  if (valor === undefined || valor === null || valor === '') return null;
+  let objeto = valor;
+  if (typeof valor === 'string') {
+    try {
+      objeto = JSON.parse(valor);
+    } catch {
+      return redactarTexto(valor).slice(0, MAX_CARGA);
+    }
+  }
+  const texto = JSON.stringify(redactar(objeto));
+  return texto.length <= MAX_CARGA ? JSON.parse(texto) : `${texto.slice(0, MAX_CARGA)}…`;
+}
 
 /** `true` cuando la bitácora está encendida. Ver `iniciarBitacora`. */
 let activa = false;
@@ -145,7 +182,11 @@ export function anotarPeticion(a: AnotacionPeticion): void {
     httpStatus: a.httpStatus,
     codigo: a.codigo,
     ms: a.ms,
-    mensaje: a.mensaje === null ? null : redactarTexto(a.mensaje).slice(0, MAX_MENSAJE)
+    mensaje: a.mensaje === null ? null : redactarTexto(a.mensaje).slice(0, MAX_MENSAJE),
+    ...(a.cuerpo === undefined || a.cuerpo === null || a.cuerpo === ''
+      ? {}
+      : { cuerpo: cargaParaLog(a.cuerpo) }),
+    ...(a.respuesta === undefined ? {} : { respuesta: cargaParaLog(a.respuesta) })
   });
 }
 

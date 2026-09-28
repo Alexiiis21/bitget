@@ -210,6 +210,115 @@ export function traspasarEntreSubcuentas(
   );
 }
 
+/* ---------- /api/v3/account/sub-transfer ---------- */
+
+/**
+ * Tipo de cuenta de una punta en la superficie V3.
+ *
+ * Una cuenta Classic conserva sus monederos separados y el saldo del panel
+ * vive en `usdt_futures`; una UTA tiene un unico monedero unificado, `uta`.
+ * Mandar `usdt_futures` a una UTA es lo que Bitget rechazaba con `43127`
+ * -«fromTypeAccount/toAccountType error»- cuando todo salia por V2.
+ */
+export type TipoCuentaV3 = 'usdt_futures' | 'uta';
+
+/**
+ * Mueve saldo entre madre y subcuentas cuando alguna de las puntas es UTA.
+ *
+ * ==========================================================================
+ * Esto mueve dinero. **Sin verificar contra la API real**
+ * ==========================================================================
+ * Ruta, parametros y valores de `fromType`/`toType` salen del SDK
+ * `bitget-api` que hay en `node_modules` -`subAccountTransfer`,
+ * `SubAccountTransferRequestV3`-, el mismo oraculo que ya se uso para la firma.
+ * Se firma con la clave de la madre, igual que la ruta V2. Lo que no se sabe
+ * todavia es si Bitget acepta una madre Classic en esta superficie o si exige
+ * el permiso «UTA mgt.»; si lo rechaza, el codigo llega al registro de
+ * traspasos tal cual.
+ *
+ * Mismas reglas que `traspasarEntreSubcuentas`: `clientOid` obligatorio y
+ * `idempotente: false`. Un envio sin respuesta se resuelve con
+ * `buscarTraspasoV3`, nunca repitiendo.
+ */
+export function traspasarEntreSubcuentasV3(
+  cliente: ClienteBitget,
+  credencial: Credencial,
+  datos: {
+    uidOrigen: string;
+    uidDestino: string;
+    tipoOrigen: TipoCuentaV3;
+    tipoDestino: TipoCuentaV3;
+    importe: string;
+    clientOid: string;
+    moneda?: string;
+  }
+): Promise<RespuestaRest<Traspaso>> {
+  return cliente.peticionFirmada(
+    credencial,
+    {
+      metodo: 'POST',
+      ruta: '/api/v3/account/sub-transfer',
+      cuerpo: {
+        fromType: datos.tipoOrigen,
+        toType: datos.tipoDestino,
+        amount: datos.importe,
+        coin: datos.moneda ?? 'USDT',
+        fromUserId: datos.uidOrigen,
+        toUserId: datos.uidDestino,
+        clientOid: datos.clientOid
+      },
+      idempotente: false
+    },
+    esquemaTraspaso
+  );
+}
+
+/* ---------- /api/v3/account/sub-transfer-record ---------- */
+
+export const esquemaRegistroTraspasoV3 = zod.object({
+  items: zod
+    .array(
+      zod.object({
+        clientOid: zod.string().nullish(),
+        transferId: zod.string().nullish(),
+        status: zod.string().nullish(),
+        amount: zod.string().nullish(),
+        coin: zod.string().nullish(),
+        createdTime: zod.string().nullish()
+      })
+    )
+    .nullish()
+});
+
+export type RegistrosTraspasoV3 = z.infer<typeof esquemaRegistroTraspasoV3>;
+
+/**
+ * Equivalente V3 de `buscarTraspaso`, para los traspasos enviados por
+ * `traspasarEntreSubcuentasV3`. Misma asimetria: encontrarlo demuestra que
+ * entro, no encontrarlo no demuestra nada. Sin verificar contra la API real;
+ * ruta y parametros de `getSubTransferRecords` del SDK.
+ */
+export function buscarTraspasoV3(
+  cliente: ClienteBitget,
+  credencial: Credencial,
+  datos: { clientOid: string; moneda?: string; limite?: number }
+): Promise<RespuestaRest<RegistrosTraspasoV3>> {
+  return cliente.peticionFirmada(
+    credencial,
+    {
+      metodo: 'GET',
+      ruta: '/api/v3/account/sub-transfer-record',
+      consulta: {
+        clientOid: datos.clientOid,
+        coin: datos.moneda ?? 'USDT',
+        limit: String(datos.limite ?? 20)
+      },
+      idempotente: true
+    },
+    esquemaRegistroTraspasoV3
+  );
+}
+
 /* ---------- /api/v2/spot/account/sub-main-trans-record ---------- */
 
 /**

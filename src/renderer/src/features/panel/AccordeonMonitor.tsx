@@ -1,10 +1,11 @@
 import type { CSSProperties } from 'react';
 import { ANCHO_MINIMO_MONITOR, FUENTE, REALCE, REJILLA_MONITOR, T, TIPO_MONITOR } from '@/lib/tokens';
-import { cifra, cifraConSigno, porcentajeConSigno, restar } from '@/lib/formato';
+import { cifraConSigno, decimalesDe, porcentajeConSigno, precio, precioConSigno, restar } from '@/lib/formato';
 import { useAncho } from '@/lib/medidas';
 import { usarPanel } from '@/store/panel';
 import { distintivosDe } from './distintivos';
-import type { Account, Position, Side } from '@shared/domain/panel-view';
+import { margenDe } from './margen';
+import type { Account, Asset, Position, Side } from '@shared/domain/panel-view';
 
 /**
  * Centro de Monitoreo de Posiciones — acordeón por cuenta.
@@ -117,10 +118,16 @@ interface Pintada extends Fila {
   distancia: number | null;
   destacadaLong: boolean;
   destacadaShort: boolean;
+  /**
+   * Decimales de precio del activo, o `undefined` si no está en el selector:
+   * entonces `precio` respeta los que trae la cadena del exchange.
+   */
+  decimales: number | undefined;
 }
 
 export function AccordeonMonitor({ cuenta }: { cuenta: Account }) {
   const posiciones = usarPanel((s) => s.posiciones);
+  const activos = usarPanel((s) => s.activos);
   const abrirDetalle = usarPanel((s) => s.abrirDetalle);
   const cargaPosiciones = usarPanel((s) => s.cargaPosiciones);
   const motivoPosiciones = usarPanel((s) => s.motivoPosiciones);
@@ -161,7 +168,8 @@ export function AccordeonMonitor({ cuenta }: { cuenta: Account }) {
     motivo: fila.long?.errorReason ?? fila.short?.errorReason ?? null,
     distancia: fila.long && fila.short ? restar(fila.short.entryPrice, fila.long.entryPrice) : null,
     destacadaLong: fila.long !== undefined && Number.parseFloat(fila.long.entryPrice) === primerasLong.get(fila.activoId),
-    destacadaShort: fila.short !== undefined && Number.parseFloat(fila.short.entryPrice) === primerasShort.get(fila.activoId)
+    destacadaShort: fila.short !== undefined && Number.parseFloat(fila.short.entryPrice) === primerasShort.get(fila.activoId),
+    decimales: decimalesDelActivo(activos, fila.activoId)
   }));
 
   return (
@@ -233,7 +241,9 @@ function CabeceraAncha() {
 }
 
 function FilaAncha({ fila, alAbrir }: { fila: Pintada; alAbrir: () => void }) {
-  const { sub, activoId, long, short, punto, motivo, distancia, destacadaLong, destacadaShort } = fila;
+  const { sub, activoId, long, short, punto, motivo, distancia, destacadaLong, destacadaShort, decimales } = fila;
+  const margenLong = margenDe(long);
+  const margenShort = margenDe(short);
 
   return (
     <div
@@ -244,18 +254,18 @@ function FilaAncha({ fila, alAbrir }: { fila: Pintada; alAbrir: () => void }) {
     >
       <Identidad etiqueta={sub.label} punto={punto} />
       <div style={{ fontSize: TIPO_MONITOR.rotulo, fontWeight: 700, letterSpacing: '.04em', color: T.texto2, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{activoId}</div>
-      <Cifra valor={cifra(long?.liquidationPrice)} />
-      <Cifra valor={cifra(long?.entryPrice)} destacada={destacadaLong} lado="long" />
-      <Cifra valor={cifra(long?.initialMarginAccum)} peso={600} titulo={TITULO_MARGEN} />
-      <Cifra valor={cifra(long?.takeProfitPrice)} color={T.largo} peso={500} />
+      <Cifra valor={precio(long?.liquidationPrice, decimales)} />
+      <Cifra valor={precio(long?.entryPrice, decimales)} destacada={destacadaLong} lado="long" />
+      <Cifra valor={margenLong.valor} peso={600} titulo={margenLong.titulo} />
+      <Cifra valor={precio(long?.takeProfitPrice, decimales)} color={T.largo} peso={500} />
       <Cifra valor={cifraConSigno(long?.pnl)} color={colorGanancia(long?.pnl)} peso={600} titulo={TITULO_PNL} />
       <Cifra valor={porcentajeConSigno(long?.roe)} color={colorGanancia(long?.roe)} peso={600} titulo={TITULO_ROE} />
       <Distintivos posicion={long} etiquetaLado="Long" />
-      <div style={{ textAlign: 'center', fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.destacado, fontWeight: 700, color: T.texto }}>{cifraConSigno(distancia)}</div>
-      <Cifra valor={cifra(short?.liquidationPrice)} />
-      <Cifra valor={cifra(short?.entryPrice)} destacada={destacadaShort} lado="short" />
-      <Cifra valor={cifra(short?.initialMarginAccum)} peso={600} titulo={TITULO_MARGEN} />
-      <Cifra valor={cifra(short?.takeProfitPrice)} color={T.corto} peso={500} />
+      <div style={{ textAlign: 'center', fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.destacado, fontWeight: 700, color: T.texto }}>{precioConSigno(distancia, decimales ?? decimalesDistancia(long, short))}</div>
+      <Cifra valor={precio(short?.liquidationPrice, decimales)} />
+      <Cifra valor={precio(short?.entryPrice, decimales)} destacada={destacadaShort} lado="short" />
+      <Cifra valor={margenShort.valor} peso={600} titulo={margenShort.titulo} />
+      <Cifra valor={precio(short?.takeProfitPrice, decimales)} color={T.corto} peso={500} />
       <Cifra valor={cifraConSigno(short?.pnl)} color={colorGanancia(short?.pnl)} peso={600} titulo={TITULO_PNL} />
       <Cifra valor={porcentajeConSigno(short?.roe)} color={colorGanancia(short?.roe)} peso={600} titulo={TITULO_ROE} />
       <Distintivos posicion={short} etiquetaLado="Short" />
@@ -287,7 +297,7 @@ const rejillaPartida: CSSProperties = {
 };
 
 function FilaPartida({ fila, alAbrir }: { fila: Pintada; alAbrir: () => void }) {
-  const { sub, activoId, long, short, punto, motivo, distancia, destacadaLong, destacadaShort } = fila;
+  const { sub, activoId, long, short, punto, motivo, distancia, destacadaLong, destacadaShort, decimales } = fila;
 
   return (
     <div
@@ -302,28 +312,29 @@ function FilaPartida({ fila, alAbrir }: { fila: Pintada; alAbrir: () => void }) 
         <span style={{ flex: 'none', fontSize: TIPO_MONITOR.rotulo, fontWeight: 700, letterSpacing: '.04em', color: T.texto2 }}>{activoId}</span>
         <span style={{ marginLeft: 'auto', flex: 'none', display: 'flex', alignItems: 'baseline', gap: 6, whiteSpace: 'nowrap' }}>
           <span style={{ fontSize: TIPO_MONITOR.rotulo, fontWeight: 700, letterSpacing: '.09em', color: T.texto3 }}>DIST. L/S</span>
-          <span style={{ fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.destacado, fontWeight: 700, color: T.texto }}>{cifraConSigno(distancia)}</span>
+          <span style={{ fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.destacado, fontWeight: 700, color: T.texto }}>{precioConSigno(distancia, decimales ?? decimalesDistancia(long, short))}</span>
         </span>
       </div>
 
-      <PuntaPartida lado="long" posicion={long} destacada={destacadaLong} />
-      <PuntaPartida lado="short" posicion={short} destacada={destacadaShort} />
+      <PuntaPartida lado="long" posicion={long} destacada={destacadaLong} decimales={decimales} />
+      <PuntaPartida lado="short" posicion={short} destacada={destacadaShort} decimales={decimales} />
     </div>
   );
 }
 
-function PuntaPartida({ lado, posicion, destacada }: { lado: Side; posicion: Position | undefined; destacada: boolean }) {
+function PuntaPartida({ lado, posicion, destacada, decimales }: { lado: Side; posicion: Position | undefined; destacada: boolean; decimales: number | undefined }) {
   const color = lado === 'long' ? T.largo : T.corto;
+  const margen = margenDe(posicion);
 
   return (
     <div style={{ ...rejillaPartida, borderTop: `1px solid ${T.bordeSuave}` }}>
       <span style={{ justifySelf: 'start', padding: '1px 7px', borderRadius: 4, fontSize: TIPO_MONITOR.distintivo, fontWeight: 700, letterSpacing: '.06em', color: '#ffffff', background: color }}>
         {lado === 'long' ? 'LONG' : 'SHORT'}
       </span>
-      <Dato rotulo="Liquidación" valor={cifra(posicion?.liquidationPrice)} />
-      <Dato rotulo="Entrada" valor={cifra(posicion?.entryPrice)} destacada={destacada} lado={lado} />
-      <Dato rotulo="M. inicial" valor={cifra(posicion?.initialMarginAccum)} peso={600} titulo={TITULO_MARGEN} />
-      <Dato rotulo="Take Profit" valor={cifra(posicion?.takeProfitPrice)} color={color} peso={500} />
+      <Dato rotulo="Liquidación" valor={precio(posicion?.liquidationPrice, decimales)} />
+      <Dato rotulo="Entrada" valor={precio(posicion?.entryPrice, decimales)} destacada={destacada} lado={lado} />
+      <Dato rotulo="M. inicial" valor={margen.valor} peso={600} titulo={margen.titulo} />
+      <Dato rotulo="Take Profit" valor={precio(posicion?.takeProfitPrice, decimales)} color={color} peso={500} />
       <Dato rotulo="P&L" valor={cifraConSigno(posicion?.pnl)} color={colorGanancia(posicion?.pnl)} peso={600} titulo={TITULO_PNL} />
       <Dato rotulo="ROE" valor={porcentajeConSigno(posicion?.roe)} color={colorGanancia(posicion?.roe)} peso={600} titulo={TITULO_ROE} />
       <Distintivos posicion={posicion} etiquetaLado={lado === 'long' ? 'Long' : 'Short'} />
@@ -413,14 +424,24 @@ function Cifra({
 }
 
 /**
- * El guion de esta columna no significa cero.
+ * Decimales de precio del activo de la fila.
  *
- * Sale en las posiciones que ya estaban abiertas cuando arrancó el panel: ese
- * número lo lleva el panel, no Bitget, y no se puede deducir de una lectura.
+ * Solo se conocen los de los activos del selector; para el resto `precio` usa
+ * los que trae la cadena del exchange, que ya vienen a la precisión del
+ * contrato.
  */
-const TITULO_MARGEN =
-  'Margen inicial acumulado: apertura + reposicionamientos. ' +
-  'Un guion significa que la posición ya estaba abierta cuando arrancó el panel.';
+function decimalesDelActivo(activos: readonly Asset[], activoId: string): number | undefined {
+  return activos.find((a) => a.id === activoId)?.priceDecimals;
+}
+
+/**
+ * Decimales de la distancia L/S cuando el activo no está en el selector: los
+ * de la entrada que más trae. La distancia es un número calculado y no tiene
+ * cadena de la que leerlos.
+ */
+function decimalesDistancia(long: Position | undefined, short: Position | undefined): number {
+  return Math.max(decimalesDe(long?.entryPrice), decimalesDe(short?.entryPrice));
+}
 
 const TITULO_PNL = 'Ganancia o pérdida no realizada, tal como la informa Bitget.';
 const TITULO_ROE =

@@ -952,6 +952,61 @@ export class MotorLotes {
         precioDisparoTp = tp.disparo.precioDisparo;
       }
 
+      const vigente = apalancamientoDe(config, peticion.modoMargen, objetivo.lado);
+      /*
+       * Lo que Bitget va a retener de verdad: la cantidad sale del apalancamiento
+       * del campo, pero el margen lo cobra al apalancamiento que el simbolo
+       * tiene en la cuenta. Aplicar 20x a BTC y abrir DOGE -que sigue a 1x-
+       * mandaba una orden veinte veces mas cara que el saldo, y lo unico que
+       * volvia era el `40762` de Bitget, «The order amount exceeds the balance».
+       */
+      const margenQueRetiene =
+        vigente === null
+          ? new Decimal(calculo.dimension.margenReal)
+          : new Decimal(calculo.dimension.nocional).dividedBy(vigente);
+
+      anotarEvento({
+        evento: 'apertura-planificada',
+        datos: {
+          cuenta: cuentaDe(cuenta.credencial.apiKey),
+          etiqueta: cuenta.etiqueta,
+          simbolo: peticion.simbolo,
+          lado: objetivo.lado,
+          modoMargen: peticion.modoMargen,
+          precio,
+          size: calculo.dimension.size,
+          nocional: calculo.dimension.nocional,
+          margenInicial: peticion.margenInicial,
+          margenAdicional,
+          apalancamientoCampo: peticion.apalancamiento,
+          apalancamientoCuenta: vigente,
+          margenQueRetiene: margenQueRetiene.toFixed(4),
+          saldoDisponible: cuenta.saldoDisponible,
+          takeProfit: precioDisparoTp
+        }
+      });
+
+      if (
+        vigente !== null &&
+        vigente !== peticion.apalancamiento &&
+        margenQueRetiene
+          .plus(margenAdicional ?? 0)
+          /* Legible por fuerza: `dimensionarApertura` ya rechazo un saldo ilegible. */
+          .greaterThan(new Decimal(cuenta.saldoDisponible))
+      ) {
+        descartes.push({
+          cuentaId: cuenta.cuentaId,
+          etiqueta: cuenta.etiqueta,
+          lado: objetivo.lado,
+          motivo: 'margen-insuficiente',
+          mensaje:
+            `${peticion.simbolo} está a ${vigente}x en esta cuenta, no a ${peticion.apalancamiento}x: ` +
+            `la orden retendría ${margenQueRetiene.toFixed(2)} USDT y hay ${cuenta.saldoDisponible}. ` +
+            `Pulse «Aplicar» en el apalancamiento con ${peticion.simbolo} seleccionado antes de abrir.`
+        });
+        return;
+      }
+
       entradas.push({
         cuentaId: cuenta.cuentaId,
         etiqueta: cuenta.etiqueta,
@@ -979,9 +1034,8 @@ export class MotorLotes {
        * primer simbolo del mercado, y con el se avisaba de diferencias que no
        * existian y se callaban las que si.
        */
-      const vigente = apalancamientoDe(config, peticion.modoMargen, objetivo.lado);
       if (vigente !== null && vigente !== peticion.apalancamiento) {
-        const margenEfectivo = new Decimal(calculo.dimension.nocional).dividedBy(vigente);
+        const margenEfectivo = margenQueRetiene;
         avisos.push({
           cuentaId: cuenta.cuentaId,
           etiqueta: cuenta.etiqueta,

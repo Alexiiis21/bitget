@@ -21,7 +21,6 @@
 import type { z } from 'zod';
 import { z as zod } from 'zod';
 import type { ClienteBitget, RespuestaRest } from '../client';
-import { esquemaListaV3 } from '../lista-v3';
 import type { Credencial } from '../signer';
 
 /**
@@ -109,33 +108,52 @@ export const esquemaActivo = zod.object({
   frozen: zod.string().nullish()
 });
 
-export const esquemaActivosCuenta = zod.array(esquemaActivo);
+/**
+ * Lleva a una lista plana de monedas cualquiera de las formas en que Bitget
+ * documenta el saldo UTA:
+ *
+ *   REST documentado   { accountEquity, ..., assets: [ {coin, available} ] }
+ *   WS tema account    [ { totalEquity, ..., coin: [ {coin, available} ] } ]
+ *   supuestas antes    [ {coin, available} ]  y  { list: [...] }
+ *
+ * Solo se aceptaban las dos ultimas, y con la documentada el sobre `{list}` de
+ * zod validaba el objeto con `list` ausente: lista vacia, sin error, y el saldo
+ * de toda subcuenta UTA sin escribirse nunca -ni por REST ni por WS-.
+ */
+function aplanarActivos(crudo: unknown): unknown {
+  if (Array.isArray(crudo)) {
+    return crudo.flatMap((fila: unknown) => {
+      if (fila !== null && typeof fila === 'object') {
+        const anidada = (fila as { coin?: unknown; assets?: unknown }).coin;
+        if (Array.isArray(anidada)) return anidada;
+        const activos = (fila as { assets?: unknown }).assets;
+        if (Array.isArray(activos)) return activos;
+      }
+      return [fila];
+    });
+  }
+  if (crudo !== null && typeof crudo === 'object') {
+    const sobre = crudo as { assets?: unknown; list?: unknown };
+    if (Array.isArray(sobre.assets)) return aplanarActivos(sobre.assets);
+    if (Array.isArray(sobre.list)) return aplanarActivos(sobre.list);
+  }
+  return crudo;
+}
+
+export const esquemaActivosCuenta = zod.preprocess(aplanarActivos, zod.array(esquemaActivo));
 
 export type ActivosCuenta = z.infer<typeof esquemaActivosCuenta>;
 
-/**
- * Lee el saldo de una cuenta UTA.
- *
- * Se admite que `data` llegue como array pelado o dentro del sobre `{list,
- * cursor}` —ver `rest/lista-v3.ts`—: no hay respuesta capturada y las dos formas
- * son plausibles. Elegir una y acertar la otra dejaria el saldo de toda cuenta
- * UTA congelado en el ultimo valor conocido, sin error visible, porque quien lo
- * lee se traga su propio fallo a proposito.
- *
- * La firma no cambia: devuelve la lista, como antes. El sobre se desenvuelve
- * aqui para que ni la verificacion ni el barrido tengan que saber que existe.
- */
+/** Lee el saldo de una cuenta UTA como lista plana de monedas. */
 export async function obtenerActivosCuenta(
   cliente: ClienteBitget,
   credencial: Credencial
 ): Promise<RespuestaRest<ActivosCuenta>> {
-  const r = await cliente.peticionFirmada(
+  return cliente.peticionFirmada(
     credencial,
     { metodo: 'GET', ruta: '/api/v3/account/assets', idempotente: true },
-    esquemaListaV3(esquemaActivo)
+    esquemaActivosCuenta
   );
-
-  return { datos: r.datos.lista, duracionMs: r.duracionMs, codigo: r.codigo };
 }
 
 /** El disponible en la moneda indicada, o `null` si la respuesta no lo trae. */

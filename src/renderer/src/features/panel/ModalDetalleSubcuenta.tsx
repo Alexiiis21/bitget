@@ -1,8 +1,9 @@
 import type { CSSProperties, MouseEvent } from 'react';
 import { BOTON_PRIMARIO, DISTINTIVO_POSICION, FUENTE, SOMBRA, T, VELO } from '@/lib/tokens';
-import { cifra, cifraConSigno, restar } from '@/lib/formato';
+import { decimalesDe, precio, precioConSigno, restar } from '@/lib/formato';
 import { usarPanel } from '@/store/panel';
 import { distintivosDe } from './distintivos';
+import { margenDe } from './margen';
 import type { Position, Side } from '@shared/domain/panel-view';
 
 /**
@@ -29,7 +30,8 @@ function Dato({ rotulo, valor, estilo }: { rotulo: string; valor: string; estilo
   );
 }
 
-function BloquePunta({ posicion, lado }: { posicion: Position | undefined; lado: Side }) {
+function BloquePunta({ posicion, lado, decimales }: { posicion: Position | undefined; lado: Side; decimales: number | undefined }) {
+  const margen = margenDe(posicion);
   const color = lado === 'long' ? T.largo : T.corto;
   const rotulo = lado === 'long' ? 'LONG' : 'SHORT';
   const distintivo = posicion === undefined ? DISTINTIVO_POSICION.ninguna : posicion.actions.oe ? DISTINTIVO_POSICION.abierta : DISTINTIVO_POSICION.cerrada;
@@ -41,18 +43,20 @@ function BloquePunta({ posicion, lado }: { posicion: Position | undefined; lado:
         <span style={{ fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 5, background: distintivo.fondo, color: distintivo.texto }}>{distintivo.etiqueta}</span>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 7, fontSize: 12.5 }}>
-        <Dato rotulo="Entrada" valor={cifra(posicion?.entryPrice)} estilo={{ fontWeight: 600 }} />
-        <Dato rotulo="Liquidación" valor={cifra(posicion?.liquidationPrice)} />
+        <Dato rotulo="Entrada" valor={precio(posicion?.entryPrice, decimales)} estilo={{ fontWeight: 600 }} />
+        <Dato rotulo="Liquidación" valor={precio(posicion?.liquidationPrice, decimales)} />
         {/*
-          * El guion no es cero: es que el panel no vio abrirse esta posición.
+          * El guion no es cero: es que ni el panel ni Bitget saben el margen.
           * Por eso no lleva unidad detrás —«— USDT» se leería como cero USDT—.
+          * Cuando la cifra es la de Bitget el rótulo lo dice: incluye el
+          * margen adicional y no es la que anotó el panel.
           */}
         <Dato
-          rotulo="Margen inicial"
-          valor={posicion?.initialMarginAccum == null ? '—' : `${cifra(posicion.initialMarginAccum)} USDT`}
+          rotulo={margen.deBitget ? 'Margen (Bitget)' : 'Margen inicial'}
+          valor={margen.valor === '—' ? '—' : `${margen.valor} USDT`}
           estilo={{ fontWeight: 600 }}
         />
-        <Dato rotulo="Take Profit" valor={cifra(posicion?.takeProfitPrice)} estilo={{ color }} />
+        <Dato rotulo="Take Profit" valor={precio(posicion?.takeProfitPrice, decimales)} estilo={{ color }} />
       </div>
       <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
         {distintivosDe(posicion, rotulo).map((d) => (
@@ -72,6 +76,7 @@ export function ModalDetalleSubcuenta() {
   const detalle = usarPanel((s) => s.detalle);
   const cuentas = usarPanel((s) => s.cuentas);
   const posiciones = usarPanel((s) => s.posiciones);
+  const activos = usarPanel((s) => s.activos);
   const cerrarDetalle = usarPanel((s) => s.cerrarDetalle);
   const reintentarConexion = usarPanel((s) => s.reintentarConexion);
 
@@ -97,6 +102,8 @@ export function ModalDetalleSubcuenta() {
   const hayError = long?.hasError || short?.hasError;
   const hayAbierta = long?.actions.oe || short?.actions.oe;
   const distancia = long && short ? restar(short.entryPrice, long.entryPrice) : null;
+  /* Sin el activo en el selector, `precio` usa los decimales de la cadena. */
+  const decimales = activos.find((a) => a.id === detalle.assetId)?.priceDecimals;
 
   const detener = (e: MouseEvent<HTMLDivElement>) => e.stopPropagation();
 
@@ -120,14 +127,14 @@ export function ModalDetalleSubcuenta() {
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1, background: T.borde }}>
-          <BloquePunta posicion={long} lado="long" />
-          <BloquePunta posicion={short} lado="short" />
+          <BloquePunta posicion={long} lado="long" decimales={decimales} />
+          <BloquePunta posicion={short} lado="short" decimales={decimales} />
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 20px', background: T.superficie2, borderTop: `1px solid ${T.borde}` }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 'none' }}>
             <span style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: '.1em', color: T.texto3, whiteSpace: 'nowrap' }}>DISTANCIA L/S</span>
-            <span style={{ fontSize: 17, fontWeight: 700, fontFamily: FUENTE.mono, color: T.texto }}>{cifraConSigno(distancia)}</span>
+            <span style={{ fontSize: 17, fontWeight: 700, fontFamily: FUENTE.mono, color: T.texto }}>{precioConSigno(distancia, decimales ?? Math.max(decimalesDe(long?.entryPrice), decimalesDe(short?.entryPrice)))}</span>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button

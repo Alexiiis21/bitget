@@ -357,6 +357,44 @@ describe('alta de una subcuenta', () => {
     expect(sesion.listar()[0]?.etiqueta).toBe('Renombrada');
   });
 
+  /*
+   * El caso del 26/09/2026: «di de alta la 19 y se borro la 18». La API Key de
+   * la 19 era la de la 18, Bitget devolvio su UID y el panel mudo la 18 a la
+   * casilla 19 sustituyendole la clave, diciendo «registrada».
+   */
+  it('la clave de otra subcuenta, con otro nombre y en otra casilla, se rechaza sin tocar nada', async () => {
+    await sesion.crear(MAESTRA);
+    const uid = verificacionCorrecta(exchange);
+    await sesion.agregar({ ...ALTA, etiqueta: 'Sub-18', grupoNombre: 'B', casilla: 18 });
+
+    verificacionCorrecta(exchange, uid);
+    const r = await sesion.agregar({
+      ...ALTA,
+      etiqueta: 'Sub-19',
+      grupoNombre: 'B',
+      casilla: 19,
+      apiKey: 'bg_nuevaclave0000abcd'
+    });
+
+    expect(r.ok).toBe(false);
+    expect(r.motivo).toContain('«Sub-18»');
+    const filas = sesion.listar();
+    expect(filas).toHaveLength(1);
+    expect(filas[0]?.etiqueta).toBe('Sub-18');
+    expect(sesion.cuentasPanel()[0]?.subcuentas[0]?.slot).toBe(18);
+
+    /*
+     * Y la credencial de la 18 no se sustituyo en el vault, ni siquiera en
+     * memoria: al probarla, la peticion sale firmada con su clave de siempre.
+     */
+    verificacionCorrecta(exchange, uid);
+    const antes = exchange.peticiones.length;
+    await sesion.verificar(filas[0]!.id);
+    const firmadas = exchange.peticiones.slice(antes).map((p) => p.cabeceras['access-key']);
+    expect(firmadas.length).toBeGreaterThan(0);
+    expect(new Set(firmadas)).toEqual(new Set([ALTA.apiKey]));
+  });
+
   /* El UID lo pone Bitget y viaja hasta la pantalla; el operador no lo escribe. */
   it('detecta y guarda el UID y el de la cuenta principal', async () => {
     await sesion.crear(MAESTRA);

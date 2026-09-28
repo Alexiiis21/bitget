@@ -37,6 +37,7 @@ import {
   type AvisosConexion
 } from '@main/bitget/ws/conexion';
 import { RegistroOrdenesUta } from '@main/bitget/registro-ordenes-uta';
+import { saldoDeEmpujon } from '@main/bitget/ws/empujones';
 import {
   PoolSockets,
   type CuentaSocket,
@@ -507,6 +508,40 @@ describe('el barrido REST sobre una cuenta UTA', () => {
       { marginCoin: 'BTC', available: '0.01', accountEquity: '', usdtEquity: '', locked: '0' }
     ]);
     expect(rutas()).toEqual(['/api/v3/account/assets']);
+  });
+
+  it('lee el saldo con la forma documentada de `account/assets`: objeto con `assets`', async () => {
+    exchange.simularUta({ accountMode: 'unified' });
+    exchange.responderSiempre({
+      cuerpo: sobreOk({
+        accountEquity: '130',
+        usdtEquity: '130',
+        unrealisedPnl: '0',
+        assets: [{ coin: 'USDT', equity: '130', balance: '130', available: '120.5', debt: '0', locked: '0' }]
+      })
+    });
+
+    const r = await obtenerCuentasFuturos(cliente, UTA, MERCADO_REAL.productType, 'USDT');
+
+    expect(r.datos.find((c) => c.marginCoin === 'USDT')?.available).toBe('120.5');
+  });
+});
+
+describe('el saldo empujado por el tema `account` de V3', () => {
+  it('lo lee aunque las monedas vengan anidadas en `coin`', () => {
+    const datos = [
+      {
+        totalEquity: '130',
+        unrealisedPnl: '0',
+        coin: [{ coin: 'USDT', available: '120.5', equity: '130', balance: '130', locked: '0' }]
+      }
+    ];
+
+    expect(saldoDeEmpujon(datos, 'USDT')).toBe('120.5');
+  });
+
+  it('sigue leyendo la forma plana', () => {
+    expect(saldoDeEmpujon([{ coin: 'USDT', available: '7' }], 'USDT')).toBe('7');
   });
 });
 

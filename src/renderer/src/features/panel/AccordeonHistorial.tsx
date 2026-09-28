@@ -1,5 +1,5 @@
 import { FUENTE, T, TIPO_MONITOR } from '@/lib/tokens';
-import { cifra, cifraConSigno } from '@/lib/formato';
+import { cifraConSigno, importe, precio } from '@/lib/formato';
 import { usarPanel } from '@/store/panel';
 import { EsqueletoLineas, EstadoVacio } from './Esqueleto';
 import type { Account, ClosedPosition } from '@shared/domain/panel-view';
@@ -96,9 +96,9 @@ export function AccordeonHistorial({ cuenta }: { cuenta: Account }) {
                         {h.side === 'long' ? 'LONG' : 'SHORT'}
                       </span>
                     </div>
-                    <div style={{ textAlign: 'right', fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.valor, color: T.texto2 }}>{cifra(h.entryPrice)}</div>
-                    <div style={{ textAlign: 'right', fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.valor, color: T.texto2 }}>{cifra(h.exitPrice)}</div>
-                    <div style={{ textAlign: 'right', fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.valor, fontWeight: 600, color: T.texto2 }}>{cifra(h.initialMargin)}</div>
+                    <div style={{ textAlign: 'right', fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.valor, color: T.texto2 }}>{precio(h.entryPrice)}</div>
+                    <div style={{ textAlign: 'right', fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.valor, color: T.texto2 }}>{precio(h.exitPrice)}</div>
+                    <div style={{ textAlign: 'right', fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.valor, fontWeight: 600, color: T.texto2 }}>{importe(h.initialMargin)}</div>
                     <div style={{ textAlign: 'right', fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.destacado, fontWeight: 700, color: Number.parseFloat(h.pnl) < 0 ? T.corto : '#2f7a4f' }}>{cifraConSigno(h.pnl)}</div>
                     <div style={{ textAlign: 'center', fontSize: TIPO_MONITOR.rotulo, fontWeight: 600, color: colorCerradoPor(h.closedBy) }}>{CERRADO_POR[h.closedBy]}</div>
                     <div style={{ textAlign: 'right', fontFamily: FUENTE.mono, fontSize: TIPO_MONITOR.rotulo, color: T.texto3 }}>{new Date(h.closedAt).toLocaleString('es-MX', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</div>

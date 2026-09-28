@@ -120,7 +120,11 @@ export interface AltaCuentaRegistro {
 }
 
 /** Motivo por el que un alta no cabe en el registro. */
-export type MotivoRegistro = 'grupos-llenos' | 'casillas-llenas' | 'casilla-ocupada';
+export type MotivoRegistro =
+  | 'grupos-llenos'
+  | 'casillas-llenas'
+  | 'casilla-ocupada'
+  | 'misma-subcuenta';
 
 export class ErrorRegistro extends Error {
   readonly motivo: MotivoRegistro;
@@ -479,20 +483,78 @@ export class RegistroCuentas {
   }
 
   /**
+   * Rechaza el alta que moveria de sitio una subcuenta ya registrada.
+   *
+   * --------------------------------------------------------------------------
+   * Por que existe
+   * --------------------------------------------------------------------------
+   * `reservarId` reconoce la subcuenta por UID, y hasta el 26/09/2026 `agregar`
+   * trataba ese reconocimiento como «rotar la clave» aunque el alta pidiera
+   * **otra casilla**: la ficha se mudaba a la casilla pedida, con la etiqueta
+   * nueva, y el vault le sustituia la credencial. El cliente lo vio como «di de
+   * alta la 19 y se borro la 18»: habia pegado -o Bitget habia devuelto- el UID
+   * de la 18, y el panel contesto «registrada en la casilla 19» sin mas.
+   *
+   * Que un alta con **otro nombre** traiga el UID de una subcuenta ya
+   * registrada es casi siempre la API Key de otra subcuenta pegada por error.
+   * Esa es la que se rechaza. Con el mismo nombre sigue siendo lo que era:
+   * rotar la clave, en su casilla, o mover la subcuenta a otra casilla a
+   * proposito -«volver a darla de alta en otra»-. El nombre se compara como
+   * en `existente`: sin mayusculas ni espacios en los extremos.
+   *
+   * Es publico porque `Sesion.agregar` lo llama **antes** de `vault.agregar`:
+   * si el choque solo saltara en `agregar`, el vault ya habria sustituido en
+   * memoria la credencial de la subcuenta buena.
+   *
+   * Sin casilla pedida no hay choque posible: `agregar` conserva la que tenia.
+   */
+  comprobarReubicacion(
+    cuentaId: string,
+    grupoNombre: string,
+    etiqueta: string,
+    slot?: number
+  ): ErrorRegistro | null {
+    const previa = this.cuentas.find((c) => c.id === cuentaId);
+    if (previa === undefined || slot === undefined) return null;
+    if (previa.etiqueta.toLowerCase() === etiqueta.trim().toLowerCase()) return null;
+
+    const grupo = this.grupoConNombre(grupoNombre);
+    if (grupo?.id === previa.grupoId && previa.slot === slot) return null;
+
+    const uid = previa.uid === '' ? '' : ` (UID ${previa.uid})`;
+    return new ErrorRegistro(
+      'misma-subcuenta',
+      `Esta API Key es de la subcuenta «${previa.etiqueta}»${uid}, que ya está en la casilla ` +
+        `${previa.slot} de la cuenta «${this.nombreDeGrupo(previa.grupoId)}». ` +
+        '¿Pegó la clave de otra subcuenta? Para cambiarle la clave, regístrela en su misma casilla.'
+    );
+  }
+
+  /**
    * Da de alta una subcuenta, o actualiza la ficha que ya le correspondia:
    * registrar dos veces la misma es rotar su API Key, no duplicarla.
    *
    * Cual es «la que ya le correspondia» lo decidio `reservarId` a partir del
    * UID de Bitget, asi que aqui basta con buscar por `id`. Puede llegar con el
-   * nombre cambiado, con otra clave o incluso en otra cuenta principal: sigue
-   * siendo la misma subcuenta y conserva su ficha.
+   * nombre cambiado o con otra clave: sigue siendo la misma subcuenta y conserva
+   * su ficha.
    *
    * La casilla la manda el alta si la trae -«esta va en la 7»- y se comprueba
    * antes de escribir nada: una casilla ocupada por otra subcuenta rechaza el
-   * alta en vez de desalojarla. Sin casilla pedida se conserva la que tuviera, o
-   * se le da la primera libre.
+   * alta en vez de desalojarla, y una subcuenta ya registrada que llega con
+   * otro nombre y otra casilla tambien -ver `comprobarReubicacion`-. Sin casilla pedida se
+   * conserva la que tuviera, o se le da la primera libre.
    */
   agregar(alta: AltaCuentaRegistro): Cuenta {
+    /* Antes de `grupoPorNombre`, que puede crear la cuenta principal. */
+    const reubicacion = this.comprobarReubicacion(
+      alta.id,
+      alta.grupoNombre,
+      alta.etiqueta,
+      alta.slot
+    );
+    if (reubicacion !== null) throw reubicacion;
+
     const grupo = this.grupoPorNombre(alta.grupoNombre);
     const previa = this.cuentas.find((c) => c.id === alta.id);
     /* Rotar la clave no mueve de casilla; cambiar de cuenta principal, si. */

@@ -22,6 +22,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { ClienteBitget } from '@main/bitget/rest/client';
 import { detenerBitacora, iniciarBitacora, superficieDeRuta } from '@main/diagnostico/bitacora';
 import { obtenerAjustesCuenta } from '@main/bitget/rest/endpoints/ajustes-v3';
@@ -142,6 +143,43 @@ describe('lo que anota', () => {
 
     expect(lineas.at(-1)).toMatchObject({ superficie: 'v3', codigo: '00000' });
     expect(String(lineas.at(-1)?.['ruta'])).toContain('/api/v3/account/settings');
+  });
+
+  it('un POST anota el cuerpo enviado y lo que contestó Bitget', async () => {
+    /*
+     * Sin esto no se sabe qué tamaño, lado o apalancamiento salió de verdad
+     * cuando el operador dice que algo que ya funcionaba ha dejado de hacerlo.
+     */
+    exchange.responderSiempre({ cuerpo: sobreOk({ orderId: '123', clientOid: 'pcb-1' }) });
+
+    await cliente.peticionFirmada(
+      CREDENCIAL,
+      {
+        metodo: 'POST',
+        ruta: '/api/v2/mix/order/place-order',
+        cuerpo: { symbol: 'BTCUSDT', side: 'buy', size: '0.001', passphrase: PASSPHRASE },
+        idempotente: false
+      },
+      z.unknown()
+    );
+    const lineas = await esperarLineas(2);
+
+    expect(lineas.at(-1)).toMatchObject({
+      metodo: 'POST',
+      cuerpo: { symbol: 'BTCUSDT', side: 'buy', size: '0.001', passphrase: '[REDACTADO]' },
+      respuesta: { orderId: '123', clientOid: 'pcb-1' }
+    });
+    expect(await crudoBitacora()).not.toContain(PASSPHRASE);
+  });
+
+  it('un GET no anota la respuesta: el sondeo llenaría el archivo', async () => {
+    exchange.responderSiempre({ cuerpo: sobreOk({ userId: '1', authorities: ['coow'] }) });
+
+    await obtenerInfoCuenta(cliente, CREDENCIAL);
+    const lineas = await esperarLineas(2);
+
+    expect(lineas.at(-1)).not.toHaveProperty('respuesta');
+    expect(lineas.at(-1)).not.toHaveProperty('cuerpo');
   });
 
   it('`superficieDeRuta` no se inventa una tercera', () => {
