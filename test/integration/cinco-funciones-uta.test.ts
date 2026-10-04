@@ -27,6 +27,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MERCADO_SIMULADO } from '@main/bitget/mercado';
 import { ClienteBitget } from '@main/bitget/rest/client';
+import { abrirPosicion } from '@main/bitget/rest/endpoints/ordenes';
+import { obtenerPosicionesV3 } from '@main/bitget/rest/endpoints/posiciones-v3';
+import { colocarTakeProfitV3 } from '@main/bitget/rest/endpoints/tpsl-v3';
 import { LimitadorPeticiones } from '@main/execution/rate-limiter';
 import {
   MotorLotes,
@@ -36,6 +39,7 @@ import {
 } from '@main/execution/motor-lotes';
 import {
   iniciarExchangeSimulado,
+  sobreError,
   sobreOk,
   type ExchangeSimulado,
   type PeticionRecibida,
@@ -226,10 +230,19 @@ describe('apertura', () => {
     const v2 = cuerpoDe('/api/v2/mix/order/place-order');
     const v3 = cuerpoDe('/api/v3/trade/place-order');
 
+    /*
+     * Las dos usan el campo (10x) desde el 02/10/2026: 100 × 10 / 63381.3 = 0.0157.
+     * Hasta entonces la UTA abria a 75x fijo.
+     */
+    expect(v2['size']).toBe('0.0157');
+    expect(v3['qty']).toBe('0.0157');
+
+    /* La UTA ya estaba a 10x: no hay cambio de los dos lados que avisar. */
+    expect(plan.avisos.filter((a) => a.codigo === 'apalancamiento-uta-ambos-lados')).toHaveLength(0);
+
     /* V2: productType + marginCoin + size + tradeSide. */
     expect(v2['productType']).toBe('SUSDT-FUTURES');
     expect(v2['marginCoin']).toBe('SUSDT');
-    expect(v2['size']).toBe(v3['qty']);
     expect(v2['tradeSide']).toBe('open');
 
     /* V3: category + qty + posSide, y ni marginCoin ni tradeSide. */
@@ -350,12 +363,58 @@ describe('cierre', () => {
   });
 });
 
-describe('apalancamiento', () => {
-  it('en V3 el lado es el nombre del campo, no un parametro aparte', async () => {
+describe('apertura en UTA fija antes el apalancamiento del modo de la orden', () => {
+  it('manda set-leverage en aislado con el lado y despues place-order', async () => {
     exchange.responderCon((p) => {
       const c = comunes(p);
       if (c !== null) return c;
-      if (p.url.includes('set-leverage')) {
+      if (p.url.startsWith('/api/v3/account/set-leverage')) return { cuerpo: sobreOk('success') };
+      if (p.url.includes('place-order')) {
+        const cuerpo = JSON.parse(p.cuerpo) as Record<string, unknown>;
+        return { cuerpo: sobreOk({ orderId: 'ord_1', clientOid: cuerpo['clientOid'] }) };
+      }
+      return null;
+    });
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId: UTA, lado: 'long' }],
+      margenInicial: '100',
+      apalancamiento: 25,
+      precioLimite: null,
+      modoMargen: 'isolated'
+    });
+    /* La cuenta estaba a 10x: se avisa de que long y short pasan a 25x juntos. */
+    const ambos = plan.avisos.filter((a) => a.codigo === 'apalancamiento-uta-ambos-lados');
+    expect(ambos).toHaveLength(1);
+    expect(ambos[0]?.mensaje).toContain('10x a 25x');
+
+    const lote = await motor.ejecutar(plan);
+    expect(lote.jobs.every((j) => j.estado === 'exito')).toBe(true);
+
+    const rutas = exchange.peticiones.map((p) => p.url);
+    const iLev = rutas.findIndex((u) => u.startsWith('/api/v3/account/set-leverage'));
+    const iOrden = rutas.findIndex((u) => u.includes('place-order'));
+    expect(iLev).toBeGreaterThanOrEqual(0);
+    expect(iLev).toBeLessThan(iOrden);
+
+    const lev = cuerpoDe('/api/v3/account/set-leverage');
+    expect(lev['marginMode']).toBe('isolated');
+    expect(lev['posSide']).toBe('long');
+    /* El del campo, y en aislado lleva los tres. */
+    expect(lev['leverage']).toBe('25');
+    expect(lev['longLeverage']).toBe('25');
+    expect(lev['shortLeverage']).toBe('25');
+  });
+});
+
+describe('apalancamiento', () => {
+  it('en V3 aislado van leverage, longLeverage y shortLeverage con el valor del campo', async () => {
+    exchange.responderCon((p) => {
+      const c = comunes(p);
+      if (c !== null) return c;
+      if (p.url.startsWith('/api/v2/mix/account/set-leverage')) {
         return {
           cuerpo: sobreOk({
             symbol: SIMBOLO,
@@ -366,6 +425,16 @@ describe('apalancamiento', () => {
           })
         };
       }
+      if (p.url.startsWith('/api/v3/account/set-leverage')) {
+        /* V3 responde una cadena y el cambio se ve al releer los ajustes. */
+        exchange.simularUta({
+          ...AJUSTES_UTA,
+          symbolConfigList: [
+            { category: 'SUSDT-FUTURES', symbol: SIMBOLO, marginMode: 'isolated', leverage: '25' }
+          ]
+        });
+        return { cuerpo: sobreOk('success') };
+      }
       return null;
     });
 
@@ -375,6 +444,10 @@ describe('apalancamiento', () => {
       objetivos: AMBAS,
       apalancamiento: 25
     });
+    /* Lo que enseña la confirmacion: el que tiene ahora y el pedido. */
+    const uta = plan.entradas.find((e) => e.cuentaId === UTA);
+    expect(uta?.apalancamientoActual).toBe(10);
+    expect(uta?.apalancamiento).toBe(25);
     const lote = await motor.ejecutarApalancamiento(plan);
 
     expect(lote.jobs.filter((j) => j.estado === 'exito')).toHaveLength(2);
@@ -385,9 +458,84 @@ describe('apalancamiento', () => {
     expect(v2['leverage']).toBe('25');
     expect(v2['holdSide']).toBe('long');
 
+    /*
+     * Capturado el 30/09/2026: sin `leverage` o sin los dos lados, Bitget
+     * responde 25200. Las dos superficies usan el valor del campo.
+     */
+    expect(v3['leverage']).toBe('25');
     expect(v3['longLeverage']).toBe('25');
+    expect(v3['shortLeverage']).toBe('25');
+    expect(v3['marginMode']).toBe('isolated');
+    expect(v3['posSide']).toBe('long');
     expect(v3).not.toHaveProperty('holdSide');
     expect(v3).not.toHaveProperty('marginCoin');
+  });
+
+  it('por encima del maximo del simbolo no se planifica, tampoco en UTA', async () => {
+    exchange.responderCon((p) => comunes(p));
+
+    await expect(
+      motor.planificarApalancamiento({
+        mercado: MERCADO_SIMULADO,
+        simbolo: SIMBOLO,
+        objetivos: [{ cuentaId: UTA, lado: 'long' }],
+        apalancamiento: 150
+      })
+    ).rejects.toThrow(/entre .*x y 125x/);
+  });
+
+  it('abrir en UTA por encima del maximo descarta la casilla', async () => {
+    exchange.responderCon((p) => comunes(p));
+
+    const plan = await motor.planificar({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId: UTA, lado: 'long' }],
+      margenInicial: '100',
+      apalancamiento: 150,
+      precioLimite: null,
+      modoMargen: 'isolated'
+    });
+
+    expect(plan.entradas).toHaveLength(0);
+    expect(plan.descartes[0]?.motivo).toBe('apalancamiento-uta-fuera-de-rango');
+  });
+
+  it('en UTA un simbolo sin configurar se trata como cruzado y se puede fijar', async () => {
+    /* Capturado el 30/09/2026: cuenta UTA nueva, `symbolConfigList` vacia. */
+    exchange.simularUta({ ...AJUSTES_UTA, symbolConfigList: [] });
+    exchange.responderCon((p) => {
+      const c = comunes(p);
+      if (c !== null) return c;
+      if (p.url.startsWith('/api/v3/account/set-leverage')) {
+        exchange.simularUta({
+          ...AJUSTES_UTA,
+          symbolConfigList: [
+            { category: 'SUSDT-FUTURES', symbol: SIMBOLO, marginMode: 'crossed', leverage: '75' }
+          ]
+        });
+        return { cuerpo: sobreOk('success') };
+      }
+      return null;
+    });
+
+    const plan = await motor.planificarApalancamiento({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId: UTA, lado: 'long' }],
+      apalancamiento: 75
+    });
+
+    expect(plan.descartes).toHaveLength(0);
+    expect(plan.entradas[0]?.modoMargen).toBe('crossed');
+
+    const lote = await motor.ejecutarApalancamiento(plan);
+    expect(lote.jobs.every((j) => j.estado === 'exito')).toBe(true);
+
+    /* Cruzado: un solo apalancamiento, sin lado. */
+    const v3 = cuerpoDe('/api/v3/account/set-leverage');
+    expect(v3['leverage']).toBe('75');
+    expect(v3).not.toHaveProperty('longLeverage');
   });
 });
 
@@ -469,50 +617,57 @@ describe('margen', () => {
   });
 });
 
-describe('Take Profit — el hueco, y por que falla en vez de aproximar', () => {
-  it('poner Take Profit falla solo en la cuenta UTA; la Classic sigue adelante', async () => {
-    exchange.responderCon((p) => {
-      const c = comunes(p);
-      if (c !== null) return c;
-      if (p.url.startsWith('/api/v2/mix/position/all-position')) {
-        return {
-          cuerpo: sobreOk([
+describe('Take Profit en UTA: ordenes de estrategia tpsl', () => {
+  /** Una posicion long abierta en las dos superficies. */
+  const conPosicion = (p: PeticionRecibida): Respuesta | null => {
+    if (p.url.startsWith('/api/v2/mix/position/all-position')) {
+      return {
+        cuerpo: sobreOk([
+          {
+            symbol: SIMBOLO,
+            holdSide: 'long',
+            total: '0.5',
+            marginMode: 'isolated',
+            openPriceAvg: '63000',
+            liquidationPrice: '58000',
+            leverage: '10',
+            marginSize: '3150'
+          }
+        ])
+      };
+    }
+    if (p.url.startsWith('/api/v3/position/current-position')) {
+      return {
+        cuerpo: sobreOk({
+          list: [
             {
               symbol: SIMBOLO,
-              holdSide: 'long',
+              posSide: 'long',
               total: '0.5',
               marginMode: 'isolated',
-              openPriceAvg: '63000',
+              avgPrice: '63000',
               liquidationPrice: '58000',
               leverage: '10',
               marginSize: '3150'
             }
-          ])
-        };
-      }
-      if (p.url.startsWith('/api/v3/position/current-position')) {
-        return {
-          cuerpo: sobreOk({
-            list: [
-              {
-                symbol: SIMBOLO,
-                posSide: 'long',
-                total: '0.5',
-                marginMode: 'isolated',
-                avgPrice: '63000',
-                liquidationPrice: '58000',
-                leverage: '10',
-                marginSize: '3150'
-              }
-            ]
-          })
-        };
-      }
-      if (p.url.startsWith('/api/v2/mix/order/orders-plan-pending')) {
-        return { cuerpo: sobreOk({ entrustedList: [] }) };
-      }
-      if (p.url.includes('place-tpsl-order')) {
-        return { cuerpo: sobreOk({ orderId: 'tp_1', clientOid: 'x' }) };
+          ]
+        })
+      };
+    }
+    if (p.url.startsWith('/api/v2/mix/order/orders-plan-pending')) {
+      return { cuerpo: sobreOk({ entrustedList: [] }) };
+    }
+    return null;
+  };
+
+  it('un lote mixto pone el Take Profit en las dos, y en V3 por place-strategy-order', async () => {
+    exchange.responderCon((p) => {
+      const c = comunes(p) ?? conPosicion(p);
+      if (c !== null) return c;
+      if (p.url.startsWith('/api/v3/trade/unfilled-strategy-orders')) return { cuerpo: sobreOk([]) };
+      if (p.url.includes('place-tpsl-order')) return { cuerpo: sobreOk({ orderId: 'tp_v2', clientOid: 'x' }) };
+      if (p.url.startsWith('/api/v3/trade/place-strategy-order')) {
+        return { cuerpo: sobreOk({ orderId: 'tp_v3', clientOid: 'y' }) };
       }
       return null;
     });
@@ -526,17 +681,176 @@ describe('Take Profit — el hueco, y por que falla en vez de aproximar', () => 
     const lote = await motor.ejecutarTakeProfit(plan);
 
     const porCuenta = new Map(lote.jobs.map((j) => [j.cuentaId, j]));
-
-    /*
-     * Es el comportamiento que se busca: un lote mixto no se cae entero. La
-     * Classic hace su trabajo y la UTA queda marcada con un motivo accionable,
-     * en vez de con un exito que no puso ninguna proteccion.
-     */
     expect(porCuenta.get(CLASICA)?.estado).toBe('exito');
-    expect(porCuenta.get(UTA)?.estado).toBe('fallo');
-    expect(porCuenta.get(UTA)?.mensaje).toContain('UTA');
+    expect(porCuenta.get(UTA)?.estado).toBe('exito');
+    expect(porCuenta.get(UTA)?.ordenId).toBe('tp_v3');
 
-    /* Y no se envio nada a V3: no se adivina un endpoint. */
-    expect(exchange.peticiones.some((p) => p.url.includes('/api/v3/trade/place-tpsl'))).toBe(false);
+    const v3 = cuerpoDe('/api/v3/trade/place-strategy-order');
+    expect(v3['type']).toBe('tpsl');
+    expect(v3['tpslMode']).toBe('full');
+    expect(v3['posSide']).toBe('long');
+    expect(v3['tpTriggerBy']).toBe('market');
+    expect(v3['tpOrderType']).toBe('market');
+    expect(v3['category']).toBe('SUSDT-FUTURES');
+    /* El mismo precio de disparo que la Classic: misma posicion, mismo calculo. */
+    expect(v3['takeProfit']).toBe(cuerpoDe('place-tpsl-order')['triggerPrice']);
+    expect(v3).not.toHaveProperty('holdSide');
+    expect(v3).not.toHaveProperty('planType');
+  });
+
+  it('cambia un Take Profit puesto: cancela el anterior y pone el nuevo', async () => {
+    exchange.responderCon((p) => {
+      const c = comunes(p) ?? conPosicion(p);
+      if (c !== null) return c;
+      if (p.url.startsWith('/api/v3/trade/unfilled-strategy-orders')) {
+        return {
+          cuerpo: sobreOk([
+            { orderId: 'tp_viejo', symbol: SIMBOLO, posSide: 'long', status: 'pending', takeProfit: '70000' }
+          ])
+        };
+      }
+      if (p.url.startsWith('/api/v3/trade/cancel-strategy-order')) return { cuerpo: sobreOk(null) };
+      if (p.url.startsWith('/api/v3/trade/place-strategy-order')) {
+        return { cuerpo: sobreOk({ orderId: 'tp_nuevo', clientOid: 'y' }) };
+      }
+      return null;
+    });
+
+    const plan = await motor.planificarTakeProfit({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId: UTA, lado: 'long' }],
+      porcentaje: '10'
+    });
+    const lote = await motor.ejecutarTakeProfit(plan);
+    expect(lote.jobs.every((j) => j.estado === 'exito')).toBe(true);
+
+    const rutas = exchange.peticiones.map((p) => p.url);
+    const iCancelar = rutas.findIndex((u) => u.startsWith('/api/v3/trade/cancel-strategy-order'));
+    const iPoner = rutas.findIndex((u) => u.startsWith('/api/v3/trade/place-strategy-order'));
+    expect(iCancelar).toBeGreaterThanOrEqual(0);
+    expect(iCancelar).toBeLessThan(iPoner);
+    expect(cuerpoDe('/api/v3/trade/cancel-strategy-order')['orderId']).toBe('tp_viejo');
+  });
+
+  it('el 31008 del Take Profit separado se dice claro y no se reintenta', async () => {
+    /*
+     * Capturado el 01/10/2026: con la posicion UTA abierta, `place-strategy-order`
+     * responde 31008 a toda variante. Reintentarlo solo retrasaba el lote.
+     */
+    let intentos = 0;
+    exchange.responderCon((p) => {
+      if (!p.url.startsWith('/api/v3/trade/place-strategy-order')) return null;
+      intentos += 1;
+      return {
+        estado: 400,
+        cuerpo: sobreError('31008', 'There is no position in this position, no take profit or stop loss order can be made')
+      };
+    });
+
+    const credencial = { apiKey: `key_${UTA}`, secretKey: 's', passphrase: 'f', superficie: 'v3' as const, holdMode: 'hedge_mode' as const };
+    const envio = colocarTakeProfitV3(cliente, credencial, {
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      lado: 'short',
+      precioDisparo: '60000',
+      clientOid: 'pcb_tp'
+    });
+
+    await expect(envio).rejects.toThrow('solo se puede poner al abrirla');
+    expect(intentos).toBe(1);
+  });
+
+  it('la apertura UTA lleva el Take Profit dentro de place-order', async () => {
+    /* Capturado el 01/10/2026: asi si lo acepta Bitget, y aparece como tpsl pendiente. */
+    exchange.responderCon((p) =>
+      p.url.startsWith('/api/v3/trade/place-order')
+        ? { cuerpo: sobreOk({ orderId: 'o_v3', clientOid: 'pcb_a' }) }
+        : null
+    );
+
+    const credencial = { apiKey: `key_${UTA}`, secretKey: 's', passphrase: 'f', superficie: 'v3' as const, holdMode: 'hedge_mode' as const };
+    await abrirPosicion(cliente, credencial, {
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      lado: 'short',
+      modoMargen: 'isolated',
+      size: '0.0002',
+      precioLimite: null,
+      clientOid: 'pcb_a',
+      takeProfit: '84094.7'
+    });
+
+    const cuerpo = cuerpoDe('/api/v3/trade/place-order');
+    expect(cuerpo['takeProfit']).toBe('84094.7');
+    expect(cuerpo['tpOrderType']).toBe('market');
+    expect(cuerpo['posSide']).toBe('short');
+    expect(exchange.peticiones.some((p) => p.url.startsWith('/api/v3/trade/place-strategy-order'))).toBe(false);
+  });
+
+  it('lee margen y P&L de la posicion con los nombres reales de V3', async () => {
+    /* Respuesta real de `current-position` capturada el 01/10/2026, recortada. */
+    exchange.responderCon((p) =>
+      p.url.startsWith('/api/v3/position/current-position')
+        ? {
+            cuerpo: sobreOk({
+              list: [
+                {
+                  category: 'USDT-FUTURES',
+                  symbol: 'BTCUSDT',
+                  posSide: 'short',
+                  marginMode: 'isolated',
+                  positionBalance: '0.36074383',
+                  total: '0.0002',
+                  available: '0.0002',
+                  leverage: '75',
+                  avgPrice: '83979.7',
+                  unrealisedPnl: '-0.17564',
+                  liquidationPrice: '85393',
+                  markPrice: '84857.9'
+                }
+              ]
+            })
+          }
+        : null
+    );
+
+    const credencial = { apiKey: `key_${UTA}`, secretKey: 's', passphrase: 'f', superficie: 'v3' as const, holdMode: 'hedge_mode' as const };
+    const r = await obtenerPosicionesV3(cliente, credencial, MERCADO_SIMULADO);
+
+    expect(r.datos[0]?.marginSize).toBe('0.36074383');
+    expect(r.datos[0]?.unrealizedPL).toBe('-0.17564');
+    expect(r.datos[0]?.openPriceAvg).toBe('83979.7');
+  });
+
+  it('una orden con Take Profit y Stop Loss no se toma por Take Profit, para no llevarse el Stop Loss', async () => {
+    exchange.responderCon((p) => {
+      const c = comunes(p) ?? conPosicion(p);
+      if (c !== null) return c;
+      if (p.url.startsWith('/api/v3/trade/unfilled-strategy-orders')) {
+        return {
+          cuerpo: sobreOk([
+            {
+              orderId: 'tp_y_sl',
+              symbol: SIMBOLO,
+              posSide: 'long',
+              status: 'pending',
+              takeProfit: '70000',
+              stopLoss: '60000'
+            }
+          ])
+        };
+      }
+      return null;
+    });
+
+    const plan = await motor.planificarQuitarTakeProfit({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId: UTA, lado: 'long' }]
+    });
+
+    expect(plan.entradas).toHaveLength(0);
+    expect(exchange.peticiones.some((p) => p.url.includes('cancel-strategy-order'))).toBe(false);
   });
 });

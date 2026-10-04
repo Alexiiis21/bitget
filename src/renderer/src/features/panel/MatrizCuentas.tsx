@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react';
+import { useRef, type CSSProperties } from 'react';
 import { ESTADO_ACCION, FUENTE, T } from '@/lib/tokens';
 import { cifra } from '@/lib/formato';
 import { usarPanel } from '@/store/panel';
@@ -6,6 +6,7 @@ import type { Account, Position, Side } from '@shared/domain/panel-view';
 import { AccordeonMonitor } from './AccordeonMonitor';
 import { AccordeonHistorial } from './AccordeonHistorial';
 import { EsqueletoMatriz, EstadoVacio } from './Esqueleto';
+import { LazoSeleccion } from './LazoSeleccion';
 
 /**
  * Cuerpo del panel: una `AccountBlock` por cuenta principal.
@@ -228,6 +229,9 @@ function RejillaCasillas({ cuenta, lado }: { cuenta: Account; lado: Side }) {
             key={sub.id}
             type="button"
             className="pcb-casilla"
+            data-lazo-cuenta={cuenta.id}
+            data-lazo-lado={campo}
+            data-lazo-indice={i}
             /*
              * `aria-disabled` y no `disabled`: un botón deshabilitado no recibe
              * el cursor, y con él se perdería la pista que dice el estado de esa
@@ -328,7 +332,7 @@ function BloqueCuenta({ cuenta }: { cuenta: Account }) {
 
       <AlertasCuenta cuenta={cuenta} />
 
-      <div style={{ padding: '7px 12px 8px', display: 'flex', flexDirection: 'column', gap: 5, background: T.superficie, borderBottom: `1px solid ${T.borde}` }}>
+      <div data-zona-lazo style={{ padding: '7px 12px 8px', display: 'flex', flexDirection: 'column', gap: 5, background: T.superficie, borderBottom: `1px solid ${T.borde}` }}>
         <RejillaCasillas cuenta={cuenta} lado="long" />
         <RejillaCasillas cuenta={cuenta} lado="short" />
       </div>
@@ -460,10 +464,12 @@ function CuerpoMatriz() {
 }
 
 export function MatrizCuentas() {
+  const desplazable = useRef<HTMLDivElement>(null);
   return (
     <div style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      <div style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden', background: T.superficie }}>
+      <div ref={desplazable} style={{ position: 'relative', flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden', background: T.superficie }}>
         <CuerpoMatriz />
+        <LazoSeleccion contenedor={desplazable} />
       </div>
       <PieMatriz />
     </div>

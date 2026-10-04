@@ -637,21 +637,13 @@ const CAMPO_DE: Record<PlanKind, keyof ValoresHerramientas | null> = {
  * Las operaciones que piden además la contraseña de paso.
  *
  * --------------------------------------------------------------------------
- * Abrir y cerrar, no solo abrir
+ * Solo abrir
  * --------------------------------------------------------------------------
- * Hasta el 26/08/2026 solo la apertura, con el argumento de que es la única que
- * compromete dinero nuevo. El argumento no se sostiene, y el propio panel ya
- * decía lo contrario: al fijar la clave, la pantalla de seguridad prometía que
- * se pediría «cada vez que se abra **o se cierre** una posición».
+ * Del 26/08/2026 al 01/10/2026 también la pedía cerrar. El cliente pidió el
+ * 01/10/2026 quitarla del cierre: cerrar tiene que ser inmediato, y la clave
+ * queda para la única operación que compromete dinero nuevo.
  *
- * Cerrar no compromete dinero nuevo, pero **realiza el resultado**: convierte
- * en definitiva una pérdida que estaba abierta y deshace de golpe lo que hay
- * puesto. Y es irreversible en el sentido que importa: una apertura equivocada
- * se cierra, pero un cierre equivocado no se «reabre» —se vuelve a abrir a otro
- * precio, y esa diferencia es el coste del error—. Sobre cien casillas, un
- * clic de más en «Cerrar» cuesta tanto como uno en «Abrir».
- *
- * Las otras cuatro no entran: ajustar el Take Profit, el margen o el
+ * Las demás no entran: ajustar el Take Profit, el margen o el
  * apalancamiento no realiza ningún resultado, y pedir la clave en cada ajuste
  * la convertiría en un trámite que se teclea sin leer, que es exactamente como
  * se pierde un freno de este tipo.
@@ -660,7 +652,7 @@ const CAMPO_DE: Record<PlanKind, keyof ValoresHerramientas | null> = {
  * el campo: dos listas que hay que acordarse de tocar a la vez acaban
  * separándose, y aquí separarse significa enseñar el campo y no comprobarlo.
  */
-export const PIDE_PASO = new Set<PlanKind>(['open', 'close']);
+export const PIDE_PASO = new Set<PlanKind>(['open']);
 
 /**
  * Las operaciones tras las cuales la selección se deshace sola.
@@ -683,7 +675,7 @@ export const PIDE_PASO = new Set<PlanKind>(['open', 'close']);
  * sobre la misma selección —poner el Take Profit y luego subir el
  * apalancamiento— es un uso legítimo que desmarcar rompería.
  *
- * Lista aparte de `PIDE_PASO` aunque hoy tengan los mismos dos elementos: son
+ * Lista aparte de `PIDE_PASO` —que hoy solo tiene la apertura—: son
  * dos reglas distintas —una frena, la otra ordena— y fundirlas haría que una
  * operación futura que pida clave heredase el desmarcado sin que nadie lo
  * decidiera.
@@ -1586,7 +1578,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   /**
    * Envía el plan aprobado. Es la segunda fase y la única que toca Bitget.
    *
-   * Abrir y cerrar piden además la contraseña de paso —ver `PIDE_PASO`—. Tres
+   * Abrir pide además la contraseña de paso —ver `PIDE_PASO`—. Tres
    * intentos fallidos cancelan la operación **sin haber enviado nada**.
    */
   confirmarPlan: async () => {
@@ -2133,7 +2125,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       set({
         bajaApi: { ...bajaApi, hayPaso: false },
         errorBaja:
-          'Este panel todavía no tiene contraseña de paso. Fíjela en Seguridad —la misma que pide abrir y cerrar— antes de dar de baja una API key.'
+          'Este panel todavía no tiene contraseña de paso. Fíjela en Seguridad —la misma que pide abrir posiciones— antes de dar de baja una API key.'
       });
     } catch {
       /*
@@ -2290,7 +2282,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       avisar(
         'ok',
         'Contraseña de paso actualizada',
-        'Se pedirá esta clave cada vez que se abra o se cierre una posición.',
+        'Se pedirá esta clave cada vez que se abra una posición.',
         'Seguridad'
       );
     } catch (e) {

@@ -45,6 +45,7 @@ import {
 } from '@shared/constants';
 import type { AlmacenPosiciones } from '../../domain/almacen-posiciones';
 import { esperaReconexion } from '../../domain/estado-conexion';
+import { anotarEvento } from '../../diagnostico/bitacora';
 import { BucketTokens } from '../../execution/rate-limiter';
 import type { Mercado } from '../mercado';
 import type { Credencial } from '../rest/signer';
@@ -156,6 +157,8 @@ export class PoolSockets {
   private readonly arranque: BucketTokens;
 
   private readonly fichas = new Map<string, Ficha>();
+  /** Cuenta y tema V3 cuya forma ya se anoto. Ver `anotarFormatoV3`. */
+  private readonly formatosAnotados = new Set<string>();
   private temporizador: unknown = null;
   private encendido = false;
 
@@ -343,11 +346,23 @@ export class PoolSockets {
   ): void {
     const instante = new Date(this.ahora()).toISOString();
 
-    if (canal === CANAL_POSICIONES || canal === TEMA_POSICION) {
-      const posiciones =
-        canal === TEMA_POSICION
-          ? posicionesDeEmpujonV3(cuentaId, datos, instante)
-          : posicionesDeEmpujon(cuentaId, datos, instante);
+    if (canal === TEMA_POSICION) {
+      this.anotarFormatoV3(cuentaId, canal, accion, datos);
+      /*
+       * En UTA cada empujon se aplica posicion a posicion, aunque diga
+       * `snapshot`. El formato del tema no esta capturado y no se sabe si su
+       * `snapshot` trae la cuenta entera o solo la punta que cambio; tomarlo
+       * por foto completa borraba el long al llegar el short. Las bajas que el
+       * socket no avise las corrige el barrido REST, que es la verdad.
+       */
+      for (const posicion of posicionesDeEmpujonV3(cuentaId, datos, instante)) {
+        this.almacen.aplicarActualizacion(posicion);
+      }
+      return;
+    }
+
+    if (canal === CANAL_POSICIONES) {
+      const posiciones = posicionesDeEmpujon(cuentaId, datos, instante);
 
       if (accion === 'snapshot') {
         this.almacen.aplicarInstantanea(cuentaId, posiciones);
@@ -391,6 +406,31 @@ export class PoolSockets {
       for (const vista of ordenesDeEmpujon(datos)) this.registroOrdenes.registrar(vista);
       return;
     }
+  }
+
+  /**
+   * Deja en la bitacora, una vez por cuenta y tema, la forma del empujon de UTA.
+   *
+   * Solo `action` y los **nombres** de campo, nunca valores: es lo que falta
+   * para confirmar el esquema contra un empujon real sin sacar importes al log.
+   */
+  private anotarFormatoV3(
+    cuentaId: string,
+    canal: string,
+    accion: AccionEmpujon,
+    datos: readonly unknown[]
+  ): void {
+    const clave = `${cuentaId}|${canal}`;
+    if (this.formatosAnotados.has(clave)) return;
+    this.formatosAnotados.add(clave);
+
+    const primero = datos[0];
+    const campos =
+      primero !== null && typeof primero === 'object' ? Object.keys(primero).sort().join(',') : '—';
+    anotarEvento({
+      evento: 'empujon-uta',
+      datos: { cuentaId, tema: canal, action: accion, n: datos.length, campos }
+    });
   }
 
   private alCaer(

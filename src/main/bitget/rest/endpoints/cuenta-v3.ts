@@ -18,11 +18,7 @@ import { categoriaDe, posSideDe } from '../../superficie';
 import type { ClienteBitget, RespuestaRest } from '../client';
 import type { Credencial } from '../signer';
 import { obtenerActivosCuenta, obtenerAjustesCuenta } from './ajustes-v3';
-import {
-  esquemaApalancamientoFijado,
-  type ApalancamientoFijado,
-  type CuentasFuturos
-} from './cuenta';
+import type { ApalancamientoFijado, CuentasFuturos } from './cuenta';
 
 /* ---------- POST /api/v3/account/set-margin ---------- */
 
@@ -79,21 +75,28 @@ export function ajustarMargenV3(
  * Fija el apalancamiento de un simbolo.
  *
  * --------------------------------------------------------------------------
- * En cobertura son dos campos, no uno con lado
+ * El lado viaja en `posSide`, no en el nombre del campo
  * --------------------------------------------------------------------------
  * V2 manda `leverage` y, solo en aislado, un `holdSide` que dice a cual de los
- * dos lados se aplica. V3 lo parte en `longLeverage` y `shortLeverage`, de modo
- * que el lado deja de ser un parametro aparte y pasa a ser **el nombre del
- * campo**.
+ * dos lados se aplica. V3 manda siempre `leverage` y el modo en `marginMode`;
+ * en aislado ademas `longLeverage` y `shortLeverage` -los dos- y, en
+ * cobertura, `posSide`. Ver el cuerpo para los rechazos que lo demuestran.
  *
  * `lado: null` —que en V2 significa «esta cuenta es cruzada y tiene uno solo»—
- * se traduce a `leverage` a secas.
+ * es cruzado y no lleva lado.
  *
- * La respuesta se lee con el mismo esquema tolerante que en V2, porque quien
- * llama comprueba lo que quedo fijado y no se fia del codigo de exito: es la
- * leccion de la incidencia del 05/09/2026, y vale igual en las dos superficies.
+ * --------------------------------------------------------------------------
+ * La respuesta no trae nada que leer
+ * --------------------------------------------------------------------------
+ * Segun la documentacion, V3 responde `"data": "success"`: una cadena, sin
+ * modo ni apalancamiento. Leerla con el esquema de V2, que exige un objeto,
+ * convertia todo `set-leverage` aceptado en un error de esquema. Se acepta
+ * cualquier `data` y se devuelve la forma de V2 con los campos de
+ * apalancamiento y modo en `null`. Asi quien llama no da nada por bueno solo
+ * por la respuesta y relee el simbolo en `account/settings` para comprobar como
+ * quedo: es la leccion de la incidencia del 05/09/2026.
  */
-export function fijarApalancamientoV3(
+export async function fijarApalancamientoV3(
   cliente: ClienteBitget,
   credencial: Credencial,
   datos: {
@@ -105,24 +108,57 @@ export function fijarApalancamientoV3(
 ): Promise<RespuestaRest<ApalancamientoFijado>> {
   const valor = String(datos.apalancamiento);
 
-  return cliente.peticionFirmada(
+  const r = await cliente.peticionFirmada(
     credencial,
     {
       metodo: 'POST',
       ruta: '/api/v3/account/set-leverage',
+      /*
+       * `marginMode` va siempre explicito. Sin el, Bitget fija el del
+       * **cruzado** -su valor por defecto-, y una orden en aislado se cobraba
+       * luego con otro apalancamiento: `25202 · Insufficient balance` el
+       * 30/09/2026 tras fijar 150x «con exito». `lado: null` es cruzado; con
+       * lado es aislado, que en cobertura lleva ademas `posSide`.
+       *
+       * En aislado Bitget exige los tres campos. Capturado el 30/09/2026:
+       *
+       *   sin `leverage`           25200 · adjustLeverage leverage all null
+       *   sin long/shortLeverage   25200 · DOUBLE_SIDE_HOLD afterShortLeverage
+       *                            and afterLongLeverage none validation error
+       *
+       * En cobertura fija los dos lados de una vez, asi que ambos llevan el
+       * mismo valor: el panel tiene un solo apalancamiento.
+       */
       cuerpo: {
         category: datos.category,
         symbol: datos.simbolo,
+        leverage: valor,
         ...(datos.lado === null
-          ? { leverage: valor }
-          : datos.lado === 'long'
-            ? { longLeverage: valor }
-            : { shortLeverage: valor })
+          ? { marginMode: 'crossed' }
+          : {
+              marginMode: 'isolated',
+              longLeverage: valor,
+              shortLeverage: valor,
+              ...posSideDe(datos.lado, credencial.holdMode ?? null)
+            })
       },
       idempotente: false
     },
-    esquemaApalancamientoFijado
+    zod.unknown()
   );
+
+  return {
+    datos: {
+      symbol: datos.simbolo,
+      marginCoin: '',
+      longLeverage: null,
+      shortLeverage: null,
+      crossMarginLeverage: null,
+      marginMode: null
+    },
+    duracionMs: r.duracionMs,
+    codigo: r.codigo
+  };
 }
 
 /* ---------- GET /api/v3/account/assets ---------- */

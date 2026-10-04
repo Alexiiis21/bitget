@@ -205,18 +205,28 @@ export const esquemaPosicionWsV3 = z.object({
   posSide: z.string().nullish(),
   holdSide: z.string().nullish(),
   total: z.string().nullish(),
+  /** Nombre del tamaño en la documentación del tema `position` de UTA. */
+  size: z.string().nullish(),
   available: z.string().nullish(),
   marginMode: z.string().nullish(),
   avgPrice: z.string().nullish(),
   liquidationPrice: z.string().nullish(),
+  liqPrice: z.string().nullish(),
   markPrice: z.string().nullish(),
   leverage: z.union([z.string(), z.number()]).nullish(),
+  /* Los nombres capturados en REST el 01/10/2026; ver `posiciones-v3.ts`. */
+  positionBalance: z.string().nullish(),
+  unrealisedPnl: z.string().nullish(),
   marginSize: z.string().nullish(),
   margin: z.string().nullish(),
   unrealizedPL: z.string().nullish(),
   unrealizedPnl: z.string().nullish(),
+  /** `ended`/`closed` en una punta que se acaba de cerrar. */
+  positionStatus: z.string().nullish(),
   updatedTime: z.union([z.string(), z.number()]).nullish()
 });
+
+const ESTADOS_POSICION_CERRADA = new Set(['ended', 'closed', 'close']);
 
 export type PosicionWsV3 = z.infer<typeof esquemaPosicionWsV3>;
 
@@ -251,7 +261,23 @@ export function posicionesDeEmpujonV3(
     const lado = ladoDe(p.posSide ?? p.holdSide);
     if (simbolo === '' || lado === null) continue;
 
-    const v2 = posicionV3AFormatoV2({ ...p, symbol: simbolo, posSide: lado, total: p.total ?? '0' });
+    /*
+     * Sin tamaño no se sabe nada, y aqui NO se rellena con `'0'` como en V2:
+     * un cero es un cierre, y un nombre de campo mal supuesto borraria del
+     * monitor la fila que el barrido acaba de pintar. Lo que no se entiende se
+     * descarta y el barrido REST sigue mandando. Solo cierra un estado explicito.
+     */
+    const cerrada = ESTADOS_POSICION_CERRADA.has((p.positionStatus ?? '').toLowerCase());
+    const tamano = cerrada ? '0' : (p.total ?? p.size ?? null);
+    if (tamano === null) continue;
+
+    const v2 = posicionV3AFormatoV2({
+      ...p,
+      symbol: simbolo,
+      posSide: lado,
+      total: tamano,
+      liquidationPrice: p.liquidationPrice ?? p.liqPrice
+    });
 
     salida.push({
       cuentaId,

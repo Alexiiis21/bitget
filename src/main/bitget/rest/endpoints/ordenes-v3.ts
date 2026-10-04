@@ -83,10 +83,10 @@ const esquemaCierreV3 = zod.object({
 /**
  * Envia una apertura por V3.
  *
- * `marginMode` se sigue enviando aunque V3 lo declare opcional: el panel deja
- * que el operador elija el modo en pantalla y lo fija antes de abrir, de modo
- * que omitirlo aqui haria que Bitget aplicase el de la cuenta y no el aprobado.
- * Es el mismo criterio que en V2 y la razon de la incidencia del 25/08/2026.
+ * `marginMode` se sigue enviando aunque V3 lo declare opcional: en UTA es el
+ * unico sitio donde se declara el modo de la posicion -no hay un paso previo
+ * que lo fije, ver `planificar` en el motor-, de modo que omitirlo haria que
+ * Bitget aplicase el de la cuenta y no el que eligio el operador.
  */
 export function abrirPosicionV3(
   cliente: ClienteBitget,
@@ -109,6 +109,24 @@ export function abrirPosicionV3(
     cuerpo['price'] = orden.precioLimite;
     /* `force: 'gtc'` en V2. */
     cuerpo['timeInForce'] = 'gtc';
+  }
+
+  /*
+   * El Take Profit va dentro de la orden, no despues.
+   *
+   * Capturado el 01/10/2026 contra una subcuenta UTA en cobertura: con la
+   * posicion ya abierta, `place-strategy-order` responde `31008 · There is no
+   * position` a toda variante probada -full, partial con qty, con y sin side,
+   * reduceOnly, tpTriggerBy market/mark-. Con `takeProfit` en `place-order` la
+   * orden entra y Bitget crea el Take Profit como estrategia `tpsl` pendiente,
+   * que aparece en `unfilled-strategy-orders` y se cancela solo al cerrar.
+   *
+   * Sin `tpTriggerBy`: se valido sin el, y Bitget aplica `market` (ultimo
+   * precio), que es el mismo disparo que `fill_price` en V2.
+   */
+  if (orden.takeProfit != null) {
+    cuerpo['takeProfit'] = orden.takeProfit;
+    cuerpo['tpOrderType'] = 'market';
   }
 
   return cliente.peticionFirmada(

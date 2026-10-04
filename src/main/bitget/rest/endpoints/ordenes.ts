@@ -53,6 +53,14 @@ export interface AperturaOrden {
   precioLimite: string | null;
   /** Identificador propio. Es la garantia de no duplicar. */
   clientOid: string;
+  /**
+   * Precio de disparo del Take Profit que viaja **dentro** de la orden.
+   *
+   * Solo lo usa V3: en UTA es la unica forma de ponerle Take Profit a una
+   * posicion (ver `abrirPosicionV3`). V2 lo ignora y coloca el suyo despues de
+   * abrir, desde el precio de entrada real.
+   */
+  takeProfit?: string | null;
 }
 
 export const esquemaOrdenColocada = zod.object({

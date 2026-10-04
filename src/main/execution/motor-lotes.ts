@@ -383,9 +383,17 @@ export interface EntradaPlan extends EntradaLote {
    * Precio de disparo del Take Profit, **estimado** con el precio de
    * referencia. `null` cuando se abre sin Take Profit.
    *
-   * No es el que se envia. El que se envia se calcula despues de abrir, desde
-   * el precio de entrada **real** de la posicion, que es el unico con el que el
-   * porcentaje significa lo que el operador espera. Este esta para que la
+   * En cuentas clasicas no es el que se envia. El que se envia se calcula
+   * despues de abrir, desde el precio de entrada **real** de la posicion, que es
+   * el unico con el que el porcentaje significa lo que el operador espera.
+   *
+   * En UTA **si** es el que se envia, dentro de la propia orden de apertura:
+   * Bitget no acepta un Take Profit separado sobre una posicion UTA (ver
+   * `abrirPosicionV3`). El porcentaje se mide entonces desde el precio de
+   * referencia, que con una orden a mercado queda a unas decimas del de
+   * entrada.
+   *
+   * Ademas esta para que la
    * confirmacion pueda enseñar un precio concreto en vez de un porcentaje
    * -misma regla que el resto del plan- y, sobre todo, para que un porcentaje
    * imposible se detecte **antes** de abrir: ver el descarte de `planificar`.
@@ -427,7 +435,9 @@ export type MotivoDescarte =
   /** No hay ningun Take Profit puesto: no habia nada que quitar. */
   | 'sin-take-profit'
   /** No se pudo consultar que Take Profit hay puestos, asi que no se toca. */
-  | 'planes-ilegibles';
+  | 'planes-ilegibles'
+  /** El simbolo no admite el apalancamiento pedido en una cuenta UTA. */
+  | 'apalancamiento-uta-fuera-de-rango';
 
 /** Un objetivo que no va a salir, y por que. */
 export interface DescartePlan {
@@ -448,7 +458,7 @@ export interface AvisoPlan {
   cuentaId: string;
   etiqueta: string;
   lado: Lado;
-  codigo: 'apalancamiento-distinto' | 'apalancamiento-desconocido';
+  codigo: 'apalancamiento-distinto' | 'apalancamiento-desconocido' | 'apalancamiento-uta-ambos-lados';
   mensaje: string;
 }
 
@@ -896,12 +906,51 @@ export class MotorLotes {
         return;
       }
 
+      /*
+       * Las dos superficies abren con el apalancamiento del campo. En UTA la
+       * apertura lo fija en el modo de la orden justo antes de enviarla (ver
+       * `ejecutar`), asi que cantidad, Take Profit y margen retenido se calculan
+       * con el numero que de verdad queda puesto.
+       *
+       * Hasta el 02/10/2026 UTA abria a 75x fijo, porque en cobertura V3 fija
+       * `longLeverage` y `shortLeverage` a la vez. Eso sigue siendo cierto y por
+       * eso se avisa: cambiar el apalancamiento de un lado cambia el del otro.
+       */
+      const esUta = superficieDe(cuenta.credencial) === 'v3';
+      const apalancamiento = peticion.apalancamiento;
+
+      if (esUta && apalancamiento > Number(contrato.maxLever)) {
+        descartes.push({
+          cuentaId: cuenta.cuentaId,
+          etiqueta: cuenta.etiqueta,
+          lado: objetivo.lado,
+          motivo: 'apalancamiento-uta-fuera-de-rango',
+          mensaje:
+            `${peticion.simbolo} admite como máximo ${contrato.maxLever}x y se pidió ${apalancamiento}x. ` +
+            'No se abre en esta cuenta.'
+        });
+        return;
+      }
+
+      const actualUta = esUta ? apalancamientoDe(config, peticion.modoMargen, objetivo.lado) : null;
+      if (esUta && actualUta !== null && actualUta !== apalancamiento) {
+        avisos.push({
+          cuentaId: cuenta.cuentaId,
+          etiqueta: cuenta.etiqueta,
+          lado: objetivo.lado,
+          codigo: 'apalancamiento-uta-ambos-lados',
+          mensaje:
+            `Cuenta UTA: ${peticion.simbolo} pasa de ${actualUta}x a ${apalancamiento}x en long y short a la vez. ` +
+            'Si hay una posición abierta del otro lado, su precio de liquidación cambia.'
+        });
+      }
+
       const calculo = dimensionarApertura({
         contrato,
         precio,
         margenInicial: peticion.margenInicial,
         margenAdicional,
-        apalancamiento: peticion.apalancamiento,
+        apalancamiento,
         saldoDisponible: cuenta.saldoDisponible,
         aMercado: peticion.precioLimite === null
       });
@@ -933,7 +982,7 @@ export class MotorLotes {
           contrato,
           precioEntrada: precio,
           lado: objetivo.lado,
-          apalancamiento: peticion.apalancamiento,
+          apalancamiento,
           porcentaje: tpPorcentaje
         });
 
@@ -952,7 +1001,15 @@ export class MotorLotes {
         precioDisparoTp = tp.disparo.precioDisparo;
       }
 
-      const vigente = apalancamientoDe(config, peticion.modoMargen, objetivo.lado);
+      /*
+       * En UTA la apertura fija el apalancamiento del campo en el modo de la
+       * orden justo antes de enviarla (ver `ejecutar`), asi que ese es el
+       * vigente. `symbolConfigList` trae un solo numero por simbolo y no dice
+       * de que modo es: tomarlo por el del aislado callo el aviso el 30/09/2026.
+       */
+      const vigente = esUta
+        ? apalancamiento
+        : apalancamientoDe(config, peticion.modoMargen, objetivo.lado);
       /*
        * Lo que Bitget va a retener de verdad: la cantidad sale del apalancamiento
        * del campo, pero el margen lo cobra al apalancamiento que el simbolo
@@ -988,7 +1045,7 @@ export class MotorLotes {
 
       if (
         vigente !== null &&
-        vigente !== peticion.apalancamiento &&
+        vigente !== apalancamiento &&
         margenQueRetiene
           .plus(margenAdicional ?? 0)
           /* Legible por fuerza: `dimensionarApertura` ya rechazo un saldo ilegible. */
@@ -1000,7 +1057,7 @@ export class MotorLotes {
           lado: objetivo.lado,
           motivo: 'margen-insuficiente',
           mensaje:
-            `${peticion.simbolo} está a ${vigente}x en esta cuenta, no a ${peticion.apalancamiento}x: ` +
+            `${peticion.simbolo} está a ${vigente}x en esta cuenta, no a ${apalancamiento}x: ` +
             `la orden retendría ${margenQueRetiene.toFixed(2)} USDT y hay ${cuenta.saldoDisponible}. ` +
             `Pulse «Aplicar» en el apalancamiento con ${peticion.simbolo} seleccionado antes de abrir.`
         });
@@ -1016,7 +1073,16 @@ export class MotorLotes {
         nocional: calculo.dimension.nocional,
         margenReal: calculo.dimension.margenReal,
         modoMargen: peticion.modoMargen,
-        modoMargenActual: config.modoMargen,
+        /*
+         * En UTA el modo de margen no es una configuracion del simbolo que haya
+         * que fijar antes: viaja en `place-order` y Bitget lo aplica a esa
+         * posicion. Lo que devuelve `account/settings` no es el modo con el que
+         * se va a abrir, y tomarlo como tal hacia que el panel intentara
+         * «cambiarlo» -algo que en V3 no tiene endpoint- y fallara la casilla
+         * sin abrir. Se da por vigente el pedido, asi que no hay nada que fijar.
+         */
+        modoMargenActual:
+          superficieDe(cuenta.credencial) === 'v3' ? peticion.modoMargen : config.modoMargen,
         margenAdicional,
         precioDisparoTp
       });
@@ -1034,7 +1100,7 @@ export class MotorLotes {
        * primer simbolo del mercado, y con el se avisaba de diferencias que no
        * existian y se callaban las que si.
        */
-      if (vigente !== null && vigente !== peticion.apalancamiento) {
+      if (vigente !== null && vigente !== apalancamiento) {
         const margenEfectivo = margenQueRetiene;
         avisos.push({
           cuentaId: cuenta.cuentaId,
@@ -1042,7 +1108,7 @@ export class MotorLotes {
           lado: objetivo.lado,
           codigo: 'apalancamiento-distinto',
           mensaje:
-            `La cuenta está a ${vigente}x y la operación se calculó a ${peticion.apalancamiento}x: ` +
+            `La cuenta está a ${vigente}x y la operación se calculó a ${apalancamiento}x: ` +
             `comprometería ${margenEfectivo.toFixed(2)} en vez de ${Number(calculo.dimension.margenReal).toFixed(2)}. ` +
             'Ajuste el apalancamiento de la cuenta o cambie el valor del campo.'
         });
@@ -1736,6 +1802,11 @@ export class MotorLotes {
         return;
       }
 
+      /*
+       * UTA usa el valor pedido igual que Classic: el rango ya se comprobo
+       * arriba contra `minLever`/`maxLever`. En cobertura Bitget lo fija para
+       * los dos lados a la vez, que es lo que enseña la confirmacion.
+       */
       entradas.push({
         cuentaId: cuenta.cuentaId,
         etiqueta: cuenta.etiqueta,
@@ -1797,6 +1868,25 @@ export class MotorLotes {
           await this.asegurarModoMargen(cuenta, plan.mercado, plan.simbolo, entrada.modoMargen);
         }
 
+        /*
+         * En UTA el modo viaja en cada orden, y cada modo tiene su propio
+         * apalancamiento. El que se fijo con «Aplicar» puede ser el del otro
+         * modo, y entonces Bitget cobra el margen a otro apalancamiento:
+         * `25202 · Insufficient balance` el 30/09/2026 con 150x fijado en
+         * cruzado y la orden en aislado. Se fija el del modo de esta orden
+         * antes de enviarla. Fijar el mismo valor dos veces no cambia nada, y
+         * si Bitget lo rechaza la casilla falla sin abrir.
+         */
+        if (superficieDe(cuenta.credencial) === 'v3') {
+          await fijarApalancamiento(this.cliente, cuenta.credencial, {
+            simbolo: plan.simbolo,
+            productType: plan.mercado.productType,
+            marginCoin: plan.mercado.marginCoin,
+            apalancamiento: plan.apalancamiento,
+            lado: entrada.modoMargen === 'isolated' ? entrada.lado : null
+          });
+        }
+
         const r = await abrirPosicion(this.cliente, cuenta.credencial, {
           mercado: plan.mercado,
           simbolo: plan.simbolo,
@@ -1804,7 +1894,9 @@ export class MotorLotes {
           modoMargen: entrada.modoMargen,
           size: entrada.size,
           precioLimite: plan.precioLimite,
-          clientOid: entrada.clientOid
+          clientOid: entrada.clientOid,
+          /* Solo lo envia V3; V2 coloca el suyo despues de abrir. Ver `AperturaOrden`. */
+          takeProfit: entrada.precioDisparoTp
         });
         return { ordenId: r.datos.orderId, mensaje: null };
       },

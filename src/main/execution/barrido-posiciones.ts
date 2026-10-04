@@ -68,11 +68,14 @@ import {
 import type { ModoMargen, Posicion } from '@shared/types';
 import type { Mercado } from '../bitget/mercado';
 import type { ClienteBitget } from '../bitget/rest/client';
-import type { Credencial } from '../bitget/rest/signer';
+import { superficieDe, type Credencial } from '../bitget/rest/signer';
 import { obtenerCuentasFuturos } from '../bitget/rest/endpoints/cuenta';
 import { obtenerPosiciones, type PosicionBitget } from '../bitget/rest/endpoints/posiciones';
 import { buscarTakeProfit, planesPendientes } from '../bitget/rest/endpoints/tpsl';
 import type { AlmacenPosiciones, Deriva } from '../domain/almacen-posiciones';
+
+/** Espera de la segunda lectura de una cuenta UTA tras un lote. Ver `releerUta`. */
+const RELECTURA_UTA_MS = 3_000;
 
 /** Una cuenta que se puede consultar ahora mismo. */
 export interface CuentaBarrible {
@@ -260,6 +263,30 @@ export class BarridoPosiciones {
   adelantar(cuentaIds: readonly string[]): void {
     for (const id of cuentaIds) this.proximaLectura.delete(id);
     this.bombear();
+    this.releerUta(cuentaIds);
+  }
+
+  /**
+   * Segunda lectura, a los pocos segundos, de las cuentas UTA del lote.
+   *
+   * La primera sale en cuanto termina el lote y en UTA puede llegar antes de
+   * que `current-position` publique la posicion recien abierta: entonces la
+   * foto sale vacia y la fila no aparecia hasta el siguiente turno, 36-54 s
+   * despues. Classic no la necesita y no la recibe.
+   */
+  private releerUta(cuentaIds: readonly string[]): void {
+    const pedidas = new Set(cuentaIds);
+    const uta = this.fuente
+      .cuentasBarribles()
+      .filter((c) => pedidas.has(c.cuentaId) && superficieDe(c.credencial) === 'v3')
+      .map((c) => c.cuentaId);
+    if (uta.length === 0) return;
+
+    this.programar(() => {
+      if (!this.encendido) return;
+      for (const id of uta) this.proximaLectura.delete(id);
+      this.bombear();
+    }, RELECTURA_UTA_MS);
   }
 
   private dormir(): void {

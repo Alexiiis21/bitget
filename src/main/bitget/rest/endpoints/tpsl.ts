@@ -24,9 +24,9 @@ import type { z } from 'zod';
 import { z as zod } from 'zod';
 import type { Lado } from '@shared/types';
 import type { Mercado } from '../../mercado';
-import { noDisponibleEnV3 } from '../../superficie';
 import type { ClienteBitget, RespuestaRest } from '../client';
 import { superficieDe, type Credencial } from '../signer';
+import { cancelarPlanV3, colocarTakeProfitV3, planesPendientesV3 } from './tpsl-v3';
 
 export interface ColocacionTakeProfit {
   mercado: Mercado;
@@ -49,21 +49,8 @@ export function colocarTakeProfit(
   credencial: Credencial,
   tp: ColocacionTakeProfit
 ): Promise<RespuestaRest<PlanColocado>> {
-  /*
-   * En V3 el Take Profit deja de ser un plan independiente y pasa a ser campos
-   * de la propia orden (`takeProfit`, `tpTriggerBy`, `tpOrderType`). Eso sirve
-   * para abrir una posicion **con** Take Profit, pero el panel hace otra cosa:
-   * lo pone sobre posiciones **que ya estan abiertas**, y para eso no se conoce
-   * endpoint. Hueco 2.2 de `docs/00-uta-fase-1-equivalencias.md`.
-   */
-  if (superficieDe(credencial) === 'v3') {
-    return Promise.reject(
-      noDisponibleEnV3(
-        'Poner Take Profit sobre una posición abierta',
-        `Póngalo desde Bitget en ${tp.simbolo} (${tp.lado}) con disparo en ${tp.precioDisparo}.`
-      )
-    );
-  }
+  /* En V3 es una orden de estrategia `tpsl`: ver `tpsl-v3.ts`. */
+  if (superficieDe(credencial) === 'v3') return colocarTakeProfitV3(cliente, credencial, tp);
 
   const cuerpo = {
     symbol: tp.simbolo,
@@ -139,25 +126,16 @@ export async function planesPendientes(
 ): Promise<PlanPendiente[]> {
   /*
    * ==========================================================================
-   * En V3 devuelve lista vacia en vez de fallar, y la diferencia es grande
+   * En V3 un fallo de negocio devuelve lista vacia, y la diferencia es grande
    * ==========================================================================
-   * Tampoco hay equivalente conocido para listar los planes de una cuenta UTA
-   * (hueco 2.2). Pero aqui **no** se puede lanzar, a diferencia de las otras dos
-   * funciones de Take Profit: el barrido llama a esta cada 45 segundos por
-   * cuenta, y su fallo no se traga —`barrerCuenta` lo cuenta como lectura
-   * fallida, descarta la foto de posiciones y, a los tres seguidos, marca la
-   * cuenta como desconectada—.
-   *
-   * Es decir: lanzar aqui dejaria a toda subcuenta UTA sin posiciones en el
-   * monitor y pintada como caida, que es mucho peor que quedarse sin la columna
-   * de Take Profit.
-   *
-   * La lista vacia degrada de forma honesta: el panel entiende «esta posicion no
-   * tiene Take Profit puesto». No es exacto —puede tenerlo, puesto desde
-   * Bitget— y por eso poner y quitar si fallan de forma visible, en lugar de
-   * operar sobre una lista que no es la verdad.
+   * El barrido llama a esta cada 45 segundos por cuenta, y su fallo no se traga
+   * —`barrerCuenta` lo cuenta como lectura fallida, descarta la foto de
+   * posiciones y, a los tres seguidos, marca la cuenta como desconectada—.
+   * Lanzar dejaria a toda subcuenta UTA sin posiciones en el monitor y pintada
+   * como caida, que es mucho peor que quedarse sin la columna de Take Profit.
+   * Ver `planesPendientesV3`.
    */
-  if (superficieDe(credencial) === 'v3') return [];
+  if (superficieDe(credencial) === 'v3') return planesPendientesV3(cliente, credencial, mercado);
 
   const r = await cliente.peticionFirmada(
     credencial,
@@ -257,14 +235,7 @@ export function cancelarPlan(
   credencial: Credencial,
   cancelacion: CancelacionPlan
 ): Promise<RespuestaRest<ResultadoCancelacionPlan>> {
-  if (superficieDe(credencial) === 'v3') {
-    return Promise.reject(
-      noDisponibleEnV3(
-        'Quitar un Take Profit',
-        `Quítelo desde Bitget en ${cancelacion.simbolo}.`
-      )
-    );
-  }
+  if (superficieDe(credencial) === 'v3') return cancelarPlanV3(cliente, credencial, cancelacion);
 
   return cliente.peticionFirmada(
     credencial,

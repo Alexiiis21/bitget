@@ -422,6 +422,37 @@ describe('reparto en el tiempo', () => {
     expect(fuente.lecturas.filter((l) => l.cuentaId === 'cta_002')).toHaveLength(1);
   });
 
+  it('adelantar relee una cuenta UTA a los pocos segundos, y una Classic no', async () => {
+    const fuente = new Fuente(2);
+    const barribles = fuente.cuentasBarribles();
+    barribles[1] = { ...barribles[1]!, credencial: { ...barribles[1]!.credencial, superficie: 'v3' } };
+    const reloj = relojFalso();
+    const programados: { fn: () => void; ms: number }[] = [];
+    const barrido = crearBarrido(fuente, {
+      ahora: reloj.ahora,
+      azar: () => 0.5,
+      concurrenciaMaxima: 2,
+      programar: (fn: () => void, ms: number) => {
+        programados.push({ fn, ms });
+        return null;
+      },
+      cancelar: () => undefined
+    });
+
+    barrido.iniciar();
+    await vi.waitFor(() => expect(fuente.lecturas).toHaveLength(2));
+
+    barrido.adelantar(['cta_001', 'cta_002']);
+    await vi.waitFor(() => expect(fuente.lecturas).toHaveLength(4));
+
+    const relectura = programados.filter((p) => p.ms === 3_000);
+    expect(relectura).toHaveLength(1);
+    relectura[0]!.fn();
+    await vi.waitFor(() => expect(fuente.lecturas).toHaveLength(5));
+
+    expect(fuente.lecturas.at(-1)?.cuentaId).toBe('cta_002');
+  });
+
   it('adelantar una cuenta que no existe no rompe el ciclo', async () => {
     const fuente = new Fuente(1);
     const barrido = crearBarrido(fuente, { programar: () => null, cancelar: () => undefined });

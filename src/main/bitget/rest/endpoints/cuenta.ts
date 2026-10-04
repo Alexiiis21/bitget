@@ -375,12 +375,28 @@ export async function obtenerCuentaSimbolo(
      * aislado, long o short— encuentre el mismo numero, que es el que aplica.
      */
     const lev = estado?.leverage ?? null;
+    /*
+     * ======================================================================
+     * Simbolo ausente de `symbolConfigList` = margen cruzado
+     * ======================================================================
+     * Capturado el 30/09/2026 con `sondear-v3.mjs --env UTA`: una cuenta UTA
+     * que no ha configurado ningun simbolo devuelve `symbolConfigList: []`, y
+     * `account/settings` no trae ningun modo por defecto a nivel de cuenta.
+     * Bitget solo lista los simbolos configurados, y documenta el cruzado como
+     * modo cuando no se especifica otro.
+     *
+     * Dejarlo en cadena vacia hacia que el motor se negara a fijar el
+     * apalancamiento de cualquier simbolo nuevo en una cuenta UTA: justo la
+     * primera operacion que se hace sobre el. Una entrada que **si** esta pero
+     * sin `marginMode` sigue siendo «no se sabe».
+     */
+    const modo = estado === null ? 'crossed' : (estado.marginMode ?? '');
     return {
       datos: {
         marginCoin,
         available: '',
         accountEquity: '',
-        marginMode: estado?.marginMode ?? '',
+        marginMode: modo,
         posMode: credencial.holdMode ?? '',
         isolatedLongLever: lev,
         isolatedShortLever: lev,

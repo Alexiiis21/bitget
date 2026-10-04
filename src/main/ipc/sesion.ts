@@ -46,7 +46,7 @@ import { anotarEvento, cuentaDe } from '../diagnostico/bitacora';
 import type { ModoMargenApi } from '../bitget/rest/endpoints/ordenes';
 import { MERCADOS, type ClaveMercado } from '../bitget/mercado';
 import type { ClienteBitget } from '../bitget/rest/client';
-import type { Credencial } from '../bitget/rest/signer';
+import { superficieDe, type Credencial } from '../bitget/rest/signer';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { verificarCredencial, type ResultadoVerificacion } from '../bitget/verificacion';
@@ -1965,10 +1965,62 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
   private async ponerTakeProfitTrasAbrir(
     plan: PlanApertura,
     lote: Lote,
-    abiertas: readonly Job[]
+    todas: readonly Job[]
   ): Promise<void> {
     const porcentaje = plan.takeProfitPorcentaje;
     if (porcentaje === null) return;
+
+    /*
+     * En UTA el Take Profit ya viajo dentro de la orden de apertura.
+     *
+     * Capturado el 01/10/2026: Bitget rechaza con `31008` todo Take Profit
+     * separado sobre una posicion UTA abierta, asi que la apertura lo lleva
+     * puesto (ver `abrirPosicionV3`). Aqui solo queda contarlo en el informe y
+     * en el monitor. Mandarlo otra vez solo produciria la fila «SIN Take Profit»
+     * sobre una posicion que si lo tiene.
+     */
+    const clasicas: Job[] = [];
+    for (const job of todas) {
+      const cuenta = this.cuentaEjecutable(job.cuentaId);
+      const entrada = plan.entradas.find((e) => e.cuentaId === job.cuentaId && e.lado === job.lado);
+      if (
+        cuenta === null ||
+        superficieDe(cuenta.credencial) !== 'v3' ||
+        entrada === undefined ||
+        entrada.precioDisparoTp === null
+      ) {
+        clasicas.push(job);
+        continue;
+      }
+
+      if (job.estado === 'exito') {
+        lote.jobs.push(
+          this.trabajoDerivado(
+            job,
+            'TP',
+            'exito',
+            null,
+            `Take Profit ${entrada.precioDisparoTp} puesto con la orden de apertura.`
+          )
+        );
+        this.posiciones.fijarTakeProfit(job.cuentaId, plan.simbolo, job.lado, {
+          precio: entrada.precioDisparoTp,
+          porcentaje: Number(porcentaje),
+          planId: ''
+        });
+      } else {
+        lote.jobs.push(
+          this.trabajoDerivado(
+            job,
+            'TP',
+            'omitida',
+            null,
+            'El Take Profit viaja con la orden de apertura: si la apertura entró, entró con él.'
+          )
+        );
+      }
+    }
+    const abiertas: readonly Job[] = clasicas;
     if (abiertas.length === 0) return;
 
     const objetivos = abiertas.map((j) => ({ cuentaId: j.cuentaId, lado: j.lado }));

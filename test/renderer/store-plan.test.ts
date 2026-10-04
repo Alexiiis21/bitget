@@ -241,7 +241,7 @@ describe('planificar no envía', () => {
   });
 });
 
-describe('la contraseña de paso, al abrir y al cerrar', () => {
+describe('la contraseña de paso, solo al abrir', () => {
   it('con la contraseña correcta se envía el plan aprobado', async () => {
     await usarPanel.getState().planear('open');
     usarPanel.getState().escribirPin('bg1');
@@ -277,46 +277,17 @@ describe('la contraseña de paso, al abrir y al cerrar', () => {
   });
 
   /*
-   * Cerrar tambien la pide, desde el 26/08/2026. No compromete dinero nuevo,
-   * pero realiza el resultado: convierte en definitiva una perdida abierta, y
-   * un cierre equivocado no se deshace pulsando otra vez -se vuelve a abrir a
-   * otro precio, y esa diferencia es el coste del error-.
+   * Cerrar ya no la pide, desde el 01/10/2026: lo pidió el cliente, el cierre
+   * tiene que ser inmediato.
    */
-  it('sin la contraseña correcta, cerrar no envía ninguna orden', async () => {
+  it('cerrar no pide contraseña de paso', async () => {
     pasoValido = false;
     planDevuelto = plan('close', 2);
 
     await usarPanel.getState().planear('close');
-    usarPanel.getState().escribirPin('mal');
-    await usarPanel.getState().confirmarPlan();
-
-    expect(enviados).toHaveLength(0);
-    expect(usarPanel.getState().plan).not.toBeNull();
-    expect(usarPanel.getState().errorPaso).toContain('Intento 1');
-  });
-
-  it('con la contraseña correcta, cerrar envía el plan aprobado', async () => {
-    planDevuelto = plan('close', 2);
-
-    await usarPanel.getState().planear('close');
-    usarPanel.getState().escribirPin('bg1');
     await usarPanel.getState().confirmarPlan();
 
     expect(enviados).toEqual([{ planId: 'plan_close', only: undefined }]);
-  });
-
-  it('al tercer intento fallido, el cierre se cancela sin enviar', async () => {
-    pasoValido = false;
-    planDevuelto = plan('close', 2);
-    await usarPanel.getState().planear('close');
-
-    for (let i = 0; i < 3; i += 1) {
-      usarPanel.getState().escribirPin('mal');
-      await usarPanel.getState().confirmarPlan();
-    }
-
-    expect(enviados).toHaveLength(0);
-    expect(usarPanel.getState().plan).toBeNull();
   });
 
   /*

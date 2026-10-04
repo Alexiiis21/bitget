@@ -23,15 +23,14 @@
  * Los nombres de campo salen de la documentacion de Bitget al 7 de septiembre de
  * 2026. Se confirman con `node scripts/sondear-v3.mjs --env UTA`.
  *
- * Dos huecos conocidos, y no son menores:
+ * Dos campos se llaman distinto que en V2, capturados el 01/10/2026:
  *
- *   `marginSize`     el margen de la posicion. No aparece en la lista de campos
- *                    de V3. Lo lee `margenYaAplicado`, que es la red que impide
- *                    aplicar dos veces un aporte de margen.
- *   `unrealizedPL`   el PnL. Sin el no hay ROE en el monitor.
+ *   `marginSize`     en V3 es `positionBalance`. Lo lee `margenYaAplicado`, que
+ *                    es la red que impide aplicar dos veces un aporte de margen.
+ *   `unrealizedPL`   en V3 es `unrealisedPnl`. Sin el no hay ROE en el monitor.
  *
- * Se aceptan los dos nombres plausibles de cada uno. Si no llega ninguno, el
- * campo sale ausente y quien lo lea vera «no se sabe», no un cero.
+ * Si no llega ninguno, el campo sale ausente y quien lo lea vera «no se sabe»,
+ * no un cero.
  */
 import type { z } from 'zod';
 import { z as zod } from 'zod';
@@ -55,7 +54,15 @@ export const esquemaPosicionV3 = zod.object({
   liquidationPrice: zod.string().nullish(),
   markPrice: zod.string().nullish(),
   leverage: zod.union([zod.string(), zod.number()]).nullish(),
-  /* Sin equivalente documentado. Se aceptan los dos nombres plausibles. */
+  /*
+   * Capturado el 01/10/2026 sobre una posicion real: el margen viene en
+   * `positionBalance` y el PnL en `unrealisedPnl`, con «s». Ninguno de los
+   * nombres que se suponian llegaba, y el monitor enseñaba guiones en margen,
+   * P&L y ROE de toda posicion UTA. Se conservan los supuestos por si otra
+   * respuesta los trae.
+   */
+  positionBalance: zod.string().nullish(),
+  unrealisedPnl: zod.string().nullish(),
   marginSize: zod.string().nullish(),
   margin: zod.string().nullish(),
   unrealizedPL: zod.string().nullish(),
@@ -95,8 +102,8 @@ export function posicionV3AFormatoV2(cruda: PosicionV3): PosicionBitget {
     openPriceAvg: cruda.avgPrice,
     liquidationPrice: cruda.liquidationPrice,
     leverage: cruda.leverage,
-    marginSize: cruda.marginSize ?? cruda.margin,
-    unrealizedPL: cruda.unrealizedPL ?? cruda.unrealizedPnl
+    marginSize: cruda.positionBalance ?? cruda.marginSize ?? cruda.margin,
+    unrealizedPL: cruda.unrealisedPnl ?? cruda.unrealizedPL ?? cruda.unrealizedPnl
   };
 }
 

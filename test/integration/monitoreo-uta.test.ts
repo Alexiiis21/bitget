@@ -287,6 +287,75 @@ describe('el pool mezcla Classic y UTA', () => {
     expect(almacen.tamano).toBe(2);
   });
 
+  /*
+   * Reportado por el cliente el 02/10/2026: la posicion UTA tardaba ~2 min en
+   * quedarse en el monitor. Un `snapshot` con una sola punta borraba la otra.
+   */
+  it('un `snapshot` de UTA con una sola punta no borra la otra', async () => {
+    const pool = crearPool(soloUta());
+    pool.iniciar();
+    await vi.waitFor(() => expect(pool.vivos).toHaveLength(1));
+
+    servidor.empujar(
+      empujonUta('position', 'snapshot', [posicionUta('long'), posicionUta('short')])
+    );
+    await vi.waitFor(() => expect(almacen.tamano).toBe(2));
+
+    servidor.empujar(empujonUta('position', 'snapshot', [posicionUta('short', { total: '0.02' })]));
+    await vi.waitFor(() =>
+      expect(almacen.deCuenta('cta_uta').find((p) => p.lado === 'short')?.tamano).toBe('0.02')
+    );
+
+    expect(almacen.tamano).toBe(2);
+  });
+
+  it('lee el tamaño de `size` y los nombres capturados de margen y PnL', async () => {
+    const pool = crearPool(soloUta());
+    pool.iniciar();
+    await vi.waitFor(() => expect(pool.vivos).toHaveLength(1));
+
+    servidor.empujar(
+      empujonUta('position', 'snapshot', [
+        posicionUta('long', {
+          total: undefined,
+          size: '0.05',
+          liquidationPrice: undefined,
+          liqPrice: '50000',
+          marginSize: undefined,
+          positionBalance: '12.3',
+          unrealizedPL: undefined,
+          unrealisedPnl: '-0.4'
+        })
+      ])
+    );
+    await vi.waitFor(() => expect(almacen.tamano).toBe(1));
+
+    expect(almacen.deCuenta('cta_uta')[0]).toMatchObject({
+      tamano: '0.05',
+      precioLiquidacion: '50000',
+      margen: '12.3',
+      pnl: '-0.4'
+    });
+  });
+
+  it('un empujon sin tamaño no cierra la fila; `positionStatus: ended` si', async () => {
+    const pool = crearPool(soloUta());
+    pool.iniciar();
+    await vi.waitFor(() => expect(pool.vivos).toHaveLength(1));
+
+    servidor.empujar(empujonUta('position', 'snapshot', [posicionUta('long')]));
+    await vi.waitFor(() => expect(almacen.tamano).toBe(1));
+
+    servidor.empujar(empujonUta('position', 'update', [posicionUta('long', { total: undefined })]));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(almacen.tamano).toBe(1);
+
+    servidor.empujar(
+      empujonUta('position', 'update', [posicionUta('long', { positionStatus: 'ended' })])
+    );
+    await vi.waitFor(() => expect(almacen.tamano).toBe(0));
+  });
+
   it('el tema `account` refresca el saldo', async () => {
     const fuente = soloUta();
     const pool = crearPool(fuente);

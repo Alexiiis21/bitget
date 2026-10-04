@@ -87,7 +87,7 @@ export function DialogoBajaApi() {
             />
           </label>
           <span style={{ fontSize: 11.5, lineHeight: 1.45, color: T.texto3, textAlign: 'center' }}>
-            La misma que pide abrir y cerrar posiciones.
+            La misma que pide abrir posiciones.
           </span>
 
           {error !== '' && <div style={cajaError}>{error}</div>}

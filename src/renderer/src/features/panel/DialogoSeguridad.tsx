@@ -92,7 +92,7 @@ export function DialogoSeguridad() {
               Contraseña maestra verificada
             </div>
             <div style={{ fontSize: 12.5, lineHeight: 1.5, color: T.texto2 }}>
-              Clave libre (letras, números y símbolos, mínimo 3 caracteres) que el panel pedirá cada vez que se abra o se cierre una posición.
+              Clave libre (letras, números y símbolos, mínimo 3 caracteres) que el panel pedirá cada vez que se abra una posición.
             </div>
             <div style={{ display: 'flex', gap: 12 }}>
               <label style={etiquetaPaso}>

@@ -461,7 +461,15 @@ export class ClienteBitget {
          * Bitget, que la pantalla no ensena. Solo en staging: es donde hay
          * respuestas reales del exchange que valga la pena leer aqui.
          */
-        if (esStaging()) {
+        /*
+         * El 40084 de `account/settings` no es un fallo: es la deteccion de modo
+         * preguntando «¿eres UTA?» y la cuenta clasica contestando que no. Sale
+         * una vez por cuenta clasica en cada arranque, y como «rechazo» parecia
+         * un error que no lo es. Ver `detectarModo`.
+         */
+        if (esStaging() && e.codigo === '40084' && firmada.rutaCompleta.startsWith('/api/v3/account/settings')) {
+          console.warn(`[PCB] cuenta=${cuenta}: modo clásico (no es UTA)`);
+        } else if (esStaging()) {
           console.warn(
             `[PCB] bitget rechazo ${firmada.metodo} ${firmada.rutaCompleta} cuenta=${cuenta}` +
               `${cuerpoConsola()} codigo=${e.codigo ?? 'sin-codigo'} ` +
