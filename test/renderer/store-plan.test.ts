@@ -22,7 +22,7 @@
  * haya.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BatchPlan, BatchResult, BatchTarget } from '@shared/domain/panel-view';
+import type { BatchPlan, BatchResult, BatchTarget, MarginCap } from '@shared/domain/panel-view';
 
 /* ---------- servicio de mentira, con contador de envios ---------- */
 
@@ -31,6 +31,15 @@ let planificaciones = 0;
 let resultado: BatchResult;
 let pasoValido = true;
 let planDevuelto: BatchPlan;
+const topesFijados: string[] = [];
+
+const TOPE_VIGENTE: MarginCap = {
+  status: 'active',
+  value: '1',
+  setAt: '2026-10-06T09:00:00.000Z',
+  expiresAt: '2099-01-01T00:00:00.000Z',
+  currency: 'USDT'
+};
 
 const plan = (kind: BatchPlan['kind'], entradas: number): BatchPlan => ({
   kind,
@@ -83,7 +92,12 @@ vi.mock('@/services/panel-service', () => ({
       enviados.push({ planId: p.id, only });
       return resultado;
     },
-    verifyStepPassword: async () => pasoValido
+    verifyStepPassword: async () => pasoValido,
+    getMarginCap: async () => TOPE_VIGENTE,
+    setMarginCap: async (valor: string) => {
+      topesFijados.push(valor);
+      return { ...TOPE_VIGENTE, value: valor };
+    }
   }
 }));
 
@@ -139,12 +153,14 @@ function prepararSeleccion(): void {
         selShort: [false, false, false]
       }
     },
-    valores: { tp: '35', mgi: '100', mga: '50', ap: '10' }
+    valores: { tp: '35', mgi: '100', mga: '50', ap: '10' },
+    tope: TOPE_VIGENTE
   });
 }
 
 beforeEach(() => {
   enviados.length = 0;
+  topesFijados.length = 0;
   planificaciones = 0;
   pasoValido = true;
   planDevuelto = plan('open', 3);
@@ -348,5 +364,69 @@ describe('un activo suspendido', () => {
 
     expect(planificaciones).toBe(0);
     expect(enviados).toHaveLength(0);
+  });
+});
+
+describe('tope de margen inicial', () => {
+  it('sin tope, abrir no planifica: pide el tope', async () => {
+    usarPanel.setState({ tope: { ...TOPE_VIGENTE, status: 'missing', value: null } });
+
+    await usarPanel.getState().planear('open');
+
+    expect(planificaciones).toBe(0);
+    expect(usarPanel.getState().topeAbierto).toBe(true);
+  });
+
+  it('con el tope vencido tampoco', async () => {
+    usarPanel.setState({ tope: { ...TOPE_VIGENTE, status: 'expired' } });
+
+    await usarPanel.getState().planear('open');
+
+    expect(planificaciones).toBe(0);
+    expect(usarPanel.getState().topeAbierto).toBe(true);
+  });
+
+  /* Cerrar, Take Profit y agregar margen no dependen del tope. */
+  it('cerrar si se planifica sin tope', async () => {
+    usarPanel.setState({ tope: { ...TOPE_VIGENTE, status: 'missing', value: null } });
+    planDevuelto = plan('close', 3);
+
+    await usarPanel.getState().planear('close');
+
+    expect(planificaciones).toBe(1);
+  });
+
+  it('agregar margen si se planifica sin tope', async () => {
+    usarPanel.setState({ tope: { ...TOPE_VIGENTE, status: 'missing', value: null } });
+    planDevuelto = plan('margin', 3);
+
+    await usarPanel.getState().planear('margin');
+
+    expect(planificaciones).toBe(1);
+  });
+
+  it('hay que escribirlo dos veces igual', async () => {
+    const s = usarPanel.getState();
+    s.abrirTope();
+    s.escribirTope('topeValor', '0.5');
+    s.escribirTope('topeValor2', '5');
+
+    await usarPanel.getState().guardarTope();
+
+    expect(topesFijados).toEqual([]);
+    expect(usarPanel.getState().errorTope).toMatch(/no coinciden/);
+    expect(usarPanel.getState().topeAbierto).toBe(true);
+  });
+
+  it('la coma decimal se envía como punto y el diálogo se cierra', async () => {
+    const s = usarPanel.getState();
+    s.abrirTope();
+    s.escribirTope('topeValor', '0,5');
+    s.escribirTope('topeValor2', '0.5');
+
+    await usarPanel.getState().guardarTope();
+
+    expect(topesFijados).toEqual(['0.5']);
+    expect(usarPanel.getState().topeAbierto).toBe(false);
   });
 });

@@ -91,10 +91,16 @@ describe.skipIf(!hayCredenciales)('QA del panel contra Bitget', () => {
     expect(r.ok).toBe(true);
 
     await sesion.fijarPaso(PASO);
+    /*
+     * Sin tope de margen no se abre nada. El de la prueba es el propio margen
+     * de las aperturas: lo justo para que salgan, y la hora la da Bitget.
+     */
+    const tope = await sesion.fijarTopeMargen(MARGEN);
 
     console.log(`
   almacen .............. creado y desbloqueado
-  contrasena de paso ... fijada`);
+  contrasena de paso ... fijada
+  tope de margen ....... ${tope.valor ?? '—'} ${tope.monedaMargen} hasta ${tope.venceEn ?? '—'}`);
 
     expect(sesion.hayPaso()).toBe(true);
     expect(await sesion.comprobarPaso(PASO)).toBe(true);

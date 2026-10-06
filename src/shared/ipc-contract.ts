@@ -466,6 +466,26 @@ export interface PlanApalancamientoIpc {
   creadoEn: string;
 }
 
+/* ---------- tope de margen inicial ---------- */
+
+/**
+ * El tope de margen inicial del panel, tal como lo ve la pantalla.
+ *
+ * `sin-tope` es un panel recien instalado; `vencido`, uno cuyo tope cumplio sus
+ * 24 horas. En los dos casos la pantalla pide un tope nuevo antes de dejar
+ * abrir nada. Las fechas van en ISO 8601. Ver `main/domain/tope-margen.ts`.
+ */
+export interface EstadoTopeIpc {
+  estado: 'sin-tope' | 'vigente' | 'vencido';
+  /** Margen inicial maximo por casilla. `null` sin tope. */
+  valor: Decimal | null;
+  fijadoEn: string | null;
+  /** Desde cuando se puede fijar otro. */
+  venceEn: string | null;
+  /** USDT en el mercado real, SUSDT en el simulado. */
+  monedaMargen: string;
+}
+
 /* ---------- peticiones del renderer (invoke) ---------- */
 
 export interface PeticionesIpc {
@@ -491,6 +511,13 @@ export interface PeticionesIpc {
   'paso:hay': () => Promise<boolean>;
   'paso:comprobar': (contrasena: string) => Promise<boolean>;
   'paso:fijar': (contrasena: string) => Promise<void>;
+  /** El tope de margen inicial del panel. No sale a la red. */
+  'tope:estado': () => Promise<EstadoTopeIpc>;
+  /**
+   * Fija el tope. Falla si hay uno vigente: no se cambia durante 24 horas, ni
+   * para subirlo ni para bajarlo.
+   */
+  'tope:fijar': (valor: string) => Promise<EstadoTopeIpc>;
   /** Calcula que saldria y que no. No envia ninguna orden. */
   'apertura:planificar': (peticion: PeticionAperturaIpc) => Promise<PlanAperturaIpc>;
   /**
@@ -579,6 +606,8 @@ export interface ApiPcb {
   pasoHay(): Promise<boolean>;
   pasoComprobar(contrasena: string): Promise<boolean>;
   pasoFijar(contrasena: string): Promise<void>;
+  topeEstado(): Promise<EstadoTopeIpc>;
+  topeFijar(valor: string): Promise<EstadoTopeIpc>;
   aperturaPlanificar(peticion: PeticionAperturaIpc): Promise<PlanAperturaIpc>;
   aperturaEjecutar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
   cierrePlanificar(peticion: PeticionCierreIpc): Promise<PlanCierreIpc>;

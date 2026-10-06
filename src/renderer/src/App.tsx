@@ -5,6 +5,7 @@ import { Avisos } from '@/features/panel/Avisos';
 import { BarraLateral } from '@/features/panel/BarraLateral';
 import { DialogoPlan } from '@/features/panel/DialogoPlan';
 import { DialogoSeguridad } from '@/features/panel/DialogoSeguridad';
+import { DialogoTope } from '@/features/panel/DialogoTope';
 import { Encabezado } from '@/features/panel/Encabezado';
 import { MatrizCuentas } from '@/features/panel/MatrizCuentas';
 import { ModalDetalleSubcuenta } from '@/features/panel/ModalDetalleSubcuenta';
@@ -52,6 +53,7 @@ export default function App() {
 
       <PantallaApis />
       <DialogoSeguridad />
+      <DialogoTope />
       <DialogoPlan />
       <ModalDetalleSubcuenta />
       {pantalla === 'login' && <PantallaDesbloqueo />}

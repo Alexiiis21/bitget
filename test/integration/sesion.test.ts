@@ -533,9 +533,19 @@ const CONTRATO = {
   symbolStatus: 'normal'
 };
 
-/** Deja el exchange respondiendo catalogo, precio y ordenes. */
+/**
+ * La hora que da Bitget en `/api/v2/public/time`. `null` es «el reloj de
+ * verdad»; las pruebas del tope la mueven para simular que pasa el tiempo sin
+ * tocar el reloj del equipo, o al reves.
+ */
+let horaBitget: number | null = null;
+
+/** Deja el exchange respondiendo catalogo, precio, hora y ordenes. */
 function enrutarMercado(alOrdenar?: (cuerpo: Record<string, unknown>) => unknown): void {
   exchange.responderCon((p) => {
+    if (p.url.startsWith('/api/v2/public/time')) {
+      return { cuerpo: sobreOk({ serverTime: String(horaBitget ?? Date.now()) }) };
+    }
     if (p.url.startsWith('/api/v2/mix/market/contracts')) return { cuerpo: sobreOk([CONTRATO]) };
     if (p.url.startsWith('/api/v2/mix/market/ticker')) {
       return { cuerpo: sobreOk([{ symbol: SIMBOLO, lastPr: '63378', markPrice: '63381.3' }]) };
@@ -552,12 +562,17 @@ function enrutarMercado(alOrdenar?: (cuerpo: Record<string, unknown>) => unknown
   });
 }
 
-/** Sesion abierta con una subcuenta dada de alta y su saldo ya conocido. */
-async function conUnaCuenta(): Promise<string> {
+/**
+ * Sesion abierta con una subcuenta dada de alta, su saldo ya conocido y un tope
+ * de margen holgado: sin tope no se abre nada, y las pruebas que no son del
+ * tope no deben depender de el.
+ */
+async function conUnaCuenta(tope: string | null = '1000'): Promise<string> {
   await sesion.crear(MAESTRA);
   verificacionCorrecta(exchange);
   const alta = await sesion.agregar(ALTA);
   enrutarMercado();
+  if (tope !== null) await sesion.fijarTopeMargen(tope);
   return alta.cuenta?.id ?? '';
 }
 
@@ -714,6 +729,201 @@ describe('planificar y ejecutar una apertura', () => {
         precioLimite: null
       })
     ).rejects.toThrow('bloqueado');
+  });
+});
+
+/* ---------------- tope de margen inicial ---------------- */
+
+describe('tope de margen inicial', () => {
+  const DIA = 24 * 60 * 60 * 1000;
+  const peticion = (cuentaId: string, margenInicial: string) => ({
+    simbolo: SIMBOLO,
+    objetivos: [{ cuentaId, lado: 'long' as const }],
+    margenInicial,
+    apalancamiento: 10,
+    precioLimite: null
+  });
+  const pidioPrecio = (): boolean =>
+    exchange.peticiones.some((p) => p.url.includes('/market/ticker'));
+
+  beforeEach(() => {
+    horaBitget = null;
+  });
+
+  /**
+   * Una sesion cuyo cliente de Bitget lee un reloj de equipo que la prueba
+   * controla. La hora de Bitget se mueve aparte, con `horaBitget`.
+   */
+  async function conReloj(inicio: number) {
+    let equipo = inicio;
+    horaBitget = inicio;
+    const cli = new ClienteBitget({ host: exchange.url, ahora: () => equipo });
+    const s = new Sesion({ vault: rutaVault, cuentas: rutaCuentas }, cli);
+    await s.crear(MAESTRA);
+    verificacionCorrecta(exchange);
+    const alta = await s.agregar(ALTA);
+    enrutarMercado();
+    return {
+      s,
+      cuentaId: alta.cuenta?.id ?? '',
+      /** Pasa el tiempo de verdad: para el equipo y para Bitget. */
+      pasar: (ms: number) => {
+        equipo += ms;
+        horaBitget = (horaBitget ?? 0) + ms;
+      },
+      /** Alguien toca el reloj de Windows. Bitget no se entera. */
+      tocarEquipo: (ms: number) => {
+        equipo += ms;
+      },
+      cerrar: async () => {
+        s.cerrar();
+        await cli.cerrar();
+      }
+    };
+  }
+
+  it('un panel recien instalado no tiene tope y no abre nada', async () => {
+    const cuentaId = await conUnaCuenta(null);
+
+    expect(sesion.estadoTopeMargen().estado).toBe('sin-tope');
+    await expect(sesion.planificarApertura(peticion(cuentaId, '1'))).rejects.toThrow(
+      /fijar el margen inicial máximo/
+    );
+    /* Se rechaza antes de gastar una sola peticion en precios. */
+    expect(pidioPrecio()).toBe(false);
+  });
+
+  /*
+   * El caso que motivo todo: el tope es 1 y el operador escribe 5 queriendo
+   * escribir 0,5. No sale nada, para ninguna casilla.
+   */
+  it('un margen por encima del tope aborta el lote entero', async () => {
+    const cuentaId = await conUnaCuenta('1');
+
+    await expect(sesion.planificarApertura(peticion(cuentaId, '5'))).rejects.toThrow(
+      /el tope de este panel es 1/
+    );
+    expect(pidioPrecio()).toBe(false);
+    expect(exchange.peticiones.some((p) => p.url.includes('place-order'))).toBe(false);
+  });
+
+  it('un margen igual o menor que el tope si se planifica', async () => {
+    const cuentaId = await conUnaCuenta('1');
+
+    const plan = await sesion.planificarApertura(peticion(cuentaId, '1'));
+
+    expect(plan.entradas).toHaveLength(1);
+  });
+
+  it('mientras esta vigente no se puede cambiar, ni para subirlo ni para bajarlo', async () => {
+    await conUnaCuenta('1');
+
+    await expect(sesion.fijarTopeMargen('5')).rejects.toThrow(/sigue vigente/);
+    await expect(sesion.fijarTopeMargen('0.5')).rejects.toThrow(/sigue vigente/);
+    expect(sesion.estadoTopeMargen()).toMatchObject({ estado: 'vigente', valor: '1' });
+  });
+
+  it('sobrevive a bloquear y desbloquear: vive dentro del almacen cifrado', async () => {
+    await conUnaCuenta('0.5');
+    sesion.cerrar();
+    await sesion.abrir(MAESTRA);
+
+    expect(sesion.estadoTopeMargen()).toMatchObject({ estado: 'vigente', valor: '0.5' });
+    await expect(sesion.fijarTopeMargen('5')).rejects.toThrow(/sigue vigente/);
+  });
+
+  it('rechaza un tope que no es un numero positivo', async () => {
+    await conUnaCuenta(null);
+
+    for (const malo of ['0', '-1', 'abc', '1e3', '0,5']) {
+      await expect(sesion.fijarTopeMargen(malo)).rejects.toThrow();
+    }
+    expect(sesion.estadoTopeMargen().estado).toBe('sin-tope');
+  });
+
+  it('a las 24 horas vence, bloquea la apertura y deja fijar uno nuevo', async () => {
+    const r = await conReloj(Date.parse('2026-10-06T09:00:00Z'));
+    await r.s.fijarTopeMargen('1');
+
+    r.pasar(DIA - 60_000);
+    expect(r.s.estadoTopeMargen().estado).toBe('vigente');
+    await expect(r.s.fijarTopeMargen('2')).rejects.toThrow(/sigue vigente/);
+
+    r.pasar(60_000);
+    expect(r.s.estadoTopeMargen().estado).toBe('vencido');
+    await expect(r.s.planificarApertura(peticion(r.cuentaId, '1'))).rejects.toThrow(/venció/);
+
+    const nuevo = await r.s.fijarTopeMargen('2');
+    expect(nuevo).toMatchObject({ estado: 'vigente', valor: '2' });
+    await r.cerrar();
+  });
+
+  /*
+   * Adelantar el reloj de Windows un dia hace que el tope *parezca* vencido, y
+   * eso solo bloquea las aperturas. Para fijar otro se pregunta la hora a
+   * Bitget, que sigue diciendo que el tope tiene un minuto.
+   */
+  it('adelantar el reloj del equipo no libera el tope', async () => {
+    const r = await conReloj(Date.parse('2026-10-06T09:00:00Z'));
+    await r.s.fijarTopeMargen('1');
+
+    r.pasar(60_000);
+    r.tocarEquipo(2 * DIA);
+
+    await expect(r.s.fijarTopeMargen('50')).rejects.toThrow(/sigue vigente/);
+    /* Tras preguntar a Bitget, el panel vuelve a saber la hora buena. */
+    expect(r.s.estadoTopeMargen()).toMatchObject({ estado: 'vigente', valor: '1' });
+    await r.cerrar();
+  });
+
+  /*
+   * El truco inverso: atrasar el reloj antes de fijar para que el tope nazca
+   * ya viejo y venza enseguida. `fijadoEn` es la hora de Bitget, no la del equipo.
+   */
+  it('atrasar el reloj del equipo antes de fijar no acorta el plazo', async () => {
+    const bitget = Date.parse('2026-10-06T09:00:00Z');
+    const r = await conReloj(bitget);
+    r.tocarEquipo(-23 * 60 * 60 * 1000);
+
+    const fijado = await r.s.fijarTopeMargen('1');
+
+    expect(fijado.fijadoEn).toBe(new Date(bitget).toISOString());
+    expect(fijado.venceEn).toBe(new Date(bitget + DIA).toISOString());
+    await r.cerrar();
+  });
+
+  it('sin la hora de Bitget no se fija nada', async () => {
+    await conUnaCuenta(null);
+    exchange.responderCon((p) =>
+      p.url.startsWith('/api/v2/public/time')
+        ? { cuerpo: sobreOk({ serverTime: 'no-es-hora' }) }
+        : null
+    );
+
+    await expect(sesion.fijarTopeMargen('1')).rejects.toThrow(/hora con Bitget/);
+    expect(sesion.estadoTopeMargen().estado).toBe('sin-tope');
+  });
+
+  /*
+   * Un plan dura dos minutos y un reintento puede llegar mas tarde. Si el tope
+   * vence entre medias, lo aprobado ya no esta cubierto y no sale.
+   */
+  it('si vence entre planificar y enviar, no sale ninguna orden', async () => {
+    const r = await conReloj(Date.parse('2026-10-06T09:00:00Z'));
+    await r.s.fijarTopeMargen('1');
+    r.pasar(DIA - 30_000);
+    const plan = await r.s.planificarApertura(peticion(r.cuentaId, '1'));
+
+    r.pasar(60_000);
+
+    await expect(r.s.ejecutarApertura(plan.id)).rejects.toThrow(/venció/);
+    expect(exchange.peticiones.some((p) => p.url.includes('place-order'))).toBe(false);
+    await r.cerrar();
+  });
+
+  it('con el panel bloqueado no se consulta ni se fija', async () => {
+    expect(() => sesion.estadoTopeMargen()).toThrow('bloqueado');
+    await expect(sesion.fijarTopeMargen('1')).rejects.toThrow('bloqueado');
   });
 });
 

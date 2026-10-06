@@ -14,6 +14,7 @@ import type {
   AltaCuenta,
   CuentaPanel,
   EstadoApp,
+  EstadoTopeIpc,
   EstadoVault,
   FilaCuenta,
   ResultadoAlta,
@@ -31,6 +32,13 @@ import { verificarCredencial, type ResultadoVerificacion } from '../bitget/verif
 import { catalogoActivos, preciosDe, type ActivoOperable } from '../bitget/catalogo-activos';
 import { RegistroConexiones } from '../domain/estado-conexion';
 import { RegistroCuentas } from '../domain/registro-cuentas';
+import {
+  ErrorTope,
+  comprobarContraTope,
+  estadoTope,
+  validarValorTope,
+  type EstadoTope
+} from '../domain/tope-margen';
 import {
   ErrorPlan,
   MotorLotes,
@@ -397,6 +405,88 @@ export class Sesion implements FuenteCuentas {
     await vault.guardar();
   }
 
+  /* ---------------- tope de margen inicial ---------------- */
+
+  /**
+   * En que punto esta el tope del panel. No sale a la red.
+   *
+   * La hora es la del cliente de Bitget: la del equipo corregida con el desfase
+   * medido la ultima vez que se pregunto al exchange. Si alguien adelanta el
+   * reloj de Windows, aqui el tope puede parecer vencido antes de tiempo; eso
+   * solo bloquea las aperturas hasta fijar otro, y fijar otro **si** pregunta
+   * la hora a Bitget, que es donde se decide. Ver `fijarTopeMargen`.
+   */
+  estadoTopeMargen(): EstadoTopeIpc {
+    const { vault } = this.exigirAbierta();
+    return this.aVistaTope(estadoTope(vault.topeMargen(), this.cliente.ahora()));
+  }
+
+  /**
+   * Fija el tope del panel. Solo si no hay ninguno vigente.
+   *
+   * **No se puede cambiar durante 24 horas, ni para subirlo ni para bajarlo.**
+   * Es lo que pidio el cliente y es lo que hace que el tope sirva: uno que se
+   * puede tocar a mitad de sesion no frena el error, solo lo retrasa un clic.
+   *
+   * La hora se pregunta a Bitget antes de decidir, y es la que se guarda como
+   * `fijadoEn`. Con la del equipo bastaria adelantar el reloj de Windows un dia
+   * para dar por vencido un tope recien puesto, o atrasarlo antes de fijar
+   * para que el nuevo naciera ya casi caducado. Si Bitget no contesta, no se
+   * fija nada: sin red tampoco se podria operar, asi que no se pierde nada.
+   */
+  async fijarTopeMargen(texto: string): Promise<EstadoTopeIpc> {
+    const { vault } = this.exigirAbierta();
+
+    const validado = validarValorTope(texto);
+    if (!validado.ok) throw new ErrorTope('valor-invalido', validado.mensaje);
+
+    try {
+      await this.cliente.sincronizarReloj();
+    } catch {
+      throw new ErrorTope(
+        'sin-hora',
+        'No se pudo comprobar la hora con Bitget, así que no se fijó el tope. ' +
+          'Revise la conexión y vuelva a intentarlo.'
+      );
+    }
+    const ahora = this.cliente.ahora();
+
+    const actual = estadoTope(vault.topeMargen(), ahora);
+    if (actual.estado === 'vigente') {
+      throw new ErrorTope(
+        'tope-vigente',
+        `El tope de ${actual.valor} sigue vigente y no se puede cambiar hasta ` +
+          `${new Date(actual.venceEn).toLocaleString('es-MX')}.`
+      );
+    }
+
+    vault.fijarTopeMargen({ valor: validado.valor, fijadoEn: new Date(ahora).toISOString() });
+    await vault.guardar();
+    return this.aVistaTope(estadoTope(vault.topeMargen(), ahora));
+  }
+
+  /**
+   * La puerta de la apertura: el margen por casilla no puede pasar del tope.
+   *
+   * Lanza `ErrorPlan` y aborta el lote entero: el tope es del panel, asi que si
+   * el margen lo supera en una casilla lo supera en todas. Se comprueba antes
+   * de cualquier peticion a Bitget -no tiene sentido pedir precios para algo
+   * que no va a salir- y otra vez al ejecutar.
+   */
+  private exigirDentroDelTope(margenInicial: string): void {
+    const { vault } = this.exigirAbierta();
+    const r = comprobarContraTope(margenInicial, estadoTope(vault.topeMargen(), this.cliente.ahora()));
+    if (!r.ok) throw new ErrorPlan(r.motivo, r.mensaje);
+  }
+
+  private aVistaTope(e: EstadoTope): EstadoTopeIpc {
+    const monedaMargen = MERCADOS[this.mercado].marginCoin;
+    if (e.estado === 'sin-tope') {
+      return { estado: 'sin-tope', valor: null, fijadoEn: null, venceEn: null, monedaMargen };
+    }
+    return { estado: e.estado, valor: e.valor, fijadoEn: e.fijadoEn, venceEn: e.venceEn, monedaMargen };
+  }
+
   /* ---------------- apertura de operaciones ---------------- */
 
   /**
@@ -452,6 +542,7 @@ export class Sesion implements FuenteCuentas {
     precioLimite: string | null;
   }): Promise<PlanApertura> {
     this.exigirAbierta();
+    this.exigirDentroDelTope(peticion.margenInicial);
 
     const plan = await this.motor.planificar({
       mercado: MERCADOS[this.mercado],
@@ -816,6 +907,13 @@ export class Sesion implements FuenteCuentas {
           'Vuelva a revisar la operación.'
       );
     }
+
+    /*
+     * Otra vez el tope, ahora contra el plan aprobado. Mientras esta vigente no
+     * puede cambiar, pero si puede vencer entre planificar y confirmar -o
+     * entre el primer envio y un reintento-, y vencido no se abre nada.
+     */
+    this.exigirDentroDelTope(plan.margenInicial);
 
     /*
      * El reintento llega por cuenta y lado, no por `clientOid`: la pantalla no

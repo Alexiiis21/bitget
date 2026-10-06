@@ -36,6 +36,7 @@ import type {
   ClosedPosition,
   CloseRequest,
   LeverageRequest,
+  MarginCap,
   MarginRequest,
   OpenRequest,
   PositionSnapshot,
@@ -100,6 +101,11 @@ export interface PanelService {
 
   /* ---- contrasena de paso ---- */
   hasStepPassword(): Promise<boolean>;
+
+  /* ---- tope de margen inicial ---- */
+  getMarginCap(): Promise<MarginCap>;
+  /** Falla si hay un tope vigente: no se cambia en 24 horas, ni para subir ni para bajar. */
+  setMarginCap(value: string): Promise<MarginCap>;
 
   /* ---- credenciales y seguridad ---- */
   listApiKeys(): Promise<ApiKeyRow[]>;

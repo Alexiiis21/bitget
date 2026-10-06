@@ -31,6 +31,7 @@ import type {
   ClosedPosition,
   CloseRequest,
   LeverageRequest,
+  MarginCap,
   MarginRequest,
   OpenRequest,
   PlanDiscard,
@@ -47,6 +48,7 @@ import type {
 import type { Decimal } from '@shared/types';
 import type { PanelService, Unsubscribe } from '@shared/ports/panel-service';
 import { prohibidoEnStaging } from '@shared/entorno';
+import { TOPE_MARGEN_VIGENCIA_MS } from '@shared/constants';
 import { CASILLAS_POR_CUENTA, HISTORIAL_MAXIMO } from '@/lib/tokens';
 
 /* Topes verificados contra el catálogo real de Bitget el 18/08/2026. */
@@ -118,6 +120,11 @@ export class MockPanelService implements PanelService {
   private panelNumero = 1;
   private pasoActual = 'bg1';
   private readonly maestra = 'demo1234';
+  /**
+   * Tope de margen inicial de la demostración. Arranca sin tope, como un panel
+   * recién instalado, para que la demostración enseñe el diálogo que lo pide.
+   */
+  private tope: { valor: string; fijadoEnMs: number } | null = null;
 
   private readonly oyentesCuentas = new Set<(c: Account[]) => void>();
   private readonly oyentesPosiciones = new Set<(s: PositionSnapshot) => void>();
@@ -600,6 +607,17 @@ export class MockPanelService implements PanelService {
 
   async planOpen(req: OpenRequest): Promise<BatchPlan> {
     await latencia(180, 220);
+    /* La misma puerta que el proceso principal, para que la demostración se comporte igual. */
+    const tope = this.estadoTope();
+    if (tope.status !== 'active' || tope.value === null) {
+      throw new Error('Antes de abrir posiciones hay que fijar el margen inicial máximo de este panel.');
+    }
+    if (Number.parseFloat(req.initialMargin) > Number.parseFloat(tope.value)) {
+      throw new Error(
+        `Escribió ${req.initialMargin} de margen inicial y el tope de este panel es ${tope.value}. ` +
+          'No se envió ninguna orden. El tope no se puede cambiar hasta que pasen 24 horas desde que se fijó.'
+      );
+    }
     const precio = this.precios[req.assetId] ?? PRECIO_BASE[req.assetId] ?? 1;
     /* Las mismas unidades que el panel real: la cantidad en moneda base y los importes en USDT. */
     const margen = Number.parseFloat(req.initialMargin);
@@ -707,6 +725,40 @@ export class MockPanelService implements PanelService {
   async hasStepPassword(): Promise<boolean> {
     await latencia(40, 40);
     return this.pasoActual !== '';
+  }
+
+  /* ---------------- tope de margen inicial ---------------- */
+
+  private estadoTope(): MarginCap {
+    if (this.tope === null) {
+      return { status: 'missing', value: null, setAt: null, expiresAt: null, currency: 'USDT' };
+    }
+    const vence = this.tope.fijadoEnMs + TOPE_MARGEN_VIGENCIA_MS;
+    return {
+      status: Date.now() < vence ? 'active' : 'expired',
+      value: this.tope.valor,
+      setAt: new Date(this.tope.fijadoEnMs).toISOString(),
+      expiresAt: new Date(vence).toISOString(),
+      currency: 'USDT'
+    };
+  }
+
+  async getMarginCap(): Promise<MarginCap> {
+    await latencia(40, 40);
+    return this.estadoTope();
+  }
+
+  async setMarginCap(value: string): Promise<MarginCap> {
+    await latencia(120, 80);
+    const actual = this.estadoTope();
+    if (actual.status === 'active') {
+      throw new Error(`El tope de ${actual.value ?? '—'} sigue vigente y no se puede cambiar hasta que pasen 24 horas.`);
+    }
+    if (!/^\d+(\.\d+)?$/.test(value.trim()) || Number.parseFloat(value) <= 0) {
+      throw new Error('Escriba el tope como un número mayor que cero, por ejemplo 0.5 o 10.');
+    }
+    this.tope = { valor: value.trim(), fijadoEnMs: Date.now() };
+    return this.estadoTope();
   }
 
   /* ---------------- credenciales y seguridad ---------------- */
