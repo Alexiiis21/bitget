@@ -235,6 +235,8 @@ export interface PosicionMonitor {
   margenAdicional: Decimal | null;
   /** Margen que la posicion tiene ahora segun Bitget. */
   margenActual: Decimal;
+  /** Aislado o cruzado, tal como lo informa Bitget para esta punta. */
+  modoMargen: ModoMargen;
   /** Ganancia o perdida no realizada, tal como la informa Bitget. Cadena vacia si no llego. */
   pnl: Decimal;
   /**

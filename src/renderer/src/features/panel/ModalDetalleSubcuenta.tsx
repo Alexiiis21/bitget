@@ -45,6 +45,11 @@ function BloquePunta({ posicion, lado, decimales }: { posicion: Position | undef
       <div style={{ display: 'flex', flexDirection: 'column', gap: 7, fontSize: 12.5 }}>
         <Dato rotulo="Entrada" valor={precio(posicion?.entryPrice, decimales)} estilo={{ fontWeight: 600 }} />
         <Dato rotulo="Liquidación" valor={precio(posicion?.liquidationPrice, decimales)} />
+        <Dato
+          rotulo="Modo de margen"
+          valor={posicion === undefined ? '—' : posicion.marginMode === 'crossed' ? 'Cruzado' : 'Aislado'}
+          estilo={{ fontWeight: 600 }}
+        />
         {/*
           * El guion no es cero: es que ni el panel ni Bitget saben el margen.
           * Por eso no lleva unidad detrás —«— USDT» se leería como cero USDT—.

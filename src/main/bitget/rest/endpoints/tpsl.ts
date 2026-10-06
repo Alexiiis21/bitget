@@ -28,6 +28,9 @@ import type { ClienteBitget, RespuestaRest } from '../client';
 import { superficieDe, type Credencial } from '../signer';
 import { cancelarPlanV3, colocarTakeProfitV3, planesPendientesV3 } from './tpsl-v3';
 
+/* Solo existe en V3: en V2 cambiar el Take Profit sigue siendo cancelar + colocar. */
+export { modificarTakeProfitV3 as modificarTakeProfit } from './tpsl-v3';
+
 export interface ColocacionTakeProfit {
   mercado: Mercado;
   simbolo: string;
@@ -110,7 +113,9 @@ export const esquemaPlanPendiente = zod.object({
   posSide: zod.string().nullish(),
   /** Como se llama el mismo dato al enviar. No aparece al listar. */
   holdSide: zod.string().nullish(),
-  status: zod.string().nullish()
+  status: zod.string().nullish(),
+  /** Solo en V3: cantidad que cubre la orden `tpsl`. V2 no la trae. */
+  qty: zod.string().nullish()
 });
 
 export type PlanPendiente = z.infer<typeof esquemaPlanPendiente>;

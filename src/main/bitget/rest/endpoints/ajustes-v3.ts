@@ -136,6 +136,15 @@ function aplanarActivos(crudo: unknown): unknown {
     const sobre = crudo as { assets?: unknown; list?: unknown };
     if (Array.isArray(sobre.assets)) return aplanarActivos(sobre.assets);
     if (Array.isArray(sobre.list)) return aplanarActivos(sobre.list);
+    /*
+     * La cabecera de la cuenta sin `assets`: una cuenta sin ninguna moneda. Se
+     * lee como lista vacia -que `saldoDeFotoCompleta` traduce a 0- y no como
+     * error de esquema, que dejaria el saldo viejo en pantalla.
+     */
+    const cabecera = crudo as { accountEquity?: unknown; usdtEquity?: unknown };
+    if (sobre.assets == null && sobre.list == null && (cabecera.accountEquity != null || cabecera.usdtEquity != null)) {
+      return [];
+    }
   }
   return crudo;
 }
@@ -156,10 +165,38 @@ export async function obtenerActivosCuenta(
   );
 }
 
-/** El disponible en la moneda indicada, o `null` si la respuesta no lo trae. */
+/**
+ * El disponible en la moneda indicada, o `null` si la respuesta no lo trae.
+ *
+ * Solo la fila de esa moneda. Hasta el 04/10/2026, si no la encontraba y habia
+ * una unica fila, devolvia esa: una cuenta con todo el USDT retirado y algo de
+ * polvo en otra moneda enseñaba ese polvo como si fueran USDT.
+ */
 export function disponibleDe(activos: ActivosCuenta, moneda: string): string | null {
-  const fila =
-    activos.find((a) => (a.coin ?? a.marginCoin) === moneda) ?? (activos.length === 1 ? activos[0] : undefined);
+  const fila = activos.find((a) => (a.coin ?? a.marginCoin) === moneda);
   if (fila === undefined) return null;
+  return fila.available ?? fila.availableBalance ?? null;
+}
+
+/**
+ * El disponible leido de `GET /api/v3/account/assets`, donde **no venir es 0**.
+ *
+ * ==========================================================================
+ * Por que existe, distinto de `disponibleDe`
+ * ==========================================================================
+ * Bitget no devuelve en `assets` las monedas con saldo cero. Incidencia del
+ * 04/10/2026: el cliente retiro todo de una subcuenta UTA y la matriz siguio
+ * enseñando sus 10 USDT, porque la fila de USDT dejo de llegar y la regla
+ * «sin fila no se escribe nada» conservaba el saldo viejo para siempre. En
+ * Classic no pasa: `mix/account/accounts` trae la fila aunque este a cero.
+ *
+ * Solo vale para esta respuesta REST, que es la foto completa de la cuenta. Un
+ * empujon del tema `account` puede traer solo lo que cambio, y ahi la ausencia
+ * no dice nada: sigue usando `disponibleDe`. Si la peticion falla no se llega
+ * aqui, asi que un fallo de red sigue sin poner nada a cero.
+ */
+export function saldoDeFotoCompleta(activos: ActivosCuenta, moneda: string): string | null {
+  const fila = activos.find((a) => (a.coin ?? a.marginCoin) === moneda);
+  if (fila === undefined) return '0';
   return fila.available ?? fila.availableBalance ?? null;
 }

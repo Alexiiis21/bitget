@@ -126,6 +126,8 @@ export interface Position {
    * al arrancar, o se abrió fuera del panel-, con un rótulo que lo dice.
    */
   currentMargin: Decimal | null;
+  /** Aislado o cruzado, tal como lo informa Bitget para esta punta. */
+  marginMode: MarginMode;
   /**
    * Ganancia o pérdida no realizada, tal como la informa Bitget. Cadena vacía
    * si el exchange no la mandó en la última lectura.

@@ -192,6 +192,7 @@ const aPosicion = (p: PosicionMonitor): Position => ({
   initialMarginAccum: p.margenInicial,
   /* Cadena vacía es «Bitget no lo mandó» -pasa en UTA-, no un cero. */
   currentMargin: p.margenActual === '' ? null : p.margenActual,
+  marginMode: p.modoMargen === 'cruzado' ? 'crossed' : 'isolated',
   pnl: p.pnl,
   roe: p.roe,
   leverage: p.apalancamiento,

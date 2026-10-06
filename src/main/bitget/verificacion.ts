@@ -57,7 +57,7 @@ import { MERCADO_REAL, type Mercado } from './mercado';
 import type { ClienteBitget } from './rest/client';
 import type { Credencial } from './rest/signer';
 import { obtenerCuentaSimbolo, obtenerInfoCuenta } from './rest/endpoints/cuenta';
-import { disponibleDe, obtenerActivosCuenta } from './rest/endpoints/ajustes-v3';
+import { obtenerActivosCuenta, saldoDeFotoCompleta } from './rest/endpoints/ajustes-v3';
 
 /**
  * Codigos de permiso confirmados contra la API real.
@@ -385,7 +385,7 @@ async function verificarUta(
   let saldoDisponible: string | null = null;
   try {
     const activos = await obtenerActivosCuenta(cliente, { ...credencial, superficie: 'v3' });
-    saldoDisponible = disponibleDe(activos.datos, mercado.marginCoin);
+    saldoDisponible = saldoDeFotoCompleta(activos.datos, mercado.marginCoin);
   } catch (e) {
     if (e instanceof ErrorBitget && e.reintentable) throw e;
     /* Se sigue sin saldo: la credencial ya demostro que autentica. */

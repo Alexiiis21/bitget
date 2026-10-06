@@ -594,6 +594,50 @@ describe('el barrido REST sobre una cuenta UTA', () => {
 
     expect(r.datos.find((c) => c.marginCoin === 'USDT')?.available).toBe('120.5');
   });
+
+  /*
+   * Incidencia del 04/10/2026: el cliente retiro todo de una subcuenta UTA y la
+   * matriz siguio enseñando 10 USDT. Bitget omite en `assets` las monedas a
+   * cero, y sin fila el barrido no escribia nada.
+   */
+  it('una cuenta sin USDT en `assets` se lee como 0, no como el saldo viejo', async () => {
+    exchange.simularUta({ accountMode: 'unified', holdMode: 'hedge_mode' });
+    exchange.responderCon((p) => {
+      if (p.url.startsWith('/api/v3/position/current-position')) return { cuerpo: sobreOk({ list: [] }) };
+      if (p.url.startsWith('/api/v3/account/assets')) {
+        return { cuerpo: sobreOk({ accountEquity: '0', usdtEquity: '0', assets: [] }) };
+      }
+      return null;
+    });
+
+    const fuente = new Fuente([{ cuentaId: 'cta_uta', credencial: UTA }]);
+    const barrido = new BarridoPosiciones(cliente, MERCADO_REAL, almacen, fuente, {
+      programar: () => null,
+      cancelar: () => undefined
+    });
+
+    await barrido.barrerCuenta({ cuentaId: 'cta_uta', credencial: UTA });
+
+    expect(fuente.saldos).toEqual([{ cuentaId: 'cta_uta', disponible: '0' }]);
+  });
+
+  it('la cabecera sin `assets` tambien se lee como 0', async () => {
+    exchange.simularUta({ accountMode: 'unified' });
+    exchange.responderSiempre({ cuerpo: sobreOk({ accountEquity: '0', usdtEquity: '0' }) });
+
+    const r = await obtenerCuentasFuturos(cliente, UTA, MERCADO_REAL.productType, 'USDT');
+
+    expect(r.datos.find((c) => c.marginCoin === 'USDT')?.available).toBe('0');
+  });
+
+  it('el polvo de otra moneda no se toma por USDT', async () => {
+    exchange.simularUta({ accountMode: 'unified' });
+    exchange.responderSiempre({ cuerpo: sobreOk({ accountEquity: '0.4', assets: [{ coin: 'BGB', available: '0.4' }] }) });
+
+    const r = await obtenerCuentasFuturos(cliente, UTA, MERCADO_REAL.productType, 'USDT');
+
+    expect(r.datos.find((c) => c.marginCoin === 'USDT')?.available).toBe('0');
+  });
 });
 
 describe('el saldo empujado por el tema `account` de V3', () => {
@@ -611,6 +655,11 @@ describe('el saldo empujado por el tema `account` de V3', () => {
 
   it('sigue leyendo la forma plana', () => {
     expect(saldoDeEmpujon([{ coin: 'USDT', available: '7' }], 'USDT')).toBe('7');
+  });
+
+  it('una sola fila de otra moneda no se toma por la del mercado', () => {
+    /* Un empujon puede traer solo lo que cambio: la ausencia no dice que sea 0. */
+    expect(saldoDeEmpujon([{ coin: 'BGB', available: '0.4' }], 'USDT')).toBeNull();
   });
 });
 

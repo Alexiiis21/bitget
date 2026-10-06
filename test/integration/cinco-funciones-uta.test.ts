@@ -698,21 +698,28 @@ describe('Take Profit en UTA: ordenes de estrategia tpsl', () => {
     expect(v3).not.toHaveProperty('planType');
   });
 
-  it('cambia un Take Profit puesto: cancela el anterior y pone el nuevo', async () => {
+  /** Un Take Profit UTA ya puesto sobre el long, como lo deja la apertura. */
+  const conTpViejo = (p: PeticionRecibida, qty: string | null = '0.5'): Respuesta | null => {
+    if (!p.url.startsWith('/api/v3/trade/unfilled-strategy-orders')) return null;
+    return {
+      cuerpo: sobreOk([
+        {
+          orderId: 'tp_viejo',
+          symbol: SIMBOLO,
+          posSide: 'long',
+          status: 'pending',
+          takeProfit: '70000',
+          ...(qty === null ? {} : { qty })
+        }
+      ])
+    };
+  };
+
+  it('cambia un Take Profit puesto modificándolo, sin cancelarlo', async () => {
     exchange.responderCon((p) => {
-      const c = comunes(p) ?? conPosicion(p);
+      const c = comunes(p) ?? conPosicion(p) ?? conTpViejo(p);
       if (c !== null) return c;
-      if (p.url.startsWith('/api/v3/trade/unfilled-strategy-orders')) {
-        return {
-          cuerpo: sobreOk([
-            { orderId: 'tp_viejo', symbol: SIMBOLO, posSide: 'long', status: 'pending', takeProfit: '70000' }
-          ])
-        };
-      }
-      if (p.url.startsWith('/api/v3/trade/cancel-strategy-order')) return { cuerpo: sobreOk(null) };
-      if (p.url.startsWith('/api/v3/trade/place-strategy-order')) {
-        return { cuerpo: sobreOk({ orderId: 'tp_nuevo', clientOid: 'y' }) };
-      }
+      if (p.url.startsWith('/api/v3/trade/modify-strategy-order')) return { cuerpo: sobreOk(null) };
       return null;
     });
 
@@ -724,13 +731,57 @@ describe('Take Profit en UTA: ordenes de estrategia tpsl', () => {
     });
     const lote = await motor.ejecutarTakeProfit(plan);
     expect(lote.jobs.every((j) => j.estado === 'exito')).toBe(true);
+    expect(lote.jobs[0]?.ordenId).toBe('tp_viejo');
 
     const rutas = exchange.peticiones.map((p) => p.url);
-    const iCancelar = rutas.findIndex((u) => u.startsWith('/api/v3/trade/cancel-strategy-order'));
-    const iPoner = rutas.findIndex((u) => u.startsWith('/api/v3/trade/place-strategy-order'));
-    expect(iCancelar).toBeGreaterThanOrEqual(0);
-    expect(iCancelar).toBeLessThan(iPoner);
-    expect(cuerpoDe('/api/v3/trade/cancel-strategy-order')['orderId']).toBe('tp_viejo');
+    expect(rutas.some((u) => u.startsWith('/api/v3/trade/cancel-strategy-order'))).toBe(false);
+    expect(rutas.some((u) => u.startsWith('/api/v3/trade/place-strategy-order'))).toBe(false);
+
+    const mod = cuerpoDe('/api/v3/trade/modify-strategy-order');
+    expect(mod['orderId']).toBe('tp_viejo');
+    expect(mod['qty']).toBe('0.5');
+    expect(mod['takeProfit']).toBe(plan.entradas[0]?.precioDisparo);
+    expect(mod['tpTriggerBy']).toBe('market');
+    expect(mod['tpOrderType']).toBe('market');
+  });
+
+  it('sin qty en el listado usa el tamaño de la posición', async () => {
+    exchange.responderCon((p) => {
+      const c = comunes(p) ?? conPosicion(p) ?? conTpViejo(p, null);
+      if (c !== null) return c;
+      if (p.url.startsWith('/api/v3/trade/modify-strategy-order')) return { cuerpo: sobreOk(null) };
+      return null;
+    });
+
+    const plan = await motor.planificarTakeProfit({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId: UTA, lado: 'long' }],
+      porcentaje: '10'
+    });
+    await motor.ejecutarTakeProfit(plan);
+    expect(cuerpoDe('/api/v3/trade/modify-strategy-order')['qty']).toBe('0.5');
+  });
+
+  it('si Bitget rechaza la modificación, el Take Profit anterior no se toca', async () => {
+    exchange.responderCon((p) => {
+      const c = comunes(p) ?? conPosicion(p) ?? conTpViejo(p);
+      if (c !== null) return c;
+      if (p.url.startsWith('/api/v3/trade/modify-strategy-order')) {
+        return { estado: 400, cuerpo: sobreError('40034', 'rechazado') };
+      }
+      return null;
+    });
+
+    const plan = await motor.planificarTakeProfit({
+      mercado: MERCADO_SIMULADO,
+      simbolo: SIMBOLO,
+      objetivos: [{ cuentaId: UTA, lado: 'long' }],
+      porcentaje: '10'
+    });
+    const lote = await motor.ejecutarTakeProfit(plan);
+    expect(lote.jobs[0]?.estado).not.toBe('exito');
+    expect(exchange.peticiones.some((p) => p.url.startsWith('/api/v3/trade/cancel-strategy-order'))).toBe(false);
   });
 
   it('el 31008 del Take Profit separado se dice claro y no se reintenta', async () => {

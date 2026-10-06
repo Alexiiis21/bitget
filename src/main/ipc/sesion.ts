@@ -1020,6 +1020,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         margenInicial: viva.aporte?.margenInicial ?? null,
         margenAdicional: viva.aporte?.margenAdicional ?? null,
         margenActual: viva.margen,
+        modoMargen: viva.modoMargen,
         pnl: viva.pnl,
         roe: roeDe(viva.pnl, viva.tamano, viva.precioEntrada, viva.apalancamiento),
         apalancamiento: viva.apalancamiento,
@@ -1977,7 +1978,8 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
      * separado sobre una posicion UTA abierta, asi que la apertura lo lleva
      * puesto (ver `abrirPosicionV3`). Aqui solo queda contarlo en el informe y
      * en el monitor. Mandarlo otra vez solo produciria la fila «SIN Take Profit»
-     * sobre una posicion que si lo tiene.
+     * sobre una posicion que si lo tiene. Cambiarlo despues va por
+     * `modify-strategy-order`, ver `ejecutarTakeProfit`.
      */
     const clasicas: Job[] = [];
     for (const job of todas) {

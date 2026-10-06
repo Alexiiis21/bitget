@@ -422,6 +422,7 @@ export class MockPanelService implements PanelService {
       takeProfitPrice: takeProfit === null ? null : dec(takeProfit, 6),
       initialMarginAccum: dec(100 + Math.floor(azar() * 3) * 50, 2),
       currentMargin: null,
+      marginMode: 'isolated',
       /* `recalcularPnl` los sustituye antes de la primera publicación. */
       pnl: '0',
       roe: null,
@@ -772,6 +773,7 @@ export class MockPanelService implements PanelService {
         takeProfitPrice: tp,
         initialMarginAccum: req.initialMargin,
         currentMargin: null,
+        marginMode: req.marginMode,
         /* `recalcularPnl` los sustituye antes de la primera publicación. */
         pnl: '0',
         roe: null,

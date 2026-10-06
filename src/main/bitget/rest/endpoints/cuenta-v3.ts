@@ -180,6 +180,8 @@ export async function fijarApalancamientoV3(
  * Es el tipo de fallo que solo aparece leyendo el camino entero, porque cada
  * pieza por separado se comporta como debe.
  *
+ * Si la moneda no viene se devuelve su fila a cero, ver el cuerpo.
+ *
  * `locked` sale de `locked` o `frozen` -no hay respuesta capturada- y cae a `'0'`
  * si no viene: es el unico campo del esquema de V2 que nadie lee hoy, asi que un
  * valor por defecto ahi no puede mentir sobre nada que se enseñe.
@@ -198,6 +200,17 @@ export async function obtenerCuentasFuturosV3(
     usdtEquity: a.usdtEquity ?? a.equity ?? a.accountEquity ?? '',
     locked: a.locked ?? a.frozen ?? '0'
   }));
+
+  /*
+   * Sin fila de la moneda, la cuenta tiene 0: Bitget omite en `assets` las
+   * monedas a cero. Se añade la fila para que `leerSaldo` la encuentre y
+   * escriba 0, como hace con la fila a cero que si trae V2. Sin esto, retirar
+   * todo de una subcuenta UTA dejaba la matriz con el saldo anterior para
+   * siempre. Ver `saldoDeFotoCompleta`, incidencia del 04/10/2026.
+   */
+  if (!datos.some((c) => c.marginCoin === marginCoin)) {
+    datos.push({ marginCoin, available: '0', accountEquity: '0', usdtEquity: '0', locked: '0' });
+  }
 
   return { datos, duracionMs: r.duracionMs, codigo: r.codigo };
 }

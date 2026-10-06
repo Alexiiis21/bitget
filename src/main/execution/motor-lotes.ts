@@ -75,6 +75,7 @@ import {
   buscarTakeProfit,
   cancelarPlan,
   colocarTakeProfit,
+  modificarTakeProfit,
   planesPendientes,
   type PlanPendiente
 } from '../bitget/rest/endpoints/tpsl';
@@ -590,6 +591,12 @@ export interface EntradaTakeProfit extends EntradaLote {
   precioDisparoAnterior: string | null;
   orderIdAnterior: string | null;
   planTypeAnterior: string | null;
+  /**
+   * Solo UTA: cantidad que cubre el Take Profit anterior, o el tamaño de la
+   * posicion si Bitget no la informa. `modify-strategy-order` la exige. Ver
+   * `ejecutarTakeProfit`.
+   */
+  qtyAnterior?: string | null;
 }
 
 export interface PlanTakeProfit extends PlanBase<EntradaTakeProfit> {
@@ -1403,7 +1410,8 @@ export class MotorLotes {
           precioDisparoAnterior: anterior?.triggerPrice ?? null,
           orderIdAnterior: anterior?.orderId ?? null,
           /* `pos_profit` por defecto: cancelar con el tipo equivocado no falla, no quita. */
-          planTypeAnterior: anterior === null ? null : (anterior.planType ?? 'pos_profit')
+          planTypeAnterior: anterior === null ? null : (anterior.planType ?? 'pos_profit'),
+          qtyAnterior: anterior === null ? null : (anterior.qty ?? posicion.total ?? null)
         });
 
         indice += 1;
@@ -2018,10 +2026,56 @@ export class MotorLotes {
    * dos Take Profit del mismo plan, cancelar un plan ya cancelado no hace nada,
    * y lo indeterminado se resuelve mirando **los planes que Bitget tiene
    * puestos**, que es la verdad de fondo y no depende de que respuesta llegara.
+   *
+   * --------------------------------------------------------------------------
+   * En UTA se modifica: nunca se cancela
+   * --------------------------------------------------------------------------
+   * Bitget rechaza con `31008` todo Take Profit separado sobre una posicion UTA
+   * (ver `colocarTakeProfitV3`). Cancelar + colocar dejaba la posicion SIN Take
+   * Profit: la cancelacion entraba y la colocacion no. Si ya hay uno puesto, se
+   * cambia su precio con `modify-strategy-order`; si Bitget lo rechaza, la
+   * posicion conserva el que tenia.
    */
   async ejecutarTakeProfit(plan: PlanTakeProfit, soloEstos?: readonly string[]): Promise<Lote> {
+    const esModificacionUta = (cuenta: { credencial: Credencial }, entrada: EntradaTakeProfit): boolean =>
+      superficieDe(cuenta.credencial) === 'v3' && entrada.orderIdAnterior !== null;
+
+    /* El mismo orderId de antes, ya con el precio nuevo. */
+    const modificado = (planes: PlanPendiente[], entrada: EntradaTakeProfit): PlanPendiente | undefined =>
+      planes.find(
+        (p) =>
+          p.orderId === entrada.orderIdAnterior &&
+          Number(p.triggerPrice ?? NaN) === Number(entrada.precioDisparo)
+      );
+
     return this.correrLote(plan, 'take-profit', soloEstos, {
       enviar: async (cuenta, entrada) => {
+        if (esModificacionUta(cuenta, entrada)) {
+          const qty = entrada.qtyAnterior ?? '';
+          if (qty === '') {
+            throw new ErrorBitget(
+              'Bitget no informa la cantidad del Take Profit puesto, así que no se puede cambiar. ' +
+                'Cámbielo en Bitget.',
+              {
+                clase: 'fatal-cuenta',
+                codigo: null,
+                mensajeOriginal: null,
+                httpStatus: null,
+                reintentarEnMs: null
+              }
+            );
+          }
+          await modificarTakeProfit(this.cliente, cuenta.credencial, {
+            orderId: entrada.orderIdAnterior ?? '',
+            qty,
+            precioDisparo: entrada.precioDisparo
+          });
+          return {
+            ordenId: entrada.orderIdAnterior,
+            mensaje: `Take Profit ${entrada.precioDisparoAnterior ?? '?'} → ${entrada.precioDisparo}`
+          };
+        }
+
         if (entrada.orderIdAnterior !== null) {
           await cancelarPlan(this.cliente, cuenta.credencial, {
             mercado: plan.mercado,
@@ -2057,7 +2111,9 @@ export class MotorLotes {
        */
       yaHecha: async (cuenta, entrada) => {
         const planes = await planesPendientes(this.cliente, cuenta.credencial, plan.mercado);
-        const puesto = planes.find((p) => p.clientOid === entrada.clientOid);
+        const puesto = esModificacionUta(cuenta, entrada)
+          ? modificado(planes, entrada)
+          : planes.find((p) => p.clientOid === entrada.clientOid);
         if (puesto === undefined) return null;
 
         return {
@@ -2069,13 +2125,26 @@ export class MotorLotes {
 
       resolver: async (cuenta, entrada) => {
         const planes = await planesPendientes(this.cliente, cuenta.credencial, plan.mercado);
-        const puesto = planes.find((p) => p.clientOid === entrada.clientOid);
+        const modificacion = esModificacionUta(cuenta, entrada);
+        const puesto = modificacion
+          ? modificado(planes, entrada)
+          : planes.find((p) => p.clientOid === entrada.clientOid);
 
         if (puesto !== undefined) {
           return {
             estado: 'exito',
             ordenId: puesto.orderId ?? null,
             mensaje: 'Se cortó la conexión al enviar, pero el Take Profit sí quedó puesto.'
+          };
+        }
+
+        if (modificacion) {
+          return {
+            estado: 'fallo',
+            ordenId: null,
+            mensaje:
+              'Se cortó la conexión al enviar y el Take Profit no aparece con el precio nuevo. ' +
+              'El anterior no se quitó. Se puede reintentar.'
           };
         }
 

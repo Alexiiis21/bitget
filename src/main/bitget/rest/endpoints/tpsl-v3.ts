@@ -12,6 +12,7 @@
  *   POST /api/v3/trade/place-strategy-order     type=tpsl, tpslMode=full
  *   GET  /api/v3/trade/unfilled-strategy-orders type=tpsl
  *   POST /api/v3/trade/cancel-strategy-order    orderId
+ *   POST /api/v3/trade/modify-strategy-order    orderId + qty + takeProfit
  *
  * Cierra el hueco 2.2 de `docs/00-uta-fase-1-equivalencias.md`: en V3 si hay
  * forma de poner un Take Profit sobre una posicion **ya abierta**, solo que no
@@ -92,6 +93,51 @@ export async function colocarTakeProfitV3(
   }
 }
 
+export interface ModificacionTakeProfit {
+  /** El de la orden `tpsl` que ya esta puesta. Sale de `planesPendientesV3`. */
+  orderId: string;
+  /** Cantidad que cubre la orden. Bitget la exige al modificar. */
+  qty: string;
+  precioDisparo: string;
+}
+
+/**
+ * Cambia el precio de un Take Profit UTA **que ya esta puesto**, sin quitarlo.
+ *
+ * --------------------------------------------------------------------------
+ * Por que modificar y no cancelar + colocar
+ * --------------------------------------------------------------------------
+ * En V2 cambiar el Take Profit es cancelar el viejo y colocar el nuevo. En UTA
+ * la segunda mitad nunca entra (`31008`, ver `colocarTakeProfitV3`), asi que
+ * ese mismo camino dejaba la posicion **sin** Take Profit: cancelaba con exito
+ * y luego fallaba al colocar. Capturado el 03/10/2026 en la bitacora.
+ *
+ * `modify-strategy-order` toca la orden existente: si Bitget lo rechaza, la
+ * posicion se queda con el Take Profit que tenia.
+ */
+export function modificarTakeProfitV3(
+  cliente: ClienteBitget,
+  credencial: Credencial,
+  mod: ModificacionTakeProfit
+): Promise<RespuestaRest<unknown>> {
+  return cliente.peticionFirmada(
+    credencial,
+    {
+      metodo: 'POST',
+      ruta: '/api/v3/trade/modify-strategy-order',
+      cuerpo: {
+        orderId: mod.orderId,
+        qty: mod.qty,
+        takeProfit: mod.precioDisparo,
+        tpTriggerBy: 'market',
+        tpOrderType: 'market'
+      },
+      idempotente: false
+    },
+    zod.unknown()
+  );
+}
+
 /** `31008 · There is no position in this position`. Ver `colocarTakeProfitV3`. */
 const RECHAZO_TP_SEPARADO = '31008';
 
@@ -129,7 +175,9 @@ const esquemaEstrategiaV3 = zod.object({
   posSide: zod.string().nullish(),
   status: zod.string().nullish(),
   takeProfit: zod.string().nullish(),
-  stopLoss: zod.string().nullish()
+  stopLoss: zod.string().nullish(),
+  /** Obligatorio en `modify-strategy-order`. Ver `modificarTakeProfitV3`. */
+  qty: zod.string().nullish()
 });
 
 const esquemaEstrategiasV3 = esquemaListaV3(esquemaEstrategiaV3);
@@ -209,7 +257,8 @@ export async function planesPendientesV3(
         triggerPrice: tp ? o.takeProfit : o.stopLoss,
         posSide: o.posSide,
         holdSide: null,
-        status: o.status
+        status: o.status,
+        qty: o.qty
       };
     });
 }
