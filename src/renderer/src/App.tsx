@@ -10,6 +10,7 @@ import { DialogoRestaurarRespaldo } from '@/features/panel/DialogoRestaurarRespa
 import { DialogoColores } from '@/features/panel/DialogoColores';
 import { DialogoPlan } from '@/features/panel/DialogoPlan';
 import { DialogoSeguridad } from '@/features/panel/DialogoSeguridad';
+import { DialogoTope } from '@/features/panel/DialogoTope';
 import { Encabezado } from '@/features/panel/Encabezado';
 import { MatrizCuentas } from '@/features/panel/MatrizCuentas';
 import { ModalDetalleSubcuenta } from '@/features/panel/ModalDetalleSubcuenta';
@@ -86,6 +87,7 @@ export default function App() {
       <BuscadorActivos />
       <DialogoSeguridad />
       <DialogoColores />
+      <DialogoTope />
       <DialogoPlan />
       <ModalDetalleSubcuenta />
       {pantalla === 'login' && <PantallaDesbloqueo />}

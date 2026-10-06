@@ -14,6 +14,7 @@ import type {
   SaldosPantalla,
   CuentaPanel,
   EstadoApp,
+  EstadoTopeIpc,
   EstadoVault,
   ResultadoImportacionIpc,
   RespaldoDisponibleIpc,
@@ -99,6 +100,9 @@ export const api: ApiPcb = {
   pasoComprobar: (contrasena) =>
     ipcRenderer.invoke('paso:comprobar', contrasena) as Promise<boolean>,
   pasoFijar: (contrasena) => ipcRenderer.invoke('paso:fijar', contrasena) as Promise<void>,
+
+  topeEstado: () => ipcRenderer.invoke('tope:estado') as Promise<EstadoTopeIpc>,
+  topeFijar: (valor) => ipcRenderer.invoke('tope:fijar', valor) as Promise<EstadoTopeIpc>,
 
   aperturaPlanificar: (peticion) =>
     ipcRenderer.invoke('apertura:planificar', peticion) as Promise<PlanAperturaIpc>,

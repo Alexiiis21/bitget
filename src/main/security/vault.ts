@@ -160,13 +160,32 @@ const esquemaPaso = z.object({
 
 type PasoGuardado = z.infer<typeof esquemaPaso>;
 
+/**
+ * El tope de margen inicial del panel. Ver `domain/tope-margen.ts`.
+ *
+ * Vive aqui, dentro del payload cifrado y autenticado, por la misma razon que
+ * la contrasena de paso y por una mas: el tope solo protege si **no se puede
+ * cambiar** durante 24 horas. En un archivo aparte bastaria un editor de texto
+ * para saltarselo; aqui, cualquier cambio fuera del panel rompe la etiqueta de
+ * autenticacion y el almacen no abre. El almacen no decide nada sobre el tope:
+ * solo lo guarda. Las reglas son de `Sesion`.
+ */
+const esquemaTope = z.object({
+  valor: z.string(),
+  fijadoEn: z.string()
+});
+
+type TopeGuardado = z.infer<typeof esquemaTope>;
+
 const esquemaPayload = z.object({
   version: z.number().int().positive(),
   credenciales: z.array(esquemaCredencialGuardada),
   /** Ausente en almacenes creados antes de que existiera la contrasena de paso. */
   paso: esquemaPaso.nullish(),
   /** Ausente en almacenes v1, anteriores a la funcion de traspasos. */
-  madres: z.array(esquemaCredencialMadre).nullish()
+  madres: z.array(esquemaCredencialMadre).nullish(),
+  /** Ausente en almacenes creados antes del tope: el panel lo pide al entrar. */
+  tope: esquemaTope.nullish()
 });
 
 /* ---------- errores ---------- */
@@ -251,6 +270,7 @@ export class Vault {
   private credenciales: CredencialGuardada[];
   private madres: CredencialMadreGuardada[];
   private paso: PasoGuardado | null;
+  private tope: TopeGuardado | null;
   private cerrado = false;
 
   private constructor(
@@ -259,7 +279,8 @@ export class Vault {
     kdf: ParametrosKdf,
     credenciales: CredencialGuardada[],
     paso: PasoGuardado | null = null,
-    madres: CredencialMadreGuardada[] = []
+    madres: CredencialMadreGuardada[] = [],
+    tope: TopeGuardado | null = null
   ) {
     this.ruta = ruta;
     this.clave = clave;
@@ -267,6 +288,7 @@ export class Vault {
     this.credenciales = credenciales;
     this.madres = madres;
     this.paso = paso;
+    this.tope = tope;
     for (const c of credenciales) this.marcarSecretos(c);
     for (const m of madres) this.marcarSecretos(m);
   }
@@ -376,7 +398,8 @@ export class Vault {
       archivo.kdf,
       payload.credenciales,
       payload.paso ?? null,
-      payload.madres ?? []
+      payload.madres ?? [],
+      payload.tope ?? null
     );
   }
 
@@ -630,6 +653,25 @@ export class Vault {
     return true;
   }
 
+  /* ---- tope de margen inicial ---- */
+
+  /** El tope guardado, o `null` si nunca se fijo. Copia: no se toca desde fuera. */
+  topeMargen(): TopeGuardado | null {
+    this.exigirAbierto();
+    return this.tope === null ? null : { ...this.tope };
+  }
+
+  /**
+   * Anota el tope en memoria. Hay que llamar a `guardar()` despues.
+   *
+   * No comprueba si el anterior seguia vigente: esa regla es de `Sesion`, que
+   * es quien sabe que hora es.
+   */
+  fijarTopeMargen(tope: TopeGuardado): void {
+    this.exigirAbierto();
+    this.tope = { valor: tope.valor, fijadoEn: tope.fijadoEn };
+  }
+
   /* ---- persistencia ---- */
 
   /** Cifra y escribe. Rota el respaldo antes de tocar el archivo bueno. */
@@ -641,7 +683,8 @@ export class Vault {
         version: VERSION_ACTUAL,
         credenciales: this.credenciales,
         paso: this.paso,
-        madres: this.madres
+        madres: this.madres,
+        tope: this.tope
       }),
       'utf8'
     );

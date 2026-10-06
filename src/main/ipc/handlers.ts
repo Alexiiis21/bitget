@@ -373,6 +373,9 @@ const esquemaAltaMadre = z.object({
   passphrase: z.string().min(1).max(256)
 });
 
+/* El valor se valida de verdad en `domain/tope-margen.ts`; aqui solo la forma. */
+const esquemaTope = z.string().min(1).max(32);
+
 const esquemaObjetivo = z.object({
   cuentaId: z.string().min(1).max(128),
   lado: z.enum(['long', 'short'])
@@ -822,6 +825,9 @@ export function registrarIpc(
   ipcMain.handle('paso:fijar', (_e, contrasena: unknown) =>
     sesion.fijarPaso(esquemaContrasena.parse(contrasena))
   );
+
+  ipcMain.handle('tope:estado', () => sesion.estadoTopeMargen());
+  ipcMain.handle('tope:fijar', (_e, valor: unknown) => sesion.fijarTopeMargen(esquemaTope.parse(valor)));
 
   ipcMain.handle('apertura:planificar', async (_e, peticion: unknown) => {
     const plan = await sesion.planificarApertura(esquemaApertura.parse(peticion));

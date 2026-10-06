@@ -203,6 +203,7 @@ function enrutar(
     ]);
 
   exchange.responderCon((p) => {
+    if (p.url.startsWith('/api/v2/public/time')) return { cuerpo: sobreOk({ serverTime: String(Date.now()) }) };
     if (p.url.startsWith('/api/v2/mix/market/contracts')) return { cuerpo: sobreOk([CONTRATO]) };
     if (p.url.startsWith('/api/v2/mix/market/ticker')) return { cuerpo: sobreOk(TICKER) };
     /*
@@ -259,6 +260,13 @@ beforeEach(async () => {
    * fuente de cuentas, que es la que resuelve cada subcuenta.
    */
   await sesion.crear('contrasena-de-prueba');
+
+  /*
+   * Un tope de margen holgado: sin tope no se abre nada, y estas pruebas no son
+   * del tope. Fijarlo pregunta la hora a Bitget; `enrutar` la sigue dando.
+   */
+  enrutar();
+  await sesion.fijarTopeMargen('1000');
 });
 
 afterEach(async () => {

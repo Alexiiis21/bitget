@@ -32,6 +32,7 @@ import type {
   CloseRequest,
   DeleteOutcome,
   LeverageRequest,
+  MarginCap,
   MarginRequest,
   OpenRequest,
   ParentAccount,
@@ -59,6 +60,7 @@ import type {
 import type {
   ActivoIpc,
   CuentaPanel,
+  EstadoTopeIpc,
   MadreIpc,
   PlanRepartoIpc,
   PlanTraspasoIpc
@@ -301,6 +303,20 @@ const aResultado = (label: string, lote: Lote): BatchResult => {
     undetermined: de('indeterminada')
   };
 };
+
+const ESTADO_TOPE: Record<EstadoTopeIpc['estado'], MarginCap['status']> = {
+  'sin-tope': 'missing',
+  vigente: 'active',
+  vencido: 'expired'
+};
+
+const aTope = (t: EstadoTopeIpc): MarginCap => ({
+  status: ESTADO_TOPE[t.estado],
+  value: t.valor,
+  setAt: t.fijadoEn,
+  expiresAt: t.venceEn,
+  currency: t.monedaMargen
+});
 
 /** Traduce el `motivo` crudo de `ErrorVault` (proceso principal) a texto para el operador. */
 const MOTIVO_VAULT_A_TEXTO: Record<string, string> = {
@@ -724,6 +740,16 @@ export class IpcPanelService implements PanelService {
 
   async hasStepPassword(): Promise<boolean> {
     return window.pcb.pasoHay();
+  }
+
+  /* ---------------- tope de margen inicial ---------------- */
+
+  async getMarginCap(): Promise<MarginCap> {
+    return aTope(await window.pcb.topeEstado());
+  }
+
+  async setMarginCap(value: string): Promise<MarginCap> {
+    return aTope(await window.pcb.topeFijar(value));
   }
 
   /**
