@@ -27,6 +27,7 @@
     "test:staging": "vitest run --config vitest.staging.config.ts",
     "test:fisica": "vitest run --config vitest.fisica.config.ts --disable-console-intercept",
     "importar:subcuentas": "vitest run --config vitest.importar.config.ts",
+    "diagnosticar:datos": "vitest run --config vitest.diagnostico.config.ts --disable-console-intercept",
     "test:e2e": "npm run build && playwright test",
     "build": "npm run typecheck && electron-vite build",
     "build:staging": "npm run typecheck && electron-vite build --mode staging",
