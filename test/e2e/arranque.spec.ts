@@ -118,6 +118,32 @@ test('los seis canales de operacion existen y ninguno opera con el panel bloquea
 });
 
 /*
+ * El tope de margen inicial vive dentro del almacen cifrado. Con el panel
+ * bloqueado no se puede leer ni, sobre todo, fijar: fijarlo sin la maestra
+ * permitiria a cualquiera cambiar el freno del panel.
+ */
+test('el tope de margen no se lee ni se fija con el panel bloqueado', async () => {
+  const respuestas = await ventana.evaluate(async () => {
+    const intentar = async (f: () => Promise<unknown>): Promise<string> => {
+      try {
+        await f();
+        return 'RESPONDIO';
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    };
+    return {
+      estado: await intentar(() => window.pcb.topeEstado()),
+      fijar: await intentar(() => window.pcb.topeFijar('1'))
+    };
+  });
+
+  for (const [canal, mensaje] of Object.entries(respuestas)) {
+    expect(mensaje, canal).toContain('bloqueado');
+  }
+});
+
+/*
  * El catalogo es publico: no necesita credenciales ni almacen abierto, y por eso
  * la pantalla puede dibujar el selector de activo antes de desbloquear. Trae los
  * simbolos del mercado simulado, que es donde arranca un panel nuevo.

@@ -114,6 +114,16 @@ export const REINTENTO_CONCURRENCIA = 4;
  */
 export const PLAN_VIGENCIA_MS = 120_000;
 
+/**
+ * Cuanto dura el tope de margen inicial desde que se fija.
+ *
+ * Peticion del cliente del 6 de octubre de 2026: el operador fija antes de
+ * operar el margen inicial maximo del panel, y durante 24 horas no puede
+ * cambiarlo -ni subirlo ni bajarlo-. Pasado el plazo, el panel vuelve a
+ * pedirlo antes de dejar abrir nada. Ver `domain/tope-margen.ts`.
+ */
+export const TOPE_MARGEN_VIGENCIA_MS = 24 * 60 * 60 * 1000;
+
 /* ---------- Interfaz ---------- */
 /** Retardo del boton de confirmacion, contra el doble clic reflejo. docs/04 W-09. */
 export const CONFIRMACION_RETARDO_MS = 2_000;

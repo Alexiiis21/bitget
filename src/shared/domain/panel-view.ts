@@ -293,6 +293,24 @@ export interface UnlockResult {
 
 /* ---------- sistema ---------- */
 
+/**
+ * Tope de margen inicial del panel.
+ *
+ * Lo fija el operador antes de operar y queda fijo 24 horas: ninguna apertura
+ * puede llevar más margen inicial por casilla. `missing` es un panel recién
+ * instalado; `expired`, uno cuyo tope cumplió sus 24 horas. En los dos casos
+ * no se abre nada hasta fijar otro. Ver `main/domain/tope-margen.ts`.
+ */
+export interface MarginCap {
+  status: 'missing' | 'active' | 'expired';
+  value: Decimal | null;
+  setAt: string | null;
+  /** Desde cuándo se puede fijar otro, en ISO 8601. */
+  expiresAt: string | null;
+  /** USDT en el mercado real, SUSDT en el simulado. */
+  currency: string;
+}
+
 export interface SystemInfo {
   appVersion: string;
   /** Número visible del panel. Editable por el operador; no es el id de instancia. */

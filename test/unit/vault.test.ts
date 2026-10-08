@@ -351,3 +351,33 @@ describe('integracion con la redaccion de logs', () => {
     expect(redactada).not.toContain(CREDENCIAL.passphrase);
   });
 });
+
+describe('tope de margen inicial', () => {
+  it('un almacen nuevo no tiene tope', async () => {
+    const v = await crear();
+    expect(v.topeMargen()).toBeNull();
+  });
+
+  it('se guarda cifrado y vuelve igual al reabrir', async () => {
+    const v = await crear();
+    v.fijarTopeMargen({ valor: '0.5', fijadoEn: '2026-10-06T09:00:00.000Z' });
+    await v.guardar();
+    v.cerrar();
+
+    /* En claro no aparece: va dentro del payload autenticado. */
+    expect(await readFile(ruta, 'utf8')).not.toContain('2026-10-06T09:00:00.000Z');
+
+    const otra = await Vault.abrir(ruta, CONTRASENA);
+    expect(otra.topeMargen()).toEqual({ valor: '0.5', fijadoEn: '2026-10-06T09:00:00.000Z' });
+  });
+
+  it('lo que devuelve es una copia: no se cambia desde fuera', async () => {
+    const v = await crear();
+    v.fijarTopeMargen({ valor: '1', fijadoEn: '2026-10-06T09:00:00.000Z' });
+
+    const leido = v.topeMargen();
+    if (leido !== null) leido.valor = '1000';
+
+    expect(v.topeMargen()?.valor).toBe('1');
+  });
+});

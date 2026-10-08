@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import { FUENTE, T } from '@/lib/tokens';
 import { usarPanel } from '@/store/panel';
 
@@ -15,6 +15,7 @@ const barra: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'space-between',
+  gap: 16,
   padding: '12px 20px',
   background: T.marca,
   color: '#ffffff'
@@ -73,6 +74,72 @@ function DistintivoMercado() {
   );
 }
 
+/** «13 h 20 min», «45 min»: lo que falta hasta una fecha ISO. */
+function faltaHasta(iso: string, ahora: number): string {
+  const min = Math.max(0, Math.floor((Date.parse(iso) - ahora) / 60_000));
+  const h = Math.floor(min / 60);
+  return h > 0 ? `${h} h ${min % 60} min` : `${min} min`;
+}
+
+/**
+ * El tope de margen inicial, a la vista y siempre.
+ *
+ * Vigente dice cuánto es y cuánto le queda; sin tope o vencido va en ámbar y
+ * abre el diálogo que lo pide. Mientras está vigente no se puede tocar, así que
+ * pulsarlo no hace nada: el título lo explica.
+ */
+function DistintivoTope() {
+  const tope = usarPanel((s) => s.tope);
+  const abrirTope = usarPanel((s) => s.abrirTope);
+  const [ahora, fijarAhora] = useState(() => Date.now());
+
+  /* Se reinicia al cambiar el tope: recién fijado debe decir 23 h 59 min, no lo de hace medio minuto. */
+  useEffect(() => {
+    const ya = setTimeout(() => fijarAhora(Date.now()), 0);
+    const t = setInterval(() => fijarAhora(Date.now()), 30_000);
+    return () => {
+      clearTimeout(ya);
+      clearInterval(t);
+    };
+  }, [tope]);
+
+  if (tope === null) return null;
+
+  const vigente = tope.status === 'active';
+  const texto = vigente
+    ? `TOPE ${tope.value ?? '—'} ${tope.currency} · ${faltaHasta(tope.expiresAt ?? '', ahora)}`
+    : tope.status === 'expired'
+      ? 'TOPE VENCIDO'
+      : 'SIN TOPE';
+
+  return (
+    <button
+      type="button"
+      onClick={vigente ? undefined : abrirTope}
+      title={
+        vigente
+          ? `Margen inicial máximo por casilla. No se puede cambiar hasta ${new Date(tope.expiresAt ?? '').toLocaleString('es-MX')}.`
+          : 'No se pueden abrir posiciones hasta fijar el margen inicial máximo. Pulse para fijarlo.'
+      }
+      style={{
+        padding: '3px 9px',
+        borderRadius: 6,
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: '.1em',
+        whiteSpace: 'nowrap',
+        fontFamily: FUENTE.mono,
+        cursor: vigente ? 'default' : 'pointer',
+        border: `1px solid ${vigente ? '#ffffff2e' : '#f2b705'}`,
+        background: vigente ? '#ffffff14' : '#f2b70533',
+        color: vigente ? '#95c9ea' : '#ffe08a'
+      }}
+    >
+      {texto}
+    </button>
+  );
+}
+
 /**
  * Estado de conexión del panel, a partir de las subcuentas registradas.
  *
@@ -110,7 +177,7 @@ export function Encabezado() {
 
   return (
     <div style={barra}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, minWidth: 0 }}>
         <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.14em', color: '#8ccdf5', fontFamily: FUENTE.mono }}>
           PCB
         </span>
@@ -145,14 +212,19 @@ export function Encabezado() {
           />
         </span>
         <DistintivoMercado />
+        <DistintivoTope />
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      {/*
+        * El lado derecho no se encoge: con poco ancho, «en línea» se partía en dos
+        * renglones y se montaba sobre lo de al lado. Cede el izquierdo.
+        */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 'none' }}>
         <div
           title="Estado de las credenciales registradas, según la última comprobación contra Bitget"
-          style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#95c9ea' }}
+          style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#95c9ea', whiteSpace: 'nowrap' }}
         >
-          <span style={{ width: 7, height: 7, borderRadius: '50%', background: conexion.color, display: 'block' }} />
+          <span style={{ flex: 'none', width: 7, height: 7, borderRadius: '50%', background: conexion.color, display: 'block' }} />
           {conexion.texto}
         </div>
 

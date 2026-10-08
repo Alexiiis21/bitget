@@ -5,6 +5,7 @@ import type {
   CanalEvento,
   CuentaPanel,
   EstadoApp,
+  EstadoTopeIpc,
   EstadoVault,
   EventosIpc,
   FilaCuenta,
@@ -57,6 +58,9 @@ export const api: ApiPcb = {
   pasoHay: () => ipcRenderer.invoke('paso:hay') as Promise<boolean>,
   pasoComprobar: (contrasena) => ipcRenderer.invoke('paso:comprobar', contrasena) as Promise<boolean>,
   pasoFijar: (contrasena) => ipcRenderer.invoke('paso:fijar', contrasena) as Promise<void>,
+
+  topeEstado: () => ipcRenderer.invoke('tope:estado') as Promise<EstadoTopeIpc>,
+  topeFijar: (valor) => ipcRenderer.invoke('tope:fijar', valor) as Promise<EstadoTopeIpc>,
 
   aperturaPlanificar: (peticion) =>
     ipcRenderer.invoke('apertura:planificar', peticion) as Promise<PlanAperturaIpc>,

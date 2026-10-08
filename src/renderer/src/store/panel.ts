@@ -27,6 +27,7 @@ import type {
   BatchResult,
   BatchTarget,
   ClosedPosition,
+  MarginCap,
   PlanKind,
   Position,
   Side
@@ -74,7 +75,12 @@ const textoDeError = (e: unknown): string => {
   if (e instanceof NotImplementedError) {
     return 'Esta función todavía no está conectada al proceso principal (backend pendiente).';
   }
-  return e instanceof Error ? e.message : 'Fallo inesperado del panel.';
+  if (!(e instanceof Error)) return 'Fallo inesperado del panel.';
+  /*
+   * Electron antepone a todo error del proceso principal «Error invoking remote
+   * method 'canal': ErrorPlan: ». Al operador solo le sirve lo que va después.
+   */
+  return e.message.replace(/^Error invoking remote method '[^']*': (?:\w*Error: )?/, '');
 };
 
 const CLAVE_TEMA = 'pcb.tema';
@@ -89,6 +95,13 @@ let secuenciaAviso = 0;
 let cancelarPrecios: (() => void) | undefined;
 let cancelarPosiciones: (() => void) | undefined;
 let cancelarCuentas: (() => void) | undefined;
+let temporizadorTope: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * El mayor retardo que admite `setTimeout`. Un tope vence a las 24 horas, muy
+ * por debajo; el recorte solo evita que una fecha absurda dispare al instante.
+ */
+const RETARDO_MAXIMO_MS = 2_147_483_647;
 
 export interface EstadoPanel {
   /* ---- sesión ---- */
@@ -205,6 +218,19 @@ export interface EstadoPanel {
   pasoNuevo: string;
   pasoNuevo2: string;
 
+  /* ---- tope de margen inicial ---- */
+  /**
+   * Lo que dice el proceso principal del tope. `null` hasta la primera
+   * consulta tras desbloquear.
+   */
+  tope: MarginCap | null;
+  /** Diálogo que pide el tope: abierto al entrar sin tope o cuando vence. */
+  topeAbierto: boolean;
+  topeValor: string;
+  topeValor2: string;
+  errorTope: string;
+  guardandoTope: boolean;
+
   /* ---- confirmación de la operación ---- */
   pinPaso: string;
   errorPaso: string;
@@ -262,6 +288,13 @@ export interface EstadoPanel {
   verificarMaestra: () => Promise<void>;
   escribirPasoNuevo: (campo: 'pasoNuevo' | 'pasoNuevo2', v: string) => void;
   guardarPaso: () => Promise<void>;
+
+  /** Pregunta el tope al proceso principal; con `pedir`, abre el diálogo si falta o venció. */
+  refrescarTope: (pedir: boolean) => Promise<void>;
+  abrirTope: () => void;
+  cerrarTope: () => void;
+  escribirTope: (campo: 'topeValor' | 'topeValor2', v: string) => void;
+  guardarTope: () => Promise<void>;
 
   alternarCmp: (accountId: string) => void;
   alternarHist: (accountId: string) => Promise<void>;
@@ -379,6 +412,13 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   pasoNuevo: '',
   pasoNuevo2: '',
 
+  tope: null,
+  topeAbierto: false,
+  topeValor: '',
+  topeValor2: '',
+  errorTope: '',
+  guardandoTope: false,
+
   pinPaso: '',
   errorPaso: '',
   intentosPaso: 0,
@@ -431,6 +471,13 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
       set({ pantalla: 'panel', contrasena: '', errorContrasena: '' });
       avisar('ok', 'Sesión iniciada', 'Verificando las API keys registradas de las subcuentas.', `PCB #${numeroPanel}`);
+
+      /*
+       * Lo primero tras entrar: el tope de margen inicial. Un panel recién
+       * instalado no tiene, y uno que lleva más de 24 horas sin fijarlo lo
+       * tiene vencido; en los dos casos se pide aquí, antes de operar.
+       */
+      await get().refrescarTope(true);
 
       set({ cargaCuentas: 'cargando', motivoCuentas: null });
       try {
@@ -487,6 +534,8 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   },
 
   bloquear: () => {
+    clearTimeout(temporizadorTope);
+    temporizadorTope = undefined;
     cancelarPosiciones?.();
     cancelarPosiciones = undefined;
     cancelarCuentas?.();
@@ -513,7 +562,12 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       cargaApis: 'inicial',
       motivoApis: null,
       cargaHistorial: {},
-      historial: {}
+      historial: {},
+      tope: null,
+      topeAbierto: false,
+      topeValor: '',
+      topeValor2: '',
+      errorTope: ''
     });
   },
 
@@ -660,6 +714,18 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
     if (targets.length === 0) {
       avisar('aviso', 'Ninguna casilla seleccionada', 'Marque al menos una casilla sobre los números 1–20 antes de continuar.', `PCB · ${titulo}`);
+      return;
+    }
+
+    /*
+     * Sin tope vigente no se abre nada: el proceso principal lo rechazaría
+     * igual, pero aquí se le pide el tope en vez de enseñarle un error. El
+     * resto de operaciones no dependen del tope -agregar margen tampoco, por
+     * decisión del cliente-.
+     */
+    if (kind === 'open' && get().tope?.status !== 'active') {
+      get().abrirTope();
+      avisar('aviso', 'Falta el tope de margen inicial', 'Fije el margen inicial máximo del panel antes de abrir posiciones.', `PCB · ${titulo}`);
       return;
     }
 
@@ -1013,6 +1079,83 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       avisar('ok', 'Contraseña de paso actualizada', 'Se pedirá esta clave cada vez que se abra o se cierre una posición.', 'Seguridad');
     } catch (e) {
       set({ errorSeguridad: textoDeError(e) });
+    }
+  },
+
+  /* ---------------- tope de margen inicial ---------------- */
+
+  refrescarTope: async (pedir) => {
+    let tope: MarginCap;
+    try {
+      tope = await panelService.getMarginCap();
+    } catch (e) {
+      get().avisar('error', 'No se pudo leer el tope de margen', textoDeError(e), 'Tope de margen');
+      return;
+    }
+    set({ tope });
+
+    /*
+     * Al vencer con el panel abierto, se vuelve a preguntar y se pide el tope
+     * nuevo sin esperar a que el operador intente abrir algo. Un segundo de
+     * holgura evita preguntar justo en el borde, cuando el proceso principal
+     * todavía podría contestar «vigente».
+     */
+    clearTimeout(temporizadorTope);
+    temporizadorTope = undefined;
+    if (tope.status === 'active' && tope.expiresAt !== null) {
+      const falta = Date.parse(tope.expiresAt) - Date.now() + 1_000;
+      temporizadorTope = setTimeout(
+        () => void get().refrescarTope(true),
+        Math.min(Math.max(falta, 1_000), RETARDO_MAXIMO_MS)
+      );
+    }
+
+    if (pedir && tope.status !== 'active') get().abrirTope();
+  },
+
+  abrirTope: () => set({ topeAbierto: true, topeValor: '', topeValor2: '', errorTope: '' }),
+  cerrarTope: () => set({ topeAbierto: false, topeValor: '', topeValor2: '', errorTope: '' }),
+  escribirTope: (campo, v) => set({ [campo]: v, errorTope: '' } as Pick<EstadoPanel, typeof campo | 'errorTope'>),
+
+  /**
+   * Fija el tope. Se escribe dos veces, como una contraseña.
+   *
+   * Es justo el número que no se puede corregir durante 24 horas: un error de
+   * tecleo aquí deja el panel un día entero con el tope equivocado. La coma se
+   * acepta como separador decimal y se envía como punto.
+   */
+  guardarTope: async () => {
+    const { topeValor, topeValor2, guardandoTope, avisar } = get();
+    if (guardandoTope) return;
+
+    const valor = topeValor.trim().replace(',', '.');
+    const valor2 = topeValor2.trim().replace(',', '.');
+    if (valor === '') {
+      set({ errorTope: 'Escriba el margen inicial máximo.' });
+      return;
+    }
+    if (valor !== valor2) {
+      set({ errorTope: 'Los dos valores no coinciden. Escríbalo igual en los dos campos.' });
+      return;
+    }
+
+    set({ guardandoTope: true });
+    try {
+      const tope = await panelService.setMarginCap(valor);
+      set({ topeAbierto: false, topeValor: '', topeValor2: '', errorTope: '' });
+      await get().refrescarTope(false);
+      avisar(
+        'ok',
+        'Tope de margen fijado',
+        `Ninguna apertura podrá llevar más de ${tope.value ?? valor} ${tope.currency} de margen inicial por casilla durante las próximas 24 horas.`,
+        'Tope de margen'
+      );
+    } catch (e) {
+      set({ errorTope: textoDeError(e) });
+      /* Si el motivo es que sigue vigente, que la pantalla lo refleje. */
+      await get().refrescarTope(false);
+    } finally {
+      set({ guardandoTope: false });
     }
   },
 
