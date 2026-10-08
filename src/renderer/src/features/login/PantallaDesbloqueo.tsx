@@ -1,4 +1,4 @@
-import type { CSSProperties, KeyboardEvent } from 'react';
+import { useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { BOTON_PRIMARIO, CAJA_ERROR, FUENTE, SOMBRA, T, VELO } from '@/lib/tokens';
 import { usarPanel } from '@/store/panel';
 
@@ -19,6 +19,12 @@ export function PantallaDesbloqueo() {
   const error = usarPanel((s) => s.errorContrasena);
   const escribir = usarPanel((s) => s.escribirContrasena);
   const desbloquear = usarPanel((s) => s.desbloquear);
+  /*
+   * Ver la contraseña mientras se escribe. Es estado de este componente y no
+   * del store a propósito: al desbloquear o bloquear la pantalla se desmonta y
+   * el campo vuelve a ocultarse solo, sin que nadie tenga que acordarse.
+   */
+  const [visible, fijarVisible] = useState(false);
 
   const alPulsarTecla = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') void desbloquear();
@@ -40,16 +46,30 @@ export function PantallaDesbloqueo() {
         <div style={{ padding: '22px 26px 26px', display: 'flex', flexDirection: 'column', gap: 14 }}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 11.5, fontWeight: 600, letterSpacing: '.06em', color: T.texto3 }}>
             CONTRASEÑA
-            <input
-              className="pcb-campo"
-              type="password"
-              placeholder="••••••••"
-              value={contrasena}
-              onChange={(e) => escribir(e.target.value)}
-              onKeyDown={alPulsarTecla}
-              autoFocus
-              style={{ padding: '12px 13px', borderRadius: 9, border: `1px solid ${T.bordeFuerte}`, fontSize: 15, fontWeight: 500, letterSpacing: '.18em', background: T.campoFondo, color: T.campoTexto, outline: 'none' }}
-            />
+            <span style={{ position: 'relative', display: 'flex' }}>
+              <input
+                className="pcb-campo"
+                type={visible ? 'text' : 'password'}
+                placeholder="••••••••"
+                value={contrasena}
+                onChange={(e) => escribir(e.target.value)}
+                onKeyDown={alPulsarTecla}
+                autoFocus
+                autoComplete="current-password"
+                spellCheck={false}
+                style={{ flex: 1, minWidth: 0, padding: '12px 92px 12px 13px', borderRadius: 9, border: `1px solid ${T.bordeFuerte}`, fontSize: 15, fontWeight: 500, letterSpacing: visible ? '.04em' : '.18em', fontFamily: visible ? FUENTE.mono : undefined, background: T.campoFondo, color: T.campoTexto, outline: 'none' }}
+              />
+              <button
+                type="button"
+                onClick={() => fijarVisible((v) => !v)}
+                aria-pressed={visible}
+                aria-label={visible ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                title={visible ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', padding: '5px 9px', borderRadius: 6, border: `1px solid ${T.bordeFuerte}`, background: T.superficie, color: T.texto2, fontSize: 11.5, fontWeight: 600, letterSpacing: 0, cursor: 'pointer' }}
+              >
+                {visible ? 'Ocultar' : 'Mostrar'}
+              </button>
+            </span>
           </label>
 
           {error !== '' && (
