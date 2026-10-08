@@ -15,6 +15,7 @@ const barra: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'space-between',
+  gap: 16,
   padding: '12px 20px',
   background: T.marca,
   color: '#ffffff'
@@ -176,7 +177,7 @@ export function Encabezado() {
 
   return (
     <div style={barra}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, minWidth: 0 }}>
         <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.14em', color: '#8ccdf5', fontFamily: FUENTE.mono }}>
           PCB
         </span>
@@ -214,12 +215,16 @@ export function Encabezado() {
         <DistintivoTope />
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      {/*
+        * El lado derecho no se encoge: con poco ancho, «en línea» se partía en dos
+        * renglones y se montaba sobre lo de al lado. Cede el izquierdo.
+        */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 'none' }}>
         <div
           title="Estado de las credenciales registradas, según la última comprobación contra Bitget"
-          style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#95c9ea' }}
+          style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#95c9ea', whiteSpace: 'nowrap' }}
         >
-          <span style={{ width: 7, height: 7, borderRadius: '50%', background: conexion.color, display: 'block' }} />
+          <span style={{ flex: 'none', width: 7, height: 7, borderRadius: '50%', background: conexion.color, display: 'block' }} />
           {conexion.texto}
         </div>
 
