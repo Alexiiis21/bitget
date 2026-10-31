@@ -9,10 +9,26 @@
  * clasica no. De modo que la deteccion es una pregunta cuya **respuesta esta en
  * si la pregunta se puede hacer**.
  *
- *   exito                      -> uta
- *   accountMode en transicion  -> transicion (no operar)
- *   fallo de negocio           -> classic
- *   fallo de red o 429         -> no se concluye nada; se propaga
+ *   exito, accountMode unified/hybrid  -> uta
+ *   exito, accountMode classic         -> classic si V2 la acepta; si V2 la
+ *                                         rechaza, uta (ver «classic en V3»)
+ *   exito, accountMode en transicion   -> transicion (no operar)
+ *   exito, accountMode desconocido     -> indeterminado (no operar, se anota)
+ *   fallo de negocio                   -> classic
+ *   fallo de red o 429                 -> no se concluye nada; se propaga
+ *
+ * --------------------------------------------------------------------------
+ * «V3 responde» no basta para concluir UTA
+ * --------------------------------------------------------------------------
+ * Capturado el 19/10/2026 sobre ELITE LAURA (bg••••1395): `account/settings`
+ * responde `00000` con `accountMode: "classic"`. Es decir, V3 tambien contesta
+ * a una cuenta clasica y ademas lo **declara**. Hasta entonces todo lo que no
+ * estaba en transicion caia en `uta`, y esa cuenta operaba por V3 con el
+ * Take Profit embebido sin que nadie lo comprobara: el 19/10/2026 el del short
+ * no quedo puesto. Una cuenta que se declara clasica va por V2, que es la
+ * superficie de las cuentas clasicas y la que coloca el Take Profit tras abrir
+ * leyendo la posicion real. Un valor que no se conoce no se adivina: se anota
+ * y la cuenta no opera hasta que alguien lo catalogue.
  *
  * --------------------------------------------------------------------------
  * La distincion que no se puede relajar
@@ -34,6 +50,7 @@ import type { AccountMode, HoldMode } from '@shared/types';
 import { anotarEvento, cuentaDe } from '../diagnostico/bitacora';
 import { ErrorBitget, esErrorDeAutenticacion, esPermisoUtaFaltante } from './errors';
 import { obtenerAjustesCuenta, type ConfigSimbolo } from './rest/endpoints/ajustes-v3';
+import { obtenerInfoCuenta } from './rest/endpoints/cuenta';
 import type { ClienteBitget } from './rest/client';
 import type { Credencial } from './rest/signer';
 
@@ -48,6 +65,14 @@ export type ModoDetectado = AccountMode | 'transicion' | 'indeterminado';
 
 /** Valores de `accountMode` que significan «esta cambiando, no operes». */
 const EN_TRANSICION = new Set(['upgrading', 'switching']);
+
+/** Valores de `accountMode` de una cuenta unificada: va por V3. */
+const UNIFICADA = new Set(['unified', 'hybrid']);
+
+/**
+ * La cuenta responde a V3 y se declara clasica. Va por V2. Ver la cabecera.
+ */
+const CLASICA = 'classic';
 
 export interface ResultadoDeteccion {
   modo: ModoDetectado;
@@ -84,6 +109,38 @@ export interface ResultadoDeteccion {
 function holdModeDe(crudo: string | null | undefined): HoldMode | null {
   if (crudo === 'hedge_mode' || crudo === 'one_way_mode') return crudo;
   return null;
+}
+
+interface SondeoV2 {
+  acepta: boolean;
+  codigo: string | null;
+  mensaje: string | null;
+}
+
+/**
+ * ¿V2 atiende a esta clave? Solo se pregunta cuando V3 dice `classic`.
+ *
+ * Usa `spot/account/info` porque es la primera llamada que hace la
+ * verificacion clasica: si esta falla, el alta por V2 fallaria igual. Un fallo
+ * reintentable se propaga, como en el resto de la deteccion.
+ */
+async function sondearV2(cliente: ClienteBitget, credencial: Credencial): Promise<SondeoV2> {
+  try {
+    await obtenerInfoCuenta(cliente, { ...credencial, superficie: 'v2' });
+    return { acepta: true, codigo: null, mensaje: null };
+  } catch (e) {
+    if (e instanceof ErrorBitget && e.reintentable) throw e;
+    return {
+      acepta: false,
+      codigo: e instanceof ErrorBitget ? e.codigo : null,
+      mensaje:
+        e instanceof ErrorBitget
+          ? (e.mensajeOriginal ?? e.message).slice(0, 200)
+          : e instanceof Error
+            ? e.message.slice(0, 200)
+            : null
+    };
+  }
 }
 
 /**
@@ -223,6 +280,92 @@ export async function detectarModo(
     return {
       ...base,
       modo: 'transicion',
+      accountModeCrudo: crudo,
+      nivel: datos.accountLevel ?? null,
+      uid: datos.uid ?? null
+    };
+  }
+
+  /*
+   * ==========================================================================
+   * «classic» en V3 no garantiza que V2 la acepte
+   * ==========================================================================
+   * Reportado el 27/10/2026: tras mandar a V2 toda cuenta que V3 declara
+   * `classic`, la ELITE UTA del cliente dejo de poder conectarse. V2 la rechaza
+   * con `40731` y el alta salia como «Credenciales invalidas». Los logs del
+   * 17-19/10 muestran que esa misma cuenta operaba sin un solo fallo por V3
+   * -place-order, set-leverage, modify-strategy-order, todo `00000`-.
+   *
+   * Asi que la etiqueta no decide sola: se le pregunta a V2. Si V2 la acepta,
+   * es clasica y va por V2. Si V2 la rechaza por negocio, la unica superficie
+   * que la atiende es V3 y se queda en `uta`, con la etiqueta cruda anotada.
+   */
+  if (crudo === CLASICA) {
+    const sondeo = await sondearV2(cliente, credencial);
+
+    if (sondeo.acepta) {
+      anotarEvento({
+        evento: 'deteccion-modo',
+        datos: {
+          modo: 'classic',
+          causa: 'v3-declara-classic',
+          cuenta: cuentaDe(credencial.apiKey),
+          accountMode: crudo,
+          holdMode: datos.holdMode ?? null,
+          v2: 'acepta'
+        }
+      });
+      return {
+        ...base,
+        accountModeCrudo: crudo,
+        nivel: datos.accountLevel ?? null,
+        uid: datos.uid ?? null
+      };
+    }
+
+    anotarEvento({
+      evento: 'deteccion-modo',
+      datos: {
+        modo: 'uta',
+        causa: 'v3-declara-classic-v2-rechaza',
+        cuenta: cuentaDe(credencial.apiKey),
+        accountMode: crudo,
+        holdMode: datos.holdMode ?? null,
+        simbolosConfigurados: (datos.symbolConfigList ?? []).length,
+        codigoV2: sondeo.codigo,
+        mensajeV2: sondeo.mensaje
+      }
+    });
+    return {
+      modo: 'uta',
+      holdMode: holdModeDe(datos.holdMode),
+      nivel: datos.accountLevel ?? null,
+      accountModeCrudo: crudo,
+      codigoRechazo: null,
+      uid: datos.uid ?? null,
+      configSimbolos: datos.symbolConfigList ?? []
+    };
+  }
+
+  /*
+   * Un valor que no esta catalogado no es `uta` por descarte: eso es justo lo
+   * que enruto a ELITE LAURA por V3. Se corta con `indeterminado`, que no
+   * opera, y el valor crudo queda en la bitacora para catalogarlo.
+   */
+  if (!UNIFICADA.has(crudo)) {
+    anotarEvento({
+      evento: 'deteccion-modo',
+      datos: {
+        modo: 'indeterminado',
+        causa: 'account-mode-desconocido',
+        cuenta: cuentaDe(credencial.apiKey),
+        accountMode: crudo,
+        holdMode: datos.holdMode ?? null
+      }
+    });
+    return {
+      ...base,
+      modo: 'indeterminado',
       accountModeCrudo: crudo,
       nivel: datos.accountLevel ?? null,
       uid: datos.uid ?? null

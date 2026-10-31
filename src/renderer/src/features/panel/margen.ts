@@ -8,32 +8,22 @@ import type { Position } from '@shared/domain/panel-view';
  * sitio para que las dos pantallas no puedan enseñar cifras distintas de la
  * misma punta.
  *
- * El margen inicial es del panel y solo existe si el panel anotó la apertura en
- * esta sesión. Cuando no -la posición ya estaba abierta al arrancar, o se abrió
- * fuera del panel- se enseña el margen que Bitget tiene ahora, que incluye el
- * adicional, y el rótulo lo dice: son dos cifras distintas y no se pueden leer
- * igual. Un guion solo si tampoco Bitget lo mandó.
+ * La cifra es **siempre** la de Bitget (`marginSize` en clásicas,
+ * `positionBalance` en UTA). Hasta la v0.16.5 se prefería el acumulado que
+ * anotaba el panel y Bitget solo entraba de respaldo, y ese acumulado vive en
+ * memoria: tras reiniciar el panel, un reposicionamiento de 0,20 sobre una
+ * posición de 0,40 dejaba la columna en 0,20, porque la apertura la hizo otra
+ * sesión. Reportado por el cliente el 28/10/2026. Un guion solo si Bitget no lo
+ * mandó.
  */
 export interface MargenPunta {
   /** Cifra formateada, o `—` si no se sabe. */
   valor: string;
   titulo: string;
-  /** `true` si la cifra es la de Bitget y no la que anotó el panel. */
-  deBitget: boolean;
 }
 
-const TITULO_MARGEN = 'Margen inicial acumulado: apertura + reposicionamientos.';
-
-const TITULO_MARGEN_BITGET =
-  'Margen actual de la posición en Bitget, con el margen adicional incluido. ' +
-  'El panel no anotó la apertura de esta posición: ya estaba abierta cuando arrancó, o se abrió fuera del panel.';
+const TITULO_MARGEN = 'Margen de la posición según Bitget: apertura + reposicionamientos.';
 
 export function margenDe(posicion: Position | undefined): MargenPunta {
-  if (posicion?.initialMarginAccum != null) {
-    return { valor: importe(posicion.initialMarginAccum), titulo: TITULO_MARGEN, deBitget: false };
-  }
-  if (posicion?.currentMargin != null) {
-    return { valor: importe(posicion.currentMargin), titulo: TITULO_MARGEN_BITGET, deBitget: true };
-  }
-  return { valor: importe(null), titulo: TITULO_MARGEN, deBitget: false };
+  return { valor: importe(posicion?.currentMargin ?? null), titulo: TITULO_MARGEN };
 }

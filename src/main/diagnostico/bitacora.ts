@@ -131,7 +131,7 @@ let cola: Promise<void> = Promise.resolve();
  * Se llama una vez al arrancar el proceso principal. Si la carpeta no se puede
  * crear, la bitácora se queda apagada y el panel funciona igual.
  */
-export async function iniciarBitacora(carpetaDestino?: string): Promise<void> {
+export async function iniciarBitacora(carpetaDestino?: string, version?: string): Promise<void> {
   try {
     /*
      * El destino se puede imponer, y solo lo hacen las pruebas: `rutas()` se
@@ -141,7 +141,15 @@ export async function iniciarBitacora(carpetaDestino?: string): Promise<void> {
     carpeta = carpetaDestino ?? rutas().logs;
     await mkdir(carpeta, { recursive: true });
     activa = true;
-    anotarEvento({ evento: 'arranque', datos: { version: process.env['npm_package_version'] ?? '' } });
+    /*
+     * La versión la pasa `index.ts` con `app.getVersion()`. `npm_package_version`
+     * solo existe bajo `npm run`: en el .exe salía vacía, y el log del cliente
+     * del 17-19/10/2026 no decía qué build corría.
+     */
+    anotarEvento({
+      evento: 'arranque',
+      datos: { version: version ?? process.env['npm_package_version'] ?? '' }
+    });
   } catch {
     activa = false;
   }

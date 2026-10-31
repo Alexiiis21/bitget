@@ -11,6 +11,7 @@
  * llegar viva hasta el vault. docs/02-arquitectura.html.
  */
 import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { app, dialog, ipcMain, shell } from 'electron';
 import Decimal from 'decimal.js';
 import { z } from 'zod';
@@ -33,19 +34,21 @@ import type {
   PlanQuitarTpIpc,
   PlanTakeProfitIpc,
   ResultadoImportacionIpc,
+  ResultadoExportacionIpc,
   RespaldoDisponibleIpc,
   ResultadoRespaldoIpc,
   ResultadoRestauracionIpc
 } from '@shared/ipc-contract';
 import type { PosicionMonitor } from '@shared/types';
 import { UNIDAD_OPERACION } from '../domain/dimension-orden';
-import type {
-  PlanApalancamiento,
-  PlanApertura,
-  PlanCierre,
-  PlanMargen,
-  PlanQuitarTakeProfit,
-  PlanTakeProfit
+import {
+  cierreConPerdida,
+  type PlanApalancamiento,
+  type PlanApertura,
+  type PlanCierre,
+  type PlanMargen,
+  type PlanQuitarTakeProfit,
+  type PlanTakeProfit
 } from '../execution/motor-lotes';
 import { carpetaDatos, carpetaRespaldos, esPortable, rutas } from '../storage/paths';
 import { importarCredenciales } from '../storage/importar-credenciales';
@@ -55,7 +58,7 @@ import {
   leerCabecera,
   restaurarRespaldo
 } from '../storage/respaldo-credenciales';
-import { existe } from '../storage/atomic-write';
+import { escribirAtomico, existe } from '../storage/atomic-write';
 import { fijarNumeroPanel, type Instancia } from '../storage/instancia';
 import type { Sesion } from './sesion';
 
@@ -165,8 +168,10 @@ const aVistaCierre = (plan: PlanCierre): PlanCierreIpc => ({
     lado: e.lado,
     size: e.size,
     precioEntrada: e.precioEntrada,
-    margenLiberado: e.margenLiberado === null ? null : importe(e.margenLiberado)
+    margenLiberado: e.margenLiberado === null ? null : importe(e.margenLiberado),
+    resultadoEstimado: e.resultadoEstimado === null ? null : importe(e.resultadoEstimado)
   })),
+  pidePaso: cierreConPerdida(plan.entradas),
   descartes: plan.descartes.map((d) => ({
     cuentaId: d.cuentaId,
     etiqueta: d.etiqueta,
@@ -375,6 +380,36 @@ const esquemaAltaMadre = z.object({
 
 /* El valor se valida de verdad en `domain/tope-margen.ts`; aqui solo la forma. */
 const esquemaTope = z.string().min(1).max(32);
+
+/*
+ * Periodo del historial. Solo la forma: que la fecha exista en el calendario y
+ * que no este invertido lo comprueba `rangoDePeriodo`, con un mensaje que la
+ * pantalla puede enseñar tal cual.
+ */
+const fechaDia = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const esquemaPeriodo = z.object({ desde: fechaDia, hasta: fechaDia });
+const esquemaFiltroHistorial = z.object({
+  simbolo: z.string().min(1).max(40).nullable(),
+  lado: z.enum(['long', 'short']).nullable(),
+  resultado: z.enum(['todas', 'ganadoras', 'perdedoras'])
+});
+
+/*
+ * Alertas de Telegram. Del token aquí solo se valida el tamaño: el formato lo
+ * comprueba `TelegramHttp` antes de construir la URL, con un mensaje que la
+ * pantalla puede enseñar. El id de chat es un número, negativo en los grupos.
+ */
+const esquemaTokenTelegram = z.string().min(1).max(200);
+const esquemaConfigAlertas = z.object({
+  token: esquemaTokenTelegram,
+  chatId: z.string().regex(/^-?\d{1,20}$/),
+  chatTitulo: z.string().max(200).nullable()
+});
+
+const periodoOpcional = (v: unknown) =>
+  v === undefined || v === null ? undefined : esquemaPeriodo.parse(v);
+const filtroOpcional = (v: unknown) =>
+  v === undefined || v === null ? undefined : esquemaFiltroHistorial.parse(v);
 
 const esquemaObjetivo = z.object({
   cuentaId: z.string().min(1).max(128),
@@ -826,6 +861,76 @@ export function registrarIpc(
     sesion.fijarPaso(esquemaContrasena.parse(contrasena))
   );
 
+  ipcMain.handle('historial:sincronizar', (_e, cuentaId: unknown) =>
+    sesion.sincronizarHistorial(esquemaId.parse(cuentaId))
+  );
+  ipcMain.handle('historial:consultar', (_e, cuentaId: unknown, periodo: unknown, filtro: unknown) =>
+    sesion.consultarHistorial(esquemaId.parse(cuentaId), periodoOpcional(periodo), filtroOpcional(filtro))
+  );
+  /*
+   * El dialogo lo abre el proceso principal y el contenido sale de la misma
+   * consulta que pinta la tabla: la pantalla no puede elegir una ruta ni mandar
+   * lo que se escribe. Mismo criterio que `credenciales:importar`.
+   */
+  ipcMain.handle(
+    'historial:exportar',
+    async (_e, cuentaId: unknown, periodo: unknown, filtro: unknown): Promise<ResultadoExportacionIpc> => {
+      const datos = await sesion.datosExportacion(
+        esquemaId.parse(cuentaId),
+        periodoOpcional(periodo),
+        filtroOpcional(filtro) ?? { simbolo: null, lado: null, resultado: 'todas' },
+        instancia.numero
+      );
+
+      const eleccion = await dialog.showSaveDialog({
+        title: 'Exportar historial a CSV',
+        defaultPath: join(app.getPath('documents'), datos.nombre),
+        filters: [{ name: 'CSV (Excel)', extensions: ['csv'] }],
+        buttonLabel: 'Exportar'
+      });
+      if (eleccion.canceled || eleccion.filePath === undefined || eleccion.filePath === '') {
+        return { cancelado: true, ok: false, ruta: null, filas: datos.filas, mensaje: '' };
+      }
+
+      try {
+        await escribirAtomico(eleccion.filePath, datos.csv);
+        return {
+          cancelado: false,
+          ok: true,
+          ruta: eleccion.filePath,
+          filas: datos.filas,
+          mensaje: `${datos.filas} ${datos.filas === 1 ? 'operación exportada' : 'operaciones exportadas'}.`
+        };
+      } catch (e) {
+        return {
+          cancelado: false,
+          ok: false,
+          ruta: eleccion.filePath,
+          filas: datos.filas,
+          mensaje:
+            'No se pudo escribir el archivo. Si lo tiene abierto en Excel, ciérrelo y vuelva a exportar. ' +
+            `(${e instanceof Error ? e.message : String(e)})`
+        };
+      }
+    }
+  );
+  ipcMain.handle('alertas:estado', () => sesion.estadoAlertas());
+  ipcMain.handle('alertas:buscar-chats', (_e, token: unknown) =>
+    sesion.buscarChatsTelegram(esquemaTokenTelegram.parse(token))
+  );
+  ipcMain.handle('alertas:configurar', (_e, config: unknown, contrasenaPaso: unknown) =>
+    sesion.configurarAlertas(esquemaConfigAlertas.parse(config), esquemaContrasena.parse(contrasenaPaso))
+  );
+  ipcMain.handle('alertas:probar', () => sesion.probarAlertas());
+  ipcMain.handle('alertas:desactivar', (_e, contrasenaPaso: unknown) =>
+    sesion.desactivarAlertas(esquemaContrasena.parse(contrasenaPaso))
+  );
+  ipcMain.handle('alertas:revisar', () => sesion.revisarAlertas());
+
+  ipcMain.handle('saldo:cuenta', (_e, cuentaId: unknown) =>
+    sesion.saldoCuenta(esquemaId.parse(cuentaId))
+  );
+
   ipcMain.handle('tope:estado', () => sesion.estadoTopeMargen());
   ipcMain.handle('tope:fijar', (_e, valor: unknown) => sesion.fijarTopeMargen(esquemaTope.parse(valor)));
 
@@ -848,12 +953,15 @@ export function registrarIpc(
     return aVistaCierre(plan);
   });
 
-  ipcMain.handle('cierre:ejecutar', (_e, planId: unknown, soloEstos: unknown) =>
+  ipcMain.handle('cierre:ejecutar', (_e, planId: unknown, soloEstos: unknown, contrasenaPaso: unknown) =>
     sesion.ejecutarCierre(
       esquemaId.parse(planId),
       soloEstos === undefined || soloEstos === null
         ? undefined
-        : z.array(esquemaObjetivo).parse(soloEstos)
+        : z.array(esquemaObjetivo).parse(soloEstos),
+      contrasenaPaso === undefined || contrasenaPaso === null
+        ? undefined
+        : esquemaContrasena.parse(contrasenaPaso)
     )
   );
 

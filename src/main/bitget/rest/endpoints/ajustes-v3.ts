@@ -50,10 +50,12 @@ const esquemaUid = zod.union([zod.string(), zod.number()]).transform((v) => Stri
 export const esquemaAjustesCuenta = zod.object({
   uid: esquemaUid.nullish(),
   /**
-   * `unified` | `hybrid` | `upgrading` | `switching`.
+   * `unified` | `hybrid` | `classic` | `upgrading` | `switching`.
    *
-   * Los dos ultimos son estados **de transicion**: la cuenta esta cambiando de
-   * modelo y no debe operar hasta que termine. Ver `deteccion-modo.ts`.
+   * `classic` capturado el 19/10/2026: V3 responde a una cuenta clasica y lo
+   * declara aqui. Los dos ultimos son estados **de transicion**: la cuenta esta
+   * cambiando de modelo y no debe operar hasta que termine. Cualquier otro valor
+   * no se interpreta. Ver `deteccion-modo.ts`.
    */
   accountMode: zod.string(),
   assetMode: zod.string().nullish(),

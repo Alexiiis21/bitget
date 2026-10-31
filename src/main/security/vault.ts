@@ -177,6 +177,27 @@ const esquemaTope = z.object({
 
 type TopeGuardado = z.infer<typeof esquemaTope>;
 
+/**
+ * El bot de Telegram de las alertas. Ver `alertas/vigia.ts`.
+ *
+ * El token da control del bot —quien lo tenga puede escribir en el grupo como
+ * si fuera el panel—, así que va cifrado aquí, como las API Keys, y se marca
+ * como secreto para que ningún log lo escupa.
+ *
+ * Sin subir `VERSION_ACTUAL`, como el tope: un ejecutable anterior que
+ * reescriba este almacén perdería la configuración del bot, que se vuelve a
+ * poner en un minuto, pero seguiría abriendo el almacén. Subir la versión
+ * dejaría a ese ejecutable sin poder abrirlo, que es mucho peor.
+ */
+const esquemaTelegram = z.object({
+  token: z.string(),
+  chatId: z.string(),
+  chatTitulo: z.string().nullish(),
+  activadoEn: z.string()
+});
+
+export type TelegramGuardado = z.infer<typeof esquemaTelegram>;
+
 const esquemaPayload = z.object({
   version: z.number().int().positive(),
   credenciales: z.array(esquemaCredencialGuardada),
@@ -185,7 +206,9 @@ const esquemaPayload = z.object({
   /** Ausente en almacenes v1, anteriores a la funcion de traspasos. */
   madres: z.array(esquemaCredencialMadre).nullish(),
   /** Ausente en almacenes creados antes del tope: el panel lo pide al entrar. */
-  tope: esquemaTope.nullish()
+  tope: esquemaTope.nullish(),
+  /** Ausente mientras no se configure un bot de alertas. */
+  telegram: esquemaTelegram.nullish()
 });
 
 /* ---------- errores ---------- */
@@ -271,6 +294,7 @@ export class Vault {
   private madres: CredencialMadreGuardada[];
   private paso: PasoGuardado | null;
   private tope: TopeGuardado | null;
+  private telegram: TelegramGuardado | null;
   private cerrado = false;
 
   private constructor(
@@ -280,7 +304,8 @@ export class Vault {
     credenciales: CredencialGuardada[],
     paso: PasoGuardado | null = null,
     madres: CredencialMadreGuardada[] = [],
-    tope: TopeGuardado | null = null
+    tope: TopeGuardado | null = null,
+    telegram: TelegramGuardado | null = null
   ) {
     this.ruta = ruta;
     this.clave = clave;
@@ -289,6 +314,8 @@ export class Vault {
     this.madres = madres;
     this.paso = paso;
     this.tope = tope;
+    this.telegram = telegram;
+    if (telegram !== null) registrarSecreto(telegram.token);
     for (const c of credenciales) this.marcarSecretos(c);
     for (const m of madres) this.marcarSecretos(m);
   }
@@ -399,7 +426,8 @@ export class Vault {
       payload.credenciales,
       payload.paso ?? null,
       payload.madres ?? [],
-      payload.tope ?? null
+      payload.tope ?? null,
+      payload.telegram ?? null
     );
   }
 
@@ -672,6 +700,21 @@ export class Vault {
     this.tope = { valor: tope.valor, fijadoEn: tope.fijadoEn };
   }
 
+  /* ---- bot de Telegram de las alertas ---- */
+
+  /** El bot guardado, o `null`. Copia: no se toca desde fuera. */
+  telegramConfig(): TelegramGuardado | null {
+    this.exigirAbierto();
+    return this.telegram === null ? null : { ...this.telegram };
+  }
+
+  /** Anota el bot en memoria, o lo quita con `null`. Hay que llamar a `guardar()` después. */
+  fijarTelegram(config: TelegramGuardado | null): void {
+    this.exigirAbierto();
+    if (config !== null) registrarSecreto(config.token);
+    this.telegram = config === null ? null : { ...config };
+  }
+
   /* ---- persistencia ---- */
 
   /** Cifra y escribe. Rota el respaldo antes de tocar el archivo bueno. */
@@ -684,7 +727,8 @@ export class Vault {
         credenciales: this.credenciales,
         paso: this.paso,
         madres: this.madres,
-        tope: this.tope
+        tope: this.tope,
+        telegram: this.telegram
       }),
       'utf8'
     );
@@ -758,6 +802,8 @@ export class Vault {
     }
     this.credenciales = [];
     this.madres = [];
+    if (this.telegram !== null) this.telegram.token = '';
+    this.telegram = null;
     this.cerrado = true;
   }
 

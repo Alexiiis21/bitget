@@ -38,7 +38,17 @@ import type {
   BatchPlan,
   BatchResult,
   BatchTarget,
-  ClosedPosition,
+  AlertsActionResult,
+  AlertsCheck,
+  AlertsStatus,
+  ExportResult,
+  TelegramLookup,
+  HistoryFilter,
+  HistoryPeriod,
+  HistorySyncProgress,
+  HistorySyncResult,
+  LiveBalance,
+  TradeHistory,
   CloseRequest,
   DeleteOutcome,
   LeverageRequest,
@@ -120,7 +130,6 @@ export interface PanelService {
    */
   subscribeAccounts(cb: (accounts: Account[]) => void): Unsubscribe;
   getBalance(subAccountId: string): Promise<Balance>;
-  getHistory(subAccountId: string, limit: number): Promise<ClosedPosition[]>;
   subscribePositions(cb: (snapshot: PositionSnapshot) => void): Unsubscribe;
 
   /* ---- escritura, en dos fases ---- */
@@ -155,7 +164,11 @@ export interface PanelService {
    * fallidas». Reutiliza los identificadores de orden del plan original, que es
    * lo que impide que un reintento duplique lo que ya entro.
    */
-  executePlan(plan: BatchPlan, only?: BatchTarget[]): Promise<BatchResult>;
+  /**
+   * `stepPassword` solo lo usa el cierre en negativo, que el proceso principal
+   * rechaza sin ella. Ver `BatchPlan.stepPasswordReason`.
+   */
+  executePlan(plan: BatchPlan, only?: BatchTarget[], stepPassword?: string): Promise<BatchResult>;
 
   /* ---- contrasena de paso ---- */
   hasStepPassword(): Promise<boolean>;
@@ -200,6 +213,52 @@ export interface PanelService {
    * abrir la pantalla y al refrescar a mano, nunca en un intervalo.
    */
   getBalanceSheet(parentUid?: string): Promise<BalanceSheet>;
+
+  /* ---- historial por periodo (solo lectura) ---- */
+  /**
+   * Trae de Bitget las operaciones cerradas nuevas de una subcuenta y las guarda
+   * en el equipo. Dos llamadas seguidas para la misma subcuenta comparten la
+   * misma consulta.
+   */
+  syncHistory(subAccountId: string): Promise<HistorySyncResult>;
+  /**
+   * Lo guardado en el equipo, filtrado por fecha de cierre, con su resumen. No
+   * sale a la red: es lo que se pinta al instante.
+   */
+  queryHistory(
+    subAccountId: string,
+    period?: HistoryPeriod,
+    filter?: HistoryFilter
+  ): Promise<TradeHistory>;
+  /**
+   * Exporta a CSV lo mismo que devuelve `queryHistory` con ese periodo y filtro.
+   * Quien elige dónde guardar es el operador, en el diálogo del sistema.
+   */
+  exportHistory(
+    subAccountId: string,
+    period?: HistoryPeriod,
+    filter?: HistoryFilter
+  ): Promise<ExportResult>;
+  /** Avance de las sincronizaciones en curso. */
+  subscribeHistorySync(cb: (progress: HistorySyncProgress) => void): Unsubscribe;
+  /* ---- alertas de Telegram: lo hecho fuera del panel ---- */
+  getAlertsStatus(): Promise<AlertsStatus>;
+  /** Comprueba el token y lista los chats que le escribieron al bot. No guarda nada. */
+  findTelegramChats(token: string): Promise<TelegramLookup>;
+  /** Envía un mensaje de prueba y, si llega, guarda el bot. Pide la contraseña de paso. */
+  configureAlerts(
+    input: { token: string; chatId: string; chatTitle: string | null },
+    stepPassword: string
+  ): Promise<AlertsActionResult>;
+  testAlerts(): Promise<AlertsActionResult>;
+  disableAlerts(stepPassword: string): Promise<AlertsActionResult>;
+  /** Revisa ahora, sin esperar a la próxima apertura del panel. */
+  checkAlertsNow(): Promise<AlertsCheck>;
+  /** Cada revisión que termina, la automática del desbloqueo incluida. */
+  subscribeAlertsChecks(cb: (check: AlertsCheck) => void): Unsubscribe;
+
+  /** Saldo vigente de la subcuenta, leído de Bitget ahora. */
+  getLiveBalance(subAccountId: string): Promise<LiveBalance>;
 
   /**
    * Calcula un traspaso y comprueba que se pueda hacer. **No envía nada.**

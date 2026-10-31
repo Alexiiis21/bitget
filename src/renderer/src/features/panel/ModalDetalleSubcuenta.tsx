@@ -51,13 +51,11 @@ function BloquePunta({ posicion, lado, decimales }: { posicion: Position | undef
           estilo={{ fontWeight: 600 }}
         />
         {/*
-          * El guion no es cero: es que ni el panel ni Bitget saben el margen.
-          * Por eso no lleva unidad detrás —«— USDT» se leería como cero USDT—.
-          * Cuando la cifra es la de Bitget el rótulo lo dice: incluye el
-          * margen adicional y no es la que anotó el panel.
+          * El guion no es cero: es que Bitget no mandó el margen. Por eso no
+          * lleva unidad detrás —«— USDT» se leería como cero USDT—.
           */}
         <Dato
-          rotulo={margen.deBitget ? 'Margen (Bitget)' : 'Margen inicial'}
+          rotulo="Margen inicial"
           valor={margen.valor === '—' ? '—' : `${margen.valor} USDT`}
           estilo={{ fontWeight: 600 }}
         />

@@ -6,7 +6,12 @@
  * formula, lo que falla nombra su operacion y no un numero de laboratorio.
  */
 import { describe, expect, it } from 'vitest';
-import { precioTakeProfit } from '@main/domain/precio-take-profit';
+import {
+  ladoEquivocadoTakeProfit,
+  precioTakeProfit,
+  resultadoNetoEstimado,
+  takeProfitConPerdida
+} from '@main/domain/precio-take-profit';
 import type { Contrato } from '@main/bitget/rest/endpoints/simbolos';
 
 /** Contrato real de PEPEUSDT, capturado de api.bitget.com el 13/08/2026. */
@@ -259,5 +264,91 @@ describe('redondeo', () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.motivo).toBe('precio-invalido');
+  });
+});
+
+/**
+ * ELITE LAURA, 19-20/10/2026, PEPEUSDT en cobertura: short y long con entrada
+ * 0,0000041092. Los precios son los que el panel envio de verdad.
+ */
+describe('ladoEquivocadoTakeProfit', () => {
+  const ENTRADA = '0.0000041092';
+
+  it('acepta los Take Profit que el panel envio al short, todos por debajo', () => {
+    for (const tp of ['0.0000040805', '0.0000039217', '0.0000039256']) {
+      expect(ladoEquivocadoTakeProfit('short', tp, [{ nombre: 'la entrada', precio: ENTRADA }])).toBeNull();
+    }
+  });
+
+  it('rechaza en un short el precio del Take Profit del long: seria un Stop Loss', () => {
+    const r = ladoEquivocadoTakeProfit('short', '0.0000041409', [{ nombre: 'la entrada', precio: ENTRADA }]);
+    expect(r).toMatch(/por debajo de la entrada/);
+  });
+
+  it('rechaza en un long un precio por debajo de la entrada', () => {
+    const r = ladoEquivocadoTakeProfit('long', '0.0000039256', [{ nombre: 'la entrada', precio: ENTRADA }]);
+    expect(r).toMatch(/por encima de la entrada/);
+  });
+
+  it('rechaza un Take Profit que el precio actual ya paso', () => {
+    const r = ladoEquivocadoTakeProfit('long', '0.0000041603', [
+      { nombre: 'la entrada', precio: '0.0000041334' },
+      { nombre: 'el precio actual', precio: '0.000004195' }
+    ]);
+    expect(r).toMatch(/precio actual/);
+  });
+
+  it('coincidir con la referencia tambien es rechazo', () => {
+    expect(ladoEquivocadoTakeProfit('short', ENTRADA, [{ nombre: 'la entrada', precio: ENTRADA }])).not.toBeNull();
+  });
+
+  it('una referencia que no se conoce no se comprueba; un disparo ilegible si', () => {
+    expect(ladoEquivocadoTakeProfit('short', '0.000004', [{ nombre: 'el precio actual', precio: null }])).toBeNull();
+    expect(ladoEquivocadoTakeProfit('short', '.', [])).not.toBeNull();
+  });
+});
+
+describe('takeProfitConPerdida: ELITE QLC, 28/10/2026', () => {
+  /* Entrada promedio del short tras agregar. */
+  const ENTRADA = '0.0000048531';
+
+  it('rechaza el Take Profit de lo agregado, que cerraba en perdida', () => {
+    const r = takeProfitConPerdida('short', '0.0000051223', [
+      { nombre: 'la entrada promedio de la posición', precio: ENTRADA }
+    ]);
+    expect(r).toContain('pérdida');
+    expect(r).toContain('No se envía');
+  });
+
+  it('deja pasar el de la posicion, que cerraba en positivo', () => {
+    expect(
+      takeProfitConPerdida('short', '0.000004828', [{ nombre: 'la entrada', precio: ENTRADA }])
+    ).toBeNull();
+  });
+
+  it('rechaza el que gana en precio pero no cubre las comisiones', () => {
+    /* Un 0,05 % por debajo: menos que el 0,12 % de abrir y cerrar. */
+    expect(takeProfitConPerdida('long', '100.05', [{ nombre: 'la entrada', precio: '100' }])).not.toBeNull();
+    expect(takeProfitConPerdida('long', '100.2', [{ nombre: 'la entrada', precio: '100' }])).toBeNull();
+  });
+
+  it('una referencia ilegible no se comprueba; un disparo ilegible siempre se rechaza', () => {
+    expect(takeProfitConPerdida('long', '100.2', [{ nombre: 'la entrada', precio: null }])).toBeNull();
+    expect(takeProfitConPerdida('long', 'abc', [{ nombre: 'la entrada', precio: '100' }])).not.toBeNull();
+  });
+});
+
+describe('resultadoNetoEstimado', () => {
+  it('cuadra con el historial de Bitget para los dos tramos del 28/10/2026', () => {
+    const parcial = resultadoNetoEstimado('short', '0.0000048531', '0.0000051223', '4856000');
+    const principal = resultadoNetoEstimado('short', '0.0000048531', '0.000004828', '6156000');
+    /* Precio -1,307 y +0,155; con comisiones, un poco peor cada uno. */
+    expect(Number(parcial)).toBeLessThan(-1.3);
+    expect(Number(principal)).toBeGreaterThan(0.1);
+    expect(Number(principal)).toBeLessThan(0.155);
+  });
+
+  it('null si falta un dato', () => {
+    expect(resultadoNetoEstimado('long', null, '1', '1')).toBeNull();
   });
 });

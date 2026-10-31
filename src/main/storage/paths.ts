@@ -79,6 +79,12 @@ export const rutas = () => {
     activos: join(base, 'activos.json'),
     ordenesPendientes: join(base, 'ordenes', 'pendientes.jsonl'),
     cacheSimbolos: join(base, 'cache', 'simbolos.json'),
+    /** Una carpeta con un JSON por cuenta: sus posiciones cerradas. Ver `almacen-historial.ts`. */
+    historial: join(base, 'historial'),
+    /** Lo que el panel le pide a Bitget, para no avisarlo como externo. Ver `bitacora-acciones.ts`. */
+    acciones: join(base, 'acciones', 'propias.jsonl'),
+    /** Marcas de revisión y avisos pendientes de las alertas. Ver `alertas/vigia.ts`. */
+    alertas: join(base, 'alertas', 'estado.json'),
     logs: join(base, 'logs')
   } as const;
 };

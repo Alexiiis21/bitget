@@ -1,6 +1,6 @@
 import type { CSSProperties, KeyboardEvent } from 'react';
 import { CAJA_ERROR, FUENTE, SOMBRA, T, VELO } from '@/lib/tokens';
-import { PIDE_PASO, usarPanel } from '@/store/panel';
+import { pidePaso as planPidePaso, usarPanel } from '@/store/panel';
 
 /**
  * Lo que se va a enviar, antes de enviarlo.
@@ -64,7 +64,7 @@ export function DialogoPlan() {
    * dejaría abierta la posibilidad de enseñar el campo sin comprobarlo, o de
    * comprobarlo sin enseñarlo —que es no poder confirmar nunca—.
    */
-  const pidePaso = PIDE_PASO.has(plan.kind) && !impedido;
+  const pidePaso = planPidePaso(plan) && !impedido;
 
   const alPulsarTecla = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') void confirmarPlan();
@@ -223,6 +223,12 @@ export function DialogoPlan() {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {pidePaso && plan.stepPasswordReason && (
+            <div style={{ padding: '10px 12px', borderRadius: 9, border: `1px solid ${CAJA_ERROR.borde}`, borderLeft: `4px solid ${CAJA_ERROR.acento}`, background: CAJA_ERROR.fondo, fontSize: 12, lineHeight: 1.45, color: CAJA_ERROR.texto }}>
+              {plan.stepPasswordReason}
             </div>
           )}
 

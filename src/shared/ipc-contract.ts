@@ -701,6 +701,11 @@ export interface EntradaCierreIpc {
   precioEntrada: string | null;
   /** Margen que quedara libre al cerrar, si Bitget lo informa. */
   margenLiberado: string | null;
+  /**
+   * Resultado neto de cerrar ahora, a precio marca y con comisiones, o `null`
+   * si no se pudo calcular. Ver `EntradaCierre.resultadoEstimado`.
+   */
+  resultadoEstimado: string | null;
 }
 
 /**
@@ -719,6 +724,11 @@ export interface PlanCierreIpc {
   descartes: DescartePlanIpc[];
   /** Suma del margen que se libera. Es lo que el operador recupera. */
   margenLiberadoTotal: string;
+  /**
+   * Alguna posicion cerraria en negativo, o no se sabe: ejecutar exige la
+   * contraseña de paso. Ver `Sesion.ejecutarCierre`.
+   */
+  pidePaso: boolean;
   creadoEn: string;
 }
 
@@ -921,6 +931,205 @@ export interface EstadoTopeIpc {
   monedaMargen: string;
 }
 
+/**
+ * Resultado de traer de Bitget el historial de posiciones cerradas de una cuenta.
+ *
+ * Las fechas van en milisegundos. `cobertura` es el tramo del que se sabe que no
+ * falta ninguna posicion; `hueco` avisa de que la cuenta paso mas de 90 dias sin
+ * sincronizar y lo de en medio ya no se puede recuperar. Ver
+ * `main/historial/sincronizador.ts`.
+ */
+export interface ResumenSincronizacionIpc {
+  cuentaId: string;
+  nuevas: number;
+  total: number;
+  cobertura: { desdeMs: number; hastaMs: number };
+  hueco: boolean;
+  sincronizadoEn: number;
+}
+
+/**
+ * Una posicion cerrada, igual en Classic y en UTA.
+ *
+ * `resultado` es el `netProfit` de Bitget: precio + comisiones +
+ * financiamiento, con signo. Es lo que se suma. `apalancamiento` y `porcentaje`
+ * son `null` porque el historial de Bitget no los entrega; la pantalla enseña
+ * un guion, nunca un calculo propio. Ver docs/00-historial-fase-1.md.
+ */
+export interface PosicionCerradaIpc {
+  positionId: string;
+  symbol: string;
+  lado: 'long' | 'short';
+  modoMargen: 'isolated' | 'crossed' | null;
+  apalancamiento: string | null;
+  abiertaEnMs: number;
+  cerradaEnMs: number;
+  precioEntrada: string;
+  precioSalida: string;
+  cantidadCierre: string;
+  resultado: string;
+  porcentaje: string | null;
+  /** Desglose del resultado, para explicar una suma que no cuadre con la web. */
+  pnlPrecio: string;
+  comisiones: string;
+  financiamiento: string;
+  superficie: 'v2' | 'v3';
+  /**
+   * El Take Profit que estaba puesto al cerrarse, sacado del historial de
+   * planes TP/SL de Bitget. `null` si no tenía o ya no se puede saber.
+   * `disparadoEnMs` es `null` si no se disparó: Bitget lo canceló al cerrar.
+   */
+  takeProfit: { precio: string; colocadoEnMs: number; disparadoEnMs: number | null } | null;
+}
+
+/**
+ * Filtros de la tabla del historial, que se aplican igual al resumen y a la
+ * exportacion. Ver `shared/historial-csv.ts`.
+ */
+export interface FiltroHistorialIpc {
+  simbolo: string | null;
+  lado: 'long' | 'short' | null;
+  resultado: 'todas' | 'ganadoras' | 'perdedoras';
+}
+
+/** Desenlace de exportar el historial a CSV. `cancelado`: cerró el diálogo sin guardar. */
+export interface ResultadoExportacionIpc {
+  cancelado: boolean;
+  ok: boolean;
+  ruta: string | null;
+  filas: number;
+  mensaje: string;
+}
+
+/** Periodo pedido por la pantalla: dias completos, `YYYY-MM-DD`, ambos incluidos. */
+export interface PeriodoIpc {
+  desde: string;
+  hasta: string;
+}
+
+/**
+ * Cuantas operaciones del periodo ganaron y perdieron, y cuanto suman.
+ *
+ * `resultadoNeto` es la suma exacta de `resultado`, sin redondear y con signo:
+ * redondear es cosa de la pantalla. `enCero` son las de resultado exactamente
+ * cero, para que ganadoras + perdedoras + enCero = total. No hay porcentaje del
+ * periodo: el presupuesto lo excluye.
+ */
+export interface ResumenPeriodoIpc {
+  total: number;
+  ganadoras: number;
+  perdedoras: number;
+  enCero: number;
+  resultadoNeto: string;
+}
+
+/**
+ * Las operaciones de un periodo, de la mas reciente a la mas antigua por cierre,
+ * con su resumen.
+ *
+ * `completitud` dice si lo guardado alcanza para dar el periodo por completo:
+ * `faltaAntes` es que el periodo empieza antes de lo sincronizado (si son mas
+ * de 90 dias, ya no se recupera); `faltaDespues`, que sigue despues de la ultima
+ * sincronizacion y se arregla sincronizando. `cobertura` nula es «nunca
+ * sincronizada», que no es lo mismo que «sincronizada y sin operaciones».
+ */
+export interface HistorialCuentaIpc {
+  cuentaId: string;
+  /** Pares con operaciones en el periodo, antes del filtro: alimentan su selector. */
+  simbolos: string[];
+  /** `true` si se aplico algun filtro: el resumen es entonces el de lo filtrado. */
+  filtrado: boolean;
+  /** `null` si se pidio todo, sin periodo. Los ms son los de la zona del equipo. */
+  periodo: (PeriodoIpc & { inicioMs: number; finMs: number; zonaHoraria: string }) | null;
+  posiciones: PosicionCerradaIpc[];
+  resumen: ResumenPeriodoIpc;
+  completitud: { completo: boolean; faltaAntes: boolean; faltaDespues: boolean };
+  cobertura: { desdeMs: number; hastaMs: number } | null;
+  sincronizadoEn: number | null;
+}
+
+/**
+ * Saldo vigente de una cuenta, leido de Bitget en el momento de pedirlo.
+ *
+ * No se guarda en disco: `leidoEn` (ms, hora de Bitget) dice de cuando es. Un
+ * campo `null` es «Bitget no trajo esa moneda», nunca un cero. Ver
+ * `main/historial/lector-saldo.ts`.
+ */
+export interface SaldoCuentaIpc {
+  cuentaId: string;
+  /** USDT en el mercado real, SUSDT en el simulado. */
+  moneda: string;
+  /** Saldo mas PnL no realizado. */
+  equity: string | null;
+  disponible: string | null;
+  bloqueado: string | null;
+  leidoEn: number;
+  superficie: 'v2' | 'v3';
+}
+
+/** Avance de una sincronizacion de historial en curso. */
+export interface ProgresoHistorialIpc {
+  cuentaId: string;
+  paginas: number;
+  recibidas: number;
+}
+
+/* ---------- alertas de Telegram ---------- */
+
+/**
+ * Una revisión de lo hecho fuera del panel. Ver `main/alertas/vigia.ts`.
+ *
+ * `nuevas` son subcuentas vistas por primera vez: de ellas solo se tomó la foto
+ * de partida, no se avisa nada de antes. `envio` dice si los avisos llegaron
+ * a Telegram; si no, quedan `pendientes` y salen en la siguiente apertura.
+ */
+export interface RevisionAlertasIpc {
+  inicioMs: number;
+  finMs: number;
+  cuentas: number;
+  revisadas: number;
+  nuevas: number;
+  detectadas: number;
+  enviadas: number;
+  pendientes: number;
+  errores: { identificador: string; mensaje: string }[];
+  envio: 'ok' | 'sin-novedades' | 'fallo' | 'sin-configurar' | 'abortado';
+  mensajeEnvio: string | null;
+}
+
+export interface EstadoAlertasIpc {
+  configurado: boolean;
+  chatId: string | null;
+  chatTitulo: string | null;
+  activadoEn: string | null;
+  revisando: boolean;
+  pendientes: number;
+  ultimaRevision: RevisionAlertasIpc | null;
+  numeroPanel: number;
+}
+
+export interface ChatTelegramIpc {
+  id: string;
+  titulo: string;
+  /** `private`, `group`, `supergroup`, `channel`. */
+  tipo: string;
+}
+
+/** Lo que encontró `alertas:buscar-chats`: el bot del token y los chats que le escribieron. */
+export interface BusquedaChatsIpc {
+  ok: boolean;
+  bot: { usuario: string; nombre: string } | null;
+  chats: ChatTelegramIpc[];
+  mensaje: string | null;
+}
+
+export interface ResultadoAlertasIpc {
+  ok: boolean;
+  motivo: string | null;
+  mensaje: string;
+  estado: EstadoAlertasIpc;
+}
+
 /* ---------- peticiones del renderer (invoke) ---------- */
 
 export interface PeticionesIpc {
@@ -1019,6 +1228,57 @@ export interface PeticionesIpc {
   'paso:comprobar': (contrasena: string) => Promise<boolean>;
   'paso:fijar': (contrasena: string) => Promise<void>;
   /** El tope de margen inicial del panel. No sale a la red. */
+  /*
+   * Historial de posiciones cerradas. Solo lectura: no lleva contrasena de paso
+   * ni el esquema de dos pasos, porque no envia nada a Bitget que cambie algo.
+   */
+  /**
+   * Trae de Bitget lo nuevo y lo guarda. Dos llamadas para la misma cuenta
+   * mientras la primera sigue en curso comparten el mismo resultado.
+   */
+  'historial:sincronizar': (cuentaId: string) => Promise<ResumenSincronizacionIpc>;
+  /**
+   * Lo guardado en el equipo, filtrado por fecha de cierre, con ganadoras,
+   * perdedoras y resultado neto. No sale a la red: es lo que se pinta al
+   * instante. Sin periodo, todo lo guardado.
+   */
+  'historial:consultar': (
+    cuentaId: string,
+    periodo?: PeriodoIpc,
+    filtro?: FiltroHistorialIpc
+  ) => Promise<HistorialCuentaIpc>;
+  /**
+   * Exporta a CSV lo mismo que enseña `historial:consultar` con ese periodo y
+   * filtro. El dialogo de guardar lo abre el proceso principal: la pantalla no
+   * manda ni la ruta ni el contenido.
+   */
+  'historial:exportar': (
+    cuentaId: string,
+    periodo?: PeriodoIpc,
+    filtro?: FiltroHistorialIpc
+  ) => Promise<ResultadoExportacionIpc>;
+  /**
+   * Saldo vigente de una cuenta o subcuenta, con su propia credencial. Dos
+   * llamadas en menos de 5 s reciben la misma lectura.
+   */
+  'saldo:cuenta': (cuentaId: string) => Promise<SaldoCuentaIpc>;
+
+  /*
+   * Alertas por Telegram de lo hecho fuera del panel. Guardar o quitar el bot
+   * pide la contraseña de paso: el token da voz en el grupo.
+   */
+  'alertas:estado': () => Promise<EstadoAlertasIpc>;
+  /** Comprueba el token y lista los chats que le escribieron al bot. No guarda nada. */
+  'alertas:buscar-chats': (token: string) => Promise<BusquedaChatsIpc>;
+  /** Envía un mensaje de prueba y, si llega, guarda el bot en el vault. */
+  'alertas:configurar': (
+    config: { token: string; chatId: string; chatTitulo: string | null },
+    contrasenaPaso: string
+  ) => Promise<ResultadoAlertasIpc>;
+  'alertas:probar': () => Promise<ResultadoAlertasIpc>;
+  'alertas:desactivar': (contrasenaPaso: string) => Promise<ResultadoAlertasIpc>;
+  /** Revisa ahora, sin esperar a la próxima apertura. */
+  'alertas:revisar': () => Promise<RevisionAlertasIpc>;
   'tope:estado': () => Promise<EstadoTopeIpc>;
   /**
    * Fija el tope. Falla si hay uno vigente: no se cambia durante 24 horas, ni
@@ -1042,7 +1302,9 @@ export interface PeticionesIpc {
   'cierre:planificar': (peticion: PeticionCierreIpc) => Promise<PlanCierreIpc>;
   'cierre:ejecutar': (
     planId: string,
-    soloEstos?: { cuentaId: string; lado: Lado }[]
+    soloEstos?: { cuentaId: string; lado: Lado }[],
+    /** Solo si el plan `pidePaso`. Ver `PlanCierreIpc.pidePaso`. */
+    contrasenaPaso?: string
   ) => Promise<Lote>;
   /*
    * Los cuatro canales de ajuste sobre una posicion ya abierta.
@@ -1163,6 +1425,9 @@ export interface EventosIpc {
   'sistema:estado': EstadoApp;
   'lote:progreso': Lote;
   'log:linea': { ts: string; nivel: 'info' | 'aviso' | 'error'; texto: string };
+  'historial:progreso': ProgresoHistorialIpc;
+  /** Al terminar cada revisión de alertas, la automática y la manual. */
+  'alertas:revision': RevisionAlertasIpc;
 }
 
 export type CanalEvento = keyof EventosIpc;
@@ -1197,12 +1462,37 @@ export interface ApiPcb {
   pasoHay(): Promise<boolean>;
   pasoComprobar(contrasena: string): Promise<boolean>;
   pasoFijar(contrasena: string): Promise<void>;
+  historialSincronizar(cuentaId: string): Promise<ResumenSincronizacionIpc>;
+  historialConsultar(
+    cuentaId: string,
+    periodo?: PeriodoIpc,
+    filtro?: FiltroHistorialIpc
+  ): Promise<HistorialCuentaIpc>;
+  historialExportar(
+    cuentaId: string,
+    periodo?: PeriodoIpc,
+    filtro?: FiltroHistorialIpc
+  ): Promise<ResultadoExportacionIpc>;
+  saldoCuenta(cuentaId: string): Promise<SaldoCuentaIpc>;
+  alertasEstado(): Promise<EstadoAlertasIpc>;
+  alertasBuscarChats(token: string): Promise<BusquedaChatsIpc>;
+  alertasConfigurar(
+    config: { token: string; chatId: string; chatTitulo: string | null },
+    contrasenaPaso: string
+  ): Promise<ResultadoAlertasIpc>;
+  alertasProbar(): Promise<ResultadoAlertasIpc>;
+  alertasDesactivar(contrasenaPaso: string): Promise<ResultadoAlertasIpc>;
+  alertasRevisar(): Promise<RevisionAlertasIpc>;
   topeEstado(): Promise<EstadoTopeIpc>;
   topeFijar(valor: string): Promise<EstadoTopeIpc>;
   aperturaPlanificar(peticion: PeticionAperturaIpc): Promise<PlanAperturaIpc>;
   aperturaEjecutar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
   cierrePlanificar(peticion: PeticionCierreIpc): Promise<PlanCierreIpc>;
-  cierreEjecutar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
+  cierreEjecutar(
+    planId: string,
+    soloEstos?: { cuentaId: string; lado: Lado }[],
+    contrasenaPaso?: string
+  ): Promise<Lote>;
   tpPlanificar(peticion: PeticionTakeProfitIpc): Promise<PlanTakeProfitIpc>;
   tpEjecutar(planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]): Promise<Lote>;
   tpPlanificarQuitar(peticion: PeticionQuitarTpIpc): Promise<PlanQuitarTpIpc>;

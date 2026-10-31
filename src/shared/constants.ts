@@ -205,6 +205,33 @@ export const PLAN_VIGENCIA_MS = 120_000;
  */
 export const TOPE_MARGEN_VIGENCIA_MS = 24 * 60 * 60 * 1000;
 
+/* ---------- Historial de posiciones cerradas ---------- */
+/**
+ * Hasta donde llega Bitget hacia atras, y el rango maximo de una peticion.
+ *
+ * Son el mismo numero y los dos verificados el 12/10/2026 sobre V3: un rango de
+ * 120 dias responde `00001 ... cannot be greater than 90 days`, y un tramo de
+ * hace 180 a 90 dias, `25200 time range illegal`. Lo anterior solo existe si el
+ * panel ya lo guardo. docs/00-historial-fase-1.md seccion 4.
+ *
+ * Se pide un minuto menos que los 90 dias exactos: entre calcular `ahora` y que
+ * la peticion llegue pasa tiempo, y un rango que en el equipo mide 90 dias
+ * justos puede medir 90 y un poco en el reloj de Bitget.
+ */
+export const HISTORIAL_VENTANA_MS = 90 * 24 * 60 * 60 * 1000 - 60_000;
+/** Posiciones por pagina. 100 es el techo de los dos endpoints. */
+export const HISTORIAL_LIMITE_PAGINA = 100;
+/**
+ * Tope de paginas por sincronizacion, contra un cursor que no termine nunca.
+ *
+ * 200 paginas son 20 000 posiciones en 90 dias: mas de 200 operaciones al dia
+ * en una sola subcuenta. Si se llega aqui no es que la cuenta opere mucho, es
+ * que la paginacion se ha vuelto loca, y se corta en vez de vaciar el cupo.
+ */
+export const HISTORIAL_MAX_PAGINAS = 200;
+/** Reintentos de una misma pagina ante red, 5xx o 429. Mismo criterio que el motor. */
+export const HISTORIAL_REINTENTOS = 3;
+
 /* ---------- Interfaz ---------- */
 /** Retardo del boton de confirmacion, contra el doble clic reflejo. docs/04 W-09. */
 export const CONFIRMACION_RETARDO_MS = 2_000;

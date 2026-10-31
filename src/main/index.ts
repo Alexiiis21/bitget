@@ -134,6 +134,18 @@ function publicarCambios(sesion: Sesion): void {
     ventana.webContents.send('lote:progreso', lote);
   });
 
+  /* Cada revisión de alertas, para el aviso en pantalla. */
+  sesion.alRevisarAlertas((revision) => {
+    if (ventana === null || ventana.isDestroyed()) return;
+    ventana.webContents.send('alertas:revision', revision);
+  });
+
+  /* El avance del historial, igual que el de un lote: sin agrupar. */
+  sesion.alProgresarHistorial((progreso) => {
+    if (ventana === null || ventana.isDestroyed()) return;
+    ventana.webContents.send('historial:progreso', progreso);
+  });
+
   /*
    * Las posiciones van por su propio canal y con su propia agrupacion, no
    * dentro de la de la matriz.
@@ -180,7 +192,7 @@ if (!app.requestSingleInstanceLock()) {
      * contexto. Se enciende aqui para que el arranque y la primera verificacion
      * ya queden anotados. Ver `diagnostico/bitacora.ts`.
      */
-    await iniciarBitacora();
+    await iniciarBitacora(undefined, app.getVersion());
     if (esStaging()) {
       console.warn(`[PCB] bitacora en: ${r.logs}`);
     }
@@ -250,9 +262,18 @@ if (!app.requestSingleInstanceLock()) {
     );
 
     sesion = new Sesion(
-      { vault: r.vault, cuentas: r.cuentas, activos: r.activos, intentos: r.intentos },
+      {
+        vault: r.vault,
+        cuentas: r.cuentas,
+        activos: r.activos,
+        intentos: r.intentos,
+        historial: r.historial,
+        acciones: r.acciones,
+        alertas: r.alertas
+      },
       cliente,
-      { mercado }
+      /* El número se lee en cada aviso: si el operador lo cambia, los siguientes lo llevan. */
+      { mercado, numeroPanel: () => instancia.numero }
     );
 
     /*
@@ -374,5 +395,8 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 
-/* Sin telemetria, sin llamadas de red fuera de Bitget. docs/01 seccion 7. */
+/*
+ * Sin telemetria, sin llamadas de red fuera de Bitget, salvo los avisos a
+ * api.telegram.org cuando el operador configura un bot. docs/01 seccion 7.
+ */
 app.commandLine.appendSwitch('disable-features', 'MediaRouter');

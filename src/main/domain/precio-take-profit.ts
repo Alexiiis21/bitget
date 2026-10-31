@@ -47,7 +47,11 @@ export type MotivoRechazoTp =
   | 'porcentaje-invalido'
   | 'apalancamiento-invalido'
   | 'precio-invalido'
-  | 'sin-recorrido';
+  | 'sin-recorrido'
+  /** Del lado de un Stop Loss respecto a la entrada o al precio actual. Ver `ladoEquivocadoTakeProfit`. */
+  | 'tp-lado-equivocado'
+  /** Cerraria en negativo frente a la entrada promedio, comisiones incluidas. Ver `takeProfitConPerdida`. */
+  | 'tp-con-perdida';
 
 export interface DisparoTakeProfit {
   /** Precio al que Bitget cerrara la posicion. Es lo que se envia. */
@@ -161,4 +165,153 @@ export function precioTakeProfit(p: PeticionTakeProfit): ResultadoTakeProfit {
       movimientoPorcentaje: precio.minus(entrada).abs().dividedBy(entrada).times(100).toFixed(4)
     }
   };
+}
+
+export interface ReferenciaTakeProfit {
+  /** Como se le dice al operador: «la entrada», «el precio actual». */
+  nombre: string;
+  /** `null` o ilegible: esa referencia no se comprueba. */
+  precio: string | null | undefined;
+}
+
+/**
+ * Por que se comprueba el lado justo antes de enviar.
+ *
+ * ELITE LAURA, 19/10/2026: cuenta en cobertura con long y short abiertos a la vez
+ * en PEPEUSDT. La operadora vio en Bitget un Take Profit «del short» por encima
+ * de la entrada, que es donde estaría un Stop Loss. En la bitácora todos los
+ * precios que el panel mandó para el short estaban por debajo, pero
+ * `modify-strategy-order` no lleva `posSide`: el lado lo pone el `orderId`, y un
+ * `orderId` del otro lado aplicaría un precio de short sobre el long o al
+ * revés, sin que Bitget se queje. `precioTakeProfit` ya calcula hacia el lado
+ * bueno; esta es la última puerta y no depende de cómo se llegó al precio.
+ *
+ *   long   el Take Profit queda por ENCIMA de cada referencia
+ *   short  el Take Profit queda por DEBAJO de cada referencia
+ *
+ * Contra el precio actual también: un Take Profit que el precio ya pasó se
+ * dispara al instante o Bitget lo deja puesto sin ejecutar.
+ *
+ * Devuelve el mensaje para el operador, o `null` si está del lado correcto.
+ * Un precio de disparo ilegible siempre es rechazo.
+ */
+export function ladoEquivocadoTakeProfit(
+  lado: Lado,
+  precioDisparo: string,
+  referencias: readonly ReferenciaTakeProfit[]
+): string | null {
+  const disparo = cantidad(precioDisparo);
+  if (disparo === null || disparo.lessThanOrEqualTo(0)) {
+    return `El Take Profit ${precioDisparo} no es un precio válido: no se envía.`;
+  }
+
+  for (const r of referencias) {
+    const ref = cantidad(r.precio ?? null);
+    if (ref === null || ref.lessThanOrEqualTo(0)) continue;
+    const bien = lado === 'long' ? disparo.greaterThan(ref) : disparo.lessThan(ref);
+    if (!bien) {
+      return (
+        `El Take Profit ${precioDisparo} de un ${lado} tiene que quedar ` +
+        `${lado === 'long' ? 'por encima' : 'por debajo'} de ${r.nombre} (${r.precio}); ` +
+        `así funcionaría como un Stop Loss. No se envía.`
+      );
+    }
+  }
+  return null;
+}
+
+/**
+ * Comision taker de futuros USDT de Bitget, por lado: 0,06 %.
+ *
+ * Es la que se paga al abrir a mercado y al cerrar con un Take Profit a
+ * mercado, que son las dos ordenes que salen del panel. Se usa para decidir si
+ * un cierre queda en negativo **despues de comisiones**, no para calcular el
+ * Take Profit: el porcentaje del operador sigue siendo el de la web de Bitget.
+ */
+export const COMISION_TAKER = '0.0006';
+
+const comision = new Decimal(COMISION_TAKER);
+
+/**
+ * Resultado neto estimado de cerrar `tamano` a `salida`, con las dos
+ * comisiones -la de apertura y la de cierre- ya restadas. `null` si algun dato
+ * no es un numero.
+ *
+ *   long   (salida - entrada) x tamano - (entrada + salida) x tamano x comision
+ *   short  (entrada - salida) x tamano - (entrada + salida) x tamano x comision
+ */
+export function resultadoNetoEstimado(
+  lado: Lado,
+  entrada: string | null | undefined,
+  salida: string | null | undefined,
+  tamano: string | null | undefined
+): Decimal | null {
+  const e = cantidad(entrada ?? null);
+  const s = cantidad(salida ?? null);
+  const t = cantidad(tamano ?? null);
+  if (e === null || s === null || t === null || e.lessThanOrEqualTo(0) || s.lessThanOrEqualTo(0)) {
+    return null;
+  }
+  const bruto = lado === 'long' ? s.minus(e) : e.minus(s);
+  return bruto.times(t).minus(e.plus(s).times(t).times(comision));
+}
+
+/**
+ * El Take Profit mas cercano a la entrada que todavia cierra sin perdida
+ * despues de comisiones.
+ *
+ *   long   entrada x (1 + comision) / (1 - comision)
+ *   short  entrada x (1 - comision) / (1 + comision)
+ */
+function limiteSinPerdida(lado: Lado, entrada: Decimal): Decimal {
+  const uno = new Decimal(1);
+  return lado === 'long'
+    ? entrada.times(uno.plus(comision)).dividedBy(uno.minus(comision))
+    : entrada.times(uno.minus(comision)).dividedBy(uno.plus(comision));
+}
+
+/**
+ * Por que ningun Take Profit sale si cierra en perdida.
+ *
+ * ELITE QLC, 28/10/2026: se agrego un short de 4.856.000 PEPE a 0,000005148
+ * sobre uno de 6.156.000, y la orden UTA llevo dentro su propio Take Profit,
+ * calculado desde el precio de **esa** orden: 0,0000051223. Bitget lo creo como
+ * un Take Profit aparte para esos 4.856.000, y la entrada promedio de la
+ * posicion ya era 0,0000048531. Se disparo al minuto y cerro esa parte con
+ * -1,31 USDT. `ladoEquivocadoTakeProfit` no lo paro porque solo miraba el
+ * precio de la orden, no la entrada de la posicion.
+ *
+ * Esta puerta compara con la **entrada promedio de la posicion consolidada** y
+ * con las comisiones de abrir y cerrar: un Take Profit que, ejecutado a su
+ * precio, deja el resultado en negativo no se envia, venga de una apertura, de
+ * un promedio o de un ajuste a mano. No tiene excepcion ni contraseña que la
+ * salte: es lo que pidio el cliente el 29/10/2026.
+ *
+ * Devuelve el mensaje para el operador, o `null` si cierra en positivo.
+ */
+export function takeProfitConPerdida(
+  lado: Lado,
+  precioDisparo: string,
+  referencias: readonly ReferenciaTakeProfit[]
+): string | null {
+  const disparo = cantidad(precioDisparo);
+  if (disparo === null || disparo.lessThanOrEqualTo(0)) {
+    return `El Take Profit ${precioDisparo} no es un precio válido: no se envía.`;
+  }
+
+  for (const r of referencias) {
+    const ref = cantidad(r.precio ?? null);
+    if (ref === null || ref.lessThanOrEqualTo(0)) continue;
+    const limite = limiteSinPerdida(lado, ref);
+    const bien = lado === 'long' ? disparo.greaterThan(limite) : disparo.lessThan(limite);
+    if (!bien) {
+      return (
+        `El Take Profit ${precioDisparo} de un ${lado} cerraría con pérdida respecto a ` +
+        `${r.nombre} (${r.precio}): con las comisiones de abrir y cerrar tiene que quedar ` +
+        `${lado === 'long' ? 'por encima' : 'por debajo'} de ${limite.toSignificantDigits(8).toFixed()}. ` +
+        'No se envía.'
+      );
+    }
+  }
+  return null;
 }

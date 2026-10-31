@@ -238,6 +238,16 @@ test('la superficie de window.pcb es la del contrato, sin canales de sobra', asy
 
   expect(superficie).toEqual(
     [
+      /*
+       * Alertas de Telegram, desde el 15/10/2026. Configurar y desactivar piden
+       * la contraseña de paso; ninguno opera en Bitget.
+       */
+      'alertasBuscarChats',
+      'alertasConfigurar',
+      'alertasDesactivar',
+      'alertasEstado',
+      'alertasProbar',
+      'alertasRevisar',
       'apalancamientoEjecutar',
       'apalancamientoPlanificar',
       'aperturaEjecutar',
@@ -256,6 +266,20 @@ test('la superficie de window.pcb es la del contrato, sin canales de sobra', asy
        * archivo. Y nunca sobrescribe un almacen existente.
        */
       'credencialesImportar',
+      /*
+       * Historial por periodo, desde el 13/10/2026. Los tres son de lectura:
+       * `historialConsultar` lee del disco del equipo, `historialSincronizar` y
+       * `saldoCuenta` leen de Bitget. Ninguno opera, y por eso ninguno lleva
+       * contraseña de paso.
+       */
+      'historialConsultar',
+      /*
+       * Exporta a CSV lo mismo que enseña `historialConsultar`. El diálogo de
+       * guardar lo abre el proceso principal: el canal no recibe ni ruta ni
+       * contenido.
+       */
+      'historialExportar',
+      'historialSincronizar',
       /*
        * Los cuatro de traspasos, desde el 03/09/2026 (Fase 2: solo lectura).
        *
@@ -282,6 +306,20 @@ test('la superficie de window.pcb es la del contrato, sin canales de sobra', asy
       'recogidaPlanificar',
       'repartoEjecutar',
       'repartoPlanificar',
+      /*
+       * Respaldo de credenciales, el tope de margen y la espera de la maestra.
+       * Ya estaban en `ApiPcb` y en el preload; faltaban en esta lista, que es
+       * la que se actualizó el 13/10/2026 con el historial.
+       */
+      'respaldoAbrirCarpeta',
+      'respaldoBuscar',
+      'respaldoCrear',
+      'respaldoRestaurar',
+      'respaldoRestaurarArchivo',
+      'topeEstado',
+      'topeFijar',
+      'vaultEspera',
+      'saldoCuenta',
       'saldosLeer',
       /*
        * Los tres de la Fase 3, desde el 03/09/2026. `traspasoEjecutar` es el

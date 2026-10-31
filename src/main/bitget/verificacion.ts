@@ -51,6 +51,7 @@
  * enterarse de que acaba de guardar una clave que puede vaciar la cuenta.
  */
 import type { AccountMode, HoldMode, ModoMargen, ModoPosicion } from '@shared/types';
+import { anotarEvento, cuentaDe } from '../diagnostico/bitacora';
 import { detectarModo, type ResultadoDeteccion } from './deteccion-modo';
 import { clasificarCodigo, ErrorBitget } from './errors';
 import { MERCADO_REAL, type Mercado } from './mercado';
@@ -445,6 +446,48 @@ export async function verificarCredencial(
   credencial: Credencial,
   opciones: OpcionesVerificacion = {}
 ): Promise<ResultadoVerificacion> {
+  let r: ResultadoVerificacion;
+  try {
+    r = await verificarSinAnotar(cliente, credencial, opciones);
+  } catch (e) {
+    anotarEvento({
+      evento: 'verificacion-credencial',
+      datos: {
+        cuenta: cuentaDe(credencial.apiKey),
+        veredicto: 'error-reintentable',
+        codigoBitget: e instanceof ErrorBitget ? e.codigo : null,
+        mensaje: e instanceof Error ? e.message.slice(0, 200) : null
+      }
+    });
+    throw e;
+  }
+
+  /*
+   * El toast del panel solo enseña el codigo. Esta linea es la que dice, sin
+   * reproducir el fallo, por que superficie se fue y en que paso se corto.
+   */
+  anotarEvento({
+    evento: 'verificacion-credencial',
+    datos: {
+      cuenta: cuentaDe(credencial.apiKey),
+      veredicto: r.veredicto,
+      accountMode: r.accountMode,
+      holdMode: r.holdMode,
+      enTransicion: r.enTransicion,
+      codigoBitget: r.codigoBitget,
+      motivo: r.motivo?.slice(0, 300) ?? null,
+      advertencias: r.advertencias.map((a) => a.codigo).join(','),
+      latenciaMs: r.latenciaMs
+    }
+  });
+  return r;
+}
+
+async function verificarSinAnotar(
+  cliente: ClienteBitget,
+  credencial: Credencial,
+  opciones: OpcionesVerificacion
+): Promise<ResultadoVerificacion> {
   const mercado = opciones.mercado ?? MERCADO_REAL;
   const simbolo = opciones.simbolo ?? mercado.simbolos[0] ?? 'BTCUSDT';
   const inicio = Date.now();
@@ -531,10 +574,13 @@ export async function verificarCredencial(
         deteccion.esUta === true
           ? 'Esta subcuenta ya está migrada a UTA, pero la API Key no tiene el permiso ' +
             '«UTA manage read». Habilítelo en Bitget para esa clave y vuelva a validarla.'
-          : codigo === null
-            ? 'Bitget rechazó la credencial y no se pudo determinar el tipo de cuenta.'
-            : `${clasificarCodigo(codigo).mensaje} Afecta por igual a las dos APIs de Bitget, ` +
-              'así que no es un problema de la migración a UTA.',
+          : deteccion.accountModeCrudo !== null
+            ? `Bitget informa un tipo de cuenta que el panel no reconoce («${deteccion.accountModeCrudo}»), ` +
+              'así que no se opera con ella hasta saber por qué API debe ir.'
+            : codigo === null
+              ? 'Bitget rechazó la credencial y no se pudo determinar el tipo de cuenta.'
+              : `${clasificarCodigo(codigo).mensaje} Afecta por igual a las dos APIs de Bitget, ` +
+                'así que no es un problema de la migración a UTA.',
       codigoBitget: codigo,
       latenciaMs: Date.now() - inicio
     };

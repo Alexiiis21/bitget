@@ -17,6 +17,12 @@ import type {
   EstadoApp,
   EstadoTopeIpc,
   EstadoVault,
+  HistorialCuentaIpc,
+  BusquedaChatsIpc,
+  EstadoAlertasIpc,
+  ResultadoAlertasIpc,
+  RevisionAlertasIpc,
+  SaldoCuentaIpc,
   FilaCuenta,
   MadreIpc,
   MovimientoTraspasoIpc,
@@ -30,6 +36,7 @@ import type {
   ResultadoVault,
   SaldosPantalla
 } from '@shared/ipc-contract';
+import Decimal from 'decimal.js';
 import { PLAN_VIGENCIA_MS } from '@shared/constants';
 import type {
   AccountMode,
@@ -44,10 +51,17 @@ import type {
 } from '@shared/types';
 import { ErrorBitget } from '../bitget/errors';
 import { anotarEvento, cuentaDe } from '../diagnostico/bitacora';
+import { redactarTexto } from '../security/redact';
 import type { ModoMargenApi } from '../bitget/rest/endpoints/ordenes';
 import { MERCADOS, type ClaveMercado } from '../bitget/mercado';
 import type { ClienteBitget } from '../bitget/rest/client';
 import { superficieDe, type Credencial } from '../bitget/rest/signer';
+import {
+  buscarTakeProfit,
+  planesPendientes,
+  takeProfitsDe,
+  type PlanPendiente
+} from '../bitget/rest/endpoints/tpsl';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { verificarCredencial, type ResultadoVerificacion } from '../bitget/verificacion';
@@ -70,6 +84,42 @@ import {
   type PlanReparto
 } from '../domain/plan-reparto';
 import { RegistroTraspasos } from '../storage/registro-traspasos';
+import { obtenerHistorialPosiciones } from '../bitget/rest/endpoints/historial';
+import { AlmacenHistorialDisco } from '../storage/almacen-historial';
+import {
+  BITACORA_RETENCION_MS,
+  BitacoraAcciones,
+  huellaCuenta
+} from '../storage/bitacora-acciones';
+import { fuentesBitget, leerPlanesTp } from '../alertas/fuentes';
+import type { TraspasoDelPanel } from '../alertas/clasificador';
+import { mensajePrueba } from '../alertas/mensajes';
+import { ErrorTelegram, TelegramHttp, type ClienteTelegram } from '../alertas/telegram';
+import { VigiaOperaciones, type CuentaVigilada, type DestinoTelegram } from '../alertas/vigia';
+import { ErrorHistorial } from '../domain/posicion-cerrada';
+import { LectorSaldo, type SaldoCuenta } from '../historial/lector-saldo';
+import { leerConReintentos } from '../historial/reintento';
+import {
+  completitud,
+  filtrarPorCierre,
+  rangoDePeriodo,
+  resumir,
+  type Periodo
+} from '@shared/resultado-periodo';
+import {
+  SIN_FILTRO,
+  construirCsv,
+  cumpleFiltro,
+  hayFiltro,
+  identificadorCuenta,
+  nombreArchivoCsv,
+  type FiltroHistorial
+} from '@shared/historial-csv';
+import {
+  SincronizadorHistorial,
+  type ProgresoHistorial,
+  type ResumenSincronizacion
+} from '../historial/sincronizador';
 import {
   activosDeRanuras,
   catalogoCompleto,
@@ -102,6 +152,7 @@ import {
 import type { ParametrosKdf } from '../security/kdf';
 import {
   ErrorPlan,
+  cierreConPerdida,
   MotorLotes,
   type ApalancamientoCuenta,
   type CuentaEjecutable,
@@ -136,6 +187,16 @@ export interface RutasSesion {
    * Se deriva de la carpeta del vault cuando falta, igual que `traspasos`.
    */
   intentos?: string;
+  /**
+   * `historial/`: un JSON por cuenta con sus posiciones cerradas.
+   *
+   * Se deriva de la carpeta del vault cuando falta, igual que `traspasos`.
+   */
+  historial?: string;
+  /** `acciones/propias.jsonl`: la bitácora de lo que el panel le pide a Bitget. */
+  acciones?: string;
+  /** `alertas/estado.json`: marcas y avisos pendientes de las alertas. */
+  alertas?: string;
 }
 
 export interface OpcionesSesion {
@@ -168,7 +229,40 @@ export interface OpcionesSesion {
    * pruebas para no depender de relojes reales. Ver `ponerTakeProfitTrasAbrir`.
    */
   dormir?: (ms: number) => Promise<void>;
+  /**
+   * Zona horaria con la que se cortan los dias del periodo del historial. Por
+   * defecto, la del equipo; las pruebas fijan una para no depender de el.
+   */
+  zonaHoraria?: string;
+  /** Número visible del panel, para el identificador `PCB-1-A-1` de los avisos. */
+  numeroPanel?: () => number;
+  /** Cliente de Telegram. Las pruebas pasan uno que no sale a la red. */
+  telegram?: ClienteTelegram;
+  /** Espera entre el desbloqueo y la revisión de alertas. */
+  esperaVigiaMs?: number;
+  /** Cada cuánto se repite la revisión de alertas con el panel abierto. */
+  intervaloVigiaMs?: number;
 }
+
+/** Ver `programarVigia`: deja pasar la ráfaga de verificaciones del desbloqueo. */
+export const ESPERA_VIGIA_MS = 15_000;
+/**
+ * Con el panel abierto, la revisión de alertas se repite cada 15 minutos.
+ *
+ * Petición del 16/10/2026: que los avisos lleguen casi al momento mientras el
+ * panel esté abierto. Con el panel cerrado se sigue revisando al abrirlo.
+ * Cada ciclo cuesta unas 4 lecturas por subcuenta (órdenes, TP/SL y
+ * movimientos; apalancamiento y modo, una vez por hora: `INTERVALO_AJUSTES_MS`).
+ */
+export const INTERVALO_VIGIA_MS = 15 * 60_000;
+/** Con un lote en marcha la revisión espera esto y vuelve a mirar. */
+export const POSPONER_VIGIA_POR_LOTE_MS = 60_000;
+/**
+ * Tras una revisión con errores —red caída hacia Bitget o Telegram— la
+ * siguiente va antes. En el log del cliente del 17-19/10/2026 hay ráfagas de
+ * `ENOTFOUND` de varios minutos: esperar 15 retrasaría el aviso sin motivo.
+ */
+export const REINTENTO_VIGIA_MS = 2 * 60_000;
 
 /**
  * Cuantas veces se relee la posicion antes de darla por ausente, y cuanto se
@@ -182,6 +276,21 @@ export interface OpcionesSesion {
  */
 const INTENTOS_POSICION = 3;
 const ESPERA_POSICION_MS = 700;
+
+/**
+ * Lecturas de la posicion tras **agregar** a una que ya existia, hasta que su
+ * tamaño refleje lo agregado: unos 3,5 s con `ESPERA_POSICION_MS`.
+ *
+ * Mas que `INTENTOS_POSICION` porque aqui la posicion ya existe y la lectura
+ * no falla: devuelve la de antes, con la entrada promedio de antes. Calcular el
+ * Take Profit con ella es calcularlo sobre una posicion que ya no es la que hay.
+ */
+const INTENTOS_CONSOLIDACION = 6;
+
+/** Lo que hay que mirar cuando el Take Profit de una posicion promediada no quedo comprobado. */
+const REVISAR_CONSOLIDADO =
+  'Revise en Bitget el Take Profit de esta posición: tiene que ser uno solo, cubrirla entera ' +
+  'y estar calculado sobre su entrada promedio.';
 
 const textoError = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -330,6 +439,11 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
   private readonly planes = new Map<string, PlanApertura>();
   /** Lo mismo para los cierres. Se guardan aparte porque no caducan igual. */
   private readonly planesCierre = new Map<string, PlanCierre>();
+  /**
+   * Cierres en perdida cuya contraseña de paso ya se comprobo. Un reintento de
+   * las fallidas del mismo plan no la vuelve a pedir. Ver `ejecutarCierre`.
+   */
+  private readonly cierresAutorizados = new Set<string>();
   /*
    * Los ajustes sobre una posicion ya abierta guardan su plan como los demas.
    *
@@ -350,6 +464,27 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
   /** Repartos y recogidas calculados y sin enviar. Caducan como los demás. */
   private readonly planesReparto = new Map<string, { plan: PlanReparto; creadoMs: number }>();
   private readonly traspasos: RegistroTraspasos;
+  /**
+   * Historial de posiciones cerradas por cuenta. Solo lee de Bitget y guarda
+   * en `historial/`, de donde sale lo que la pantalla enseña al instante.
+   */
+  private readonly historial: SincronizadorHistorial;
+  private readonly oyentesHistorial = new Set<(p: ProgresoHistorial) => void>();
+  /** El saldo de la cuenta elegida en la pantalla de historial. Ver `historial/lector-saldo.ts`. */
+  private readonly lectorSaldo: LectorSaldo;
+  private readonly zonaHoraria: string;
+  /** Lo que el panel le pide a Bitget. Ver `storage/bitacora-acciones.ts`. */
+  private readonly bitacora: BitacoraAcciones;
+  /** Lo hecho fuera del panel, a Telegram. Ver `alertas/vigia.ts`. */
+  private readonly vigia: VigiaOperaciones;
+  private readonly telegram: ClienteTelegram;
+  private readonly numeroPanel: () => number;
+  private readonly esperaVigiaMs: number;
+  private readonly intervaloVigiaMs: number;
+  /** Lotes enviándose ahora mismo. Mientras haya alguno, la revisión de alertas espera. */
+  private readonly lotesEnCurso = new Set<string>();
+  private temporizadorVigia: ReturnType<typeof setTimeout> | null = null;
+  private readonly oyentesAlertas = new Set<(r: RevisionAlertasIpc) => void>();
   private readonly planesQuitarTp = new Map<string, PlanQuitarTakeProfit>();
   private readonly planesApalancamiento = new Map<string, PlanApalancamiento>();
   /**
@@ -442,6 +577,8 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
       new MotorLotes(cliente, this, {
         alProgresar: (lote) => {
           for (const oyente of this.oyentesLote) oyente(lote);
+          if (lote.terminadoEn === null) this.lotesEnCurso.add(lote.id);
+          else this.lotesEnCurso.delete(lote.id);
           /*
            * `terminadoEn` deja de ser nulo en el `finally` de `correrLote`, asi
            * que el ultimo aviso de cada lote -y solo ese- llega aqui con fecha.
@@ -454,6 +591,55 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
           if (lote.terminadoEn !== null) this.avisarCuentasTocadas(lote);
         }
       });
+    this.zonaHoraria = opciones.zonaHoraria ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    this.lectorSaldo = new LectorSaldo({
+      leer: (cuentaId) => this.leerSaldoCuenta(cuentaId),
+      ahoraMs: () => this.cliente.ahora()
+    });
+    this.historial = new SincronizadorHistorial({
+      almacen: new AlmacenHistorialDisco(
+        rutas.historial ?? join(dirname(rutas.vault), 'historial')
+      ),
+      cuenta: (cuentaId) => this.cuentaHistorial(cuentaId),
+      ahoraMs: () => this.cliente.ahora(),
+      dormir: this.dormir,
+      alProgresar: (p) => {
+        for (const oyente of this.oyentesHistorial) oyente(p);
+      }
+    });
+    this.numeroPanel = opciones.numeroPanel ?? (() => 1);
+    this.telegram = opciones.telegram ?? new TelegramHttp();
+    this.esperaVigiaMs = opciones.esperaVigiaMs ?? ESPERA_VIGIA_MS;
+    this.intervaloVigiaMs = opciones.intervaloVigiaMs ?? INTERVALO_VIGIA_MS;
+    this.bitacora = new BitacoraAcciones(
+      rutas.acciones ?? join(dirname(rutas.vault), 'acciones', 'propias.jsonl')
+    );
+    /*
+     * Toda escritura del panel queda anotada antes de salir: es lo que impide
+     * que un cierre o un ajuste del propio panel llegue a Telegram como si lo
+     * hubiera hecho el cliente.
+     */
+    cliente.observarEscrituras((e) =>
+      this.bitacora.anotar({
+        ts: e.ts,
+        cuenta: huellaCuenta(e.apiKey),
+        metodo: e.metodo,
+        ruta: e.ruta,
+        cuerpo: e.cuerpo
+      })
+    );
+    this.vigia = new VigiaOperaciones({
+      rutaEstado: rutas.alertas ?? join(dirname(rutas.vault), 'alertas', 'estado.json'),
+      bitacora: this.bitacora,
+      traspasosPanel: () => this.traspasosDelPanel(),
+      cuentas: () => this.cuentasVigiladas(),
+      destino: () => this.destinoTelegram(),
+      ahoraMs: () => this.cliente.ahora(),
+      zona: this.zonaHoraria,
+      numeroPanel: this.numeroPanel,
+      moneda: MERCADOS[this.mercado].marginCoin,
+      dormir: this.dormir
+    });
     this.escucharConexiones();
   }
 
@@ -604,6 +790,10 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
       for (const cuenta of registro.listarCuentas()) this.conexiones.registrar(cuenta.id);
 
       this.anunciar();
+      /* Lo de más de 120 días ya no tiene con qué compararse: Bitget no lo entrega. */
+      void this.bitacora.purgar(this.cliente.ahora() - BITACORA_RETENCION_MS).catch(() => undefined);
+      this.anotarInicioVigia('desbloqueo');
+      this.programarVigia();
       return { ok: true, motivo: null, mensaje: null };
     } catch (e) {
       if (e instanceof ErrorVault) return { ok: false, motivo: e.motivo, mensaje: e.message };
@@ -654,11 +844,15 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
 
   /** Cierra el almacen y borra de memoria lo que se pueda. */
   cerrar(): void {
+    this.detenerVigia();
+    this.vigia.detener();
+    this.lotesEnCurso.clear();
     this.vault?.cerrar();
     this.vault = null;
     this.registro = null;
     this.saldos.clear();
     this.apalancamientos.clear();
+    this.lectorSaldo.limpiar();
     /* Un plan sin sesion no se puede ejecutar: se tira con las credenciales. */
     this.planes.clear();
     this.planesCierre.clear();
@@ -1229,6 +1423,476 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     await vault.guardar();
   }
 
+  /* ---------------- historial de posiciones cerradas ---------------- */
+
+  /**
+   * Trae de Bitget las posiciones cerradas nuevas de una cuenta y las guarda.
+   *
+   * Solo lee. Dos llamadas seguidas para la misma cuenta comparten resultado;
+   * ver `historial/sincronizador.ts`.
+   */
+  async sincronizarHistorial(cuentaId: string): Promise<ResumenSincronizacion> {
+    this.exigirAbierta();
+    return this.historial.sincronizar(cuentaId);
+  }
+
+  /**
+   * Lo guardado de una cuenta en un periodo, con su resultado, sin salir a la red.
+   *
+   * Es lo que hace que el historial aparezca al instante al abrir la pantalla:
+   * se pinta esto y, en paralelo, se pide `sincronizarHistorial` para traer lo
+   * nuevo. Sin `periodo`, todo lo guardado.
+   *
+   * Lista y resumen salen de **la misma lectura** del archivo: el conteo de
+   * ganadoras y la suma siempre corresponden exactamente a las filas que se
+   * devuelven, aunque una sincronizacion este escribiendo a la vez.
+   */
+  async consultarHistorial(
+    cuentaId: string,
+    periodo?: Periodo,
+    filtro: FiltroHistorial = SIN_FILTRO
+  ): Promise<HistorialCuentaIpc> {
+    this.exigirAbierta();
+    const rango = periodo === undefined ? null : rangoDePeriodo(periodo, this.zonaHoraria);
+    const h = await this.historial.leer(cuentaId);
+    const cobertura = h?.cobertura ?? null;
+    const delPeriodo = filtrarPorCierre(Object.values(h?.posiciones ?? {}), rango);
+    /*
+     * El filtro va despues del periodo, y la lista de pares sale de antes del
+     * filtro: si no, elegir BTCUSDT haria desaparecer los demas pares del
+     * selector y no habria forma de cambiar a otro sin quitar el filtro.
+     */
+    const posiciones = delPeriodo
+      .filter((p) => cumpleFiltro(filtro, p))
+      .map(({ tp, ...p }) => ({ ...p, takeProfit: tp ?? null }));
+
+    return {
+      cuentaId,
+      simbolos: [...new Set(delPeriodo.map((p) => p.symbol))].sort(),
+      filtrado: hayFiltro(filtro),
+      periodo:
+        periodo === undefined || rango === null
+          ? null
+          : { ...periodo, inicioMs: rango.inicioMs, finMs: rango.finMs, zonaHoraria: this.zonaHoraria },
+      posiciones,
+      resumen: resumir(posiciones),
+      completitud: completitud(rango, cobertura, this.cliente.ahora()),
+      cobertura,
+      sincronizadoEn: h?.sincronizadoEn ?? null
+    };
+  }
+
+  /**
+   * Las filas de una exportacion: exactamente las de `consultarHistorial` con
+   * el mismo periodo y filtro, mas los nombres que identifican la subcuenta.
+   *
+   * Se calcula antes de abrir el dialogo de guardar: un periodo invalido o una
+   * cuenta dada de baja se dicen sin hacer elegir un archivo para nada.
+   */
+  async datosExportacion(
+    cuentaId: string,
+    periodo: Periodo | undefined,
+    filtro: FiltroHistorial,
+    numeroPanel: number
+  ): Promise<{ csv: string; nombre: string; filas: number }> {
+    const { registro } = this.exigirAbierta();
+    const h = await this.consultarHistorial(cuentaId, periodo, filtro);
+    const cuenta = registro.cuenta(cuentaId);
+    const subcuenta = cuenta?.etiqueta ?? cuentaId;
+    const grupo = cuenta === undefined ? '' : registro.nombreDeGrupo(cuenta.grupoId);
+    /* `PCB-1-A-1`: el mismo que enseña la pantalla, para cruzar captura y archivo. */
+    const identificador =
+      cuenta === undefined ? cuentaId : identificadorCuenta(numeroPanel, grupo, cuenta.slot);
+
+    return {
+      csv: construirCsv(h.posiciones, {
+        identificador,
+        cuenta: grupo,
+        subcuenta,
+        zona: this.zonaHoraria
+      }),
+      nombre: nombreArchivoCsv(identificador, periodo?.desde ?? null, periodo?.hasta ?? null),
+      filas: h.posiciones.length
+    };
+  }
+
+  /**
+   * El saldo vigente de una cuenta, tal como lo reporta Bitget ahora.
+   *
+   * Con la credencial de la propia cuenta, no con `sub-account-assets` de la
+   * madre: aquel tiene un cupo de una peticion cada 10 s y aqui se consulta una
+   * cuenta cada vez. Dos llamadas en menos de `SALDO_VIGENCIA_MS` reciben la
+   * misma lectura.
+   */
+  async saldoCuenta(cuentaId: string): Promise<SaldoCuentaIpc> {
+    this.exigirAbierta();
+    return this.lectorSaldo.leer(cuentaId);
+  }
+
+  private async leerSaldoCuenta(cuentaId: string): Promise<SaldoCuenta> {
+    const credencial = this.credencialSellada(cuentaId);
+    if (credencial === null || this.registro?.cuenta(cuentaId) === undefined) {
+      throw new ErrorHistorial('cuenta-desconocida', 'La cuenta ya no está en el panel.');
+    }
+
+    const mercado = MERCADOS[this.mercado];
+    const r = await leerConReintentos(
+      () => obtenerCuentasFuturos(this.cliente, credencial, mercado.productType, mercado.marginCoin),
+      { dormir: this.dormir }
+    );
+    /* Se filtra por la moneda del mercado: en el simulado es SUSDT, no USDT. */
+    const fila = r.datos.find((c) => c.marginCoin === mercado.marginCoin);
+
+    /*
+     * De paso, la matriz: es el mismo dato que el barrido refresca cada 45 s, y
+     * no hay razon para que la pantalla de historial enseñe uno y la matriz
+     * otro. Solo si la cuenta sigue en el panel: pudo darse de baja mientras se
+     * leia.
+     */
+    if (fila !== undefined && fila.available !== '' && this.registro?.cuenta(cuentaId) !== undefined) {
+      this.registrarSaldo(cuentaId, fila.available);
+    }
+
+    const vacioANulo = (v: string | undefined): string | null => (v === undefined || v === '' ? null : v);
+    return {
+      cuentaId,
+      moneda: mercado.marginCoin,
+      equity: vacioANulo(fila?.accountEquity),
+      disponible: vacioANulo(fila?.available),
+      bloqueado: vacioANulo(fila?.locked),
+      leidoEn: this.cliente.ahora(),
+      superficie: superficieDe(credencial)
+    };
+  }
+
+  /** Avisa del avance de una sincronizacion. Lo consume `historial:progreso`. */
+  alProgresarHistorial(oyente: (p: ProgresoHistorial) => void): () => void {
+    this.oyentesHistorial.add(oyente);
+    return () => {
+      this.oyentesHistorial.delete(oyente);
+    };
+  }
+
+  /**
+   * La cuenta tal como esta ahora, con una fuente de paginas ya firmada.
+   *
+   * Pasa por `credencialSellada` como todo lo demas: es lo que manda una cuenta
+   * UTA al endpoint de V3 y una Classic al de V2.
+   */
+  private cuentaHistorial(cuentaId: string) {
+    if (this.vault === null || this.registro === null || this.vault.estaCerrado) return null;
+    const cuenta = this.registro.cuenta(cuentaId);
+    const credencial = this.credencialSellada(cuentaId);
+    if (cuenta === undefined || credencial === null) return null;
+
+    const mercado = MERCADOS[this.mercado];
+    return {
+      uid: cuenta.uid,
+      fuente: async (consulta: Parameters<typeof obtenerHistorialPosiciones>[3]) =>
+        (await obtenerHistorialPosiciones(this.cliente, credencial, mercado, consulta)).datos,
+      planesTp: (desdeMs: number, hastaMs: number) =>
+        leerPlanesTp(this.cliente, credencial, mercado, desdeMs, hastaMs)
+    };
+  }
+
+  /* ---------------- alertas de Telegram ---------------- */
+
+  /** Avisa al terminar cada revisión de alertas. Lo consume el evento `alertas:revision`. */
+  alRevisarAlertas(oyente: (r: RevisionAlertasIpc) => void): () => void {
+    this.oyentesAlertas.add(oyente);
+    return () => {
+      this.oyentesAlertas.delete(oyente);
+    };
+  }
+
+  async estadoAlertas(): Promise<EstadoAlertasIpc> {
+    const { vault } = this.exigirAbierta();
+    const cfg = vault.telegramConfig();
+    const r = await this.vigia.resumen();
+    return {
+      configurado: cfg !== null,
+      chatId: cfg?.chatId ?? null,
+      chatTitulo: cfg?.chatTitulo ?? null,
+      activadoEn: cfg?.activadoEn ?? null,
+      revisando: this.vigia.revisando,
+      pendientes: r.pendientes,
+      ultimaRevision: r.ultimaRevision,
+      numeroPanel: this.numeroPanel()
+    };
+  }
+
+  /**
+   * Comprueba un token y lista los chats que le escribieron al bot.
+   *
+   * No guarda nada: es el paso de la pantalla en el que el operador elige el
+   * grupo. Así no hace falta ningún bot de terceros para saber su id.
+   */
+  async buscarChatsTelegram(token: string): Promise<BusquedaChatsIpc> {
+    this.exigirAbierta();
+    try {
+      const bot = await this.telegram.comprobarBot(token.trim());
+      const chats = await this.telegram.chatsRecientes(token.trim());
+      return {
+        ok: true,
+        bot,
+        chats,
+        mensaje:
+          chats.length === 0
+            ? 'El bot todavía no ve ningún chat. Agréguelo al grupo, escriba /start en el grupo y vuelva a buscar.'
+            : null
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        bot: null,
+        chats: [],
+        mensaje: e instanceof ErrorTelegram ? e.message : 'No se pudo consultar Telegram.'
+      };
+    }
+  }
+
+  /**
+   * Guarda el bot, pero solo si el mensaje de prueba llega.
+   *
+   * Pide la contraseña de paso, como la baja de una cuenta: el token da voz en
+   * el grupo, y quien se sienta ante un panel desbloqueado no debe poder
+   * desviar los avisos a su propio chat. Al guardar se toma la foto de
+   * partida de cada subcuenta: lo de antes de activar no se avisa.
+   */
+  async configurarAlertas(
+    config: { token: string; chatId: string; chatTitulo: string | null },
+    contrasenaPaso: string
+  ): Promise<ResultadoAlertasIpc> {
+    const { vault } = this.exigirAbierta();
+    if (!vault.tienePaso()) {
+      return this.resultadoAlertas(
+        false,
+        'sin-paso',
+        'Primero fije una contraseña de paso en Seguridad: la pide guardar el bot.'
+      );
+    }
+    if (!(await vault.comprobarPaso(contrasenaPaso))) {
+      return this.resultadoAlertas(false, 'paso-incorrecto', 'La contraseña de paso no es correcta.');
+    }
+
+    const token = config.token.trim();
+    const chatId = config.chatId.trim();
+    if (chatId === '') {
+      return this.resultadoAlertas(false, 'sin-chat', 'Elija el grupo o chat donde llegarán los avisos.');
+    }
+
+    try {
+      await this.telegram.comprobarBot(token);
+      await this.telegram.enviar(token, chatId, mensajePrueba(this.numeroPanel()));
+    } catch (e) {
+      return this.resultadoAlertas(
+        false,
+        e instanceof ErrorTelegram ? e.motivo : 'otro',
+        e instanceof Error ? e.message : 'No se pudo hablar con Telegram.'
+      );
+    }
+
+    vault.fijarTelegram({
+      token,
+      chatId,
+      chatTitulo: config.chatTitulo,
+      activadoEn: new Date(this.cliente.ahora()).toISOString()
+    });
+    await vault.guardar();
+    await this.vigia.reiniciar();
+    this.anotarInicioVigia('configuracion');
+    /* La foto de partida ya, y desde ahí la revisión periódica. */
+    void this.ejecutarRevision()
+      .catch(() => undefined)
+      .finally(() => this.programarVigia(this.intervaloVigiaMs));
+
+    return this.resultadoAlertas(
+      true,
+      null,
+      'Listo: el mensaje de prueba ya está en el chat. Desde ahora, cada vez que se desbloquee el ' +
+        'panel llegará el resumen de lo que se hizo fuera de él.'
+    );
+  }
+
+  async probarAlertas(): Promise<ResultadoAlertasIpc> {
+    const { vault } = this.exigirAbierta();
+    const cfg = vault.telegramConfig();
+    if (cfg === null) {
+      return this.resultadoAlertas(false, 'sin-configurar', 'No hay un bot configurado.');
+    }
+    try {
+      await this.telegram.enviar(cfg.token, cfg.chatId, mensajePrueba(this.numeroPanel()));
+      return this.resultadoAlertas(true, null, 'Mensaje de prueba enviado.');
+    } catch (e) {
+      return this.resultadoAlertas(
+        false,
+        e instanceof ErrorTelegram ? e.motivo : 'otro',
+        e instanceof Error ? e.message : 'No se pudo enviar.'
+      );
+    }
+  }
+
+  /** Quita el bot y borra las marcas: reactivar más tarde no avisa lo de entretanto. */
+  async desactivarAlertas(contrasenaPaso: string): Promise<ResultadoAlertasIpc> {
+    const { vault } = this.exigirAbierta();
+    if (!(await vault.comprobarPaso(contrasenaPaso))) {
+      return this.resultadoAlertas(false, 'paso-incorrecto', 'La contraseña de paso no es correcta.');
+    }
+    vault.fijarTelegram(null);
+    await vault.guardar();
+    this.detenerVigia();
+    await this.vigia.reiniciar();
+    anotarEvento({ evento: 'vigia-detenido', datos: { motivo: 'desactivado' } });
+    return this.resultadoAlertas(true, null, 'Alertas desactivadas. El bot ya no recibirá avisos de este panel.');
+  }
+
+  /** Revisa ahora, sin esperar a la próxima apertura. */
+  async revisarAlertas(): Promise<RevisionAlertasIpc> {
+    this.exigirAbierta();
+    return this.ejecutarRevision();
+  }
+
+  private async ejecutarRevision(): Promise<RevisionAlertasIpc> {
+    const r = await this.vigia.revisar();
+    /*
+     * Con el panel bloqueado no se anuncia nada: ni la revisión que el bloqueo
+     * cortó ni la que estaba terminando cuando llegó. La pantalla ya es la de
+     * desbloqueo y un aviso ahí no tendría a quién decírselo.
+     */
+    const bloqueado = this.vault === null || this.vault.estaCerrado;
+    if (r.envio !== 'abortado' && !bloqueado) for (const oyente of this.oyentesAlertas) oyente(r);
+    return r;
+  }
+
+  /**
+   * La revisión al desbloquear, unos segundos después.
+   *
+   * Al desbloquear se verifican a la vez todas las credenciales; la revisión
+   * espera a que pase esa ráfaga para no disputarle el cupo de Bitget.
+   */
+  private programarVigia(esperaMs: number = this.esperaVigiaMs): void {
+    this.detenerVigia();
+    if (this.vault === null || this.vault.estaCerrado || this.vault.telegramConfig() === null) return;
+    this.temporizadorVigia = setTimeout(() => {
+      this.temporizadorVigia = null;
+      void this.cicloVigia();
+    }, esperaMs);
+    this.temporizadorVigia.unref?.();
+  }
+
+  private detenerVigia(): void {
+    if (this.temporizadorVigia !== null) clearTimeout(this.temporizadorVigia);
+    this.temporizadorVigia = null;
+  }
+
+  /**
+   * Una vuelta de la revisión periódica, y la cita para la siguiente.
+   *
+   * La siguiente se cuenta desde que termina esta, no desde que empezó: con
+   * cientos de subcuentas una revisión dura minutos, y así nunca se encadenan
+   * dos. Con un lote en marcha no se revisa —el cupo de Bitget es suyo— y se
+   * vuelve a mirar en un minuto. Al bloquear, `programarVigia` ya no encuentra
+   * almacén abierto y la cadena se corta sola.
+   */
+  private async cicloVigia(): Promise<void> {
+    if (this.lotesEnCurso.size > 0) {
+      this.programarVigia(POSPONER_VIGIA_POR_LOTE_MS);
+      return;
+    }
+    let reintentar: boolean;
+    try {
+      const r = await this.ejecutarRevision();
+      reintentar = r.errores.length > 0 || r.envio === 'fallo';
+    } catch (e) {
+      /* Nada de lo que falle aquí corta la cadena: se anota y se vuelve a intentar. */
+      reintentar = true;
+      anotarEvento({
+        evento: 'vigia-error',
+        datos: { mensaje: redactarTexto(e instanceof Error ? e.message : String(e)).slice(0, 300) }
+      });
+    }
+    this.programarVigia(
+      reintentar ? Math.min(REINTENTO_VIGIA_MS, this.intervaloVigiaMs) : this.intervaloVigiaMs
+    );
+  }
+
+  /**
+   * `vigia-iniciado`, también cuando no arranca: sin bot guardado no se revisa
+   * nada ni se toca la red, y sin esta línea el log no distinguía eso de un
+   * vigía que falla. Es justo lo que no se pudo saber con el log de la v0.16.3.
+   */
+  private anotarInicioVigia(origen: 'desbloqueo' | 'configuracion'): void {
+    const cfg = this.vault?.telegramConfig() ?? null;
+    anotarEvento({
+      evento: 'vigia-iniciado',
+      datos: {
+        origen,
+        activo: cfg !== null,
+        motivo: cfg === null ? 'sin-bot-configurado' : null,
+        chat: cfg?.chatTitulo ?? null,
+        cuentas: this.registro?.listarCuentas().length ?? 0,
+        esperaMs: this.esperaVigiaMs,
+        intervaloMs: this.intervaloVigiaMs
+      }
+    });
+  }
+
+  private async resultadoAlertas(
+    ok: boolean,
+    motivo: string | null,
+    mensaje: string
+  ): Promise<ResultadoAlertasIpc> {
+    return { ok, motivo, mensaje, estado: await this.estadoAlertas() };
+  }
+
+  /** Las subcuentas que el vigía revisa, con su forma de leer Bitget. */
+  private async cuentasVigiladas(): Promise<CuentaVigilada[]> {
+    if (this.vault === null || this.registro === null || this.vault.estaCerrado) return [];
+    const registro = this.registro;
+    const simbolos = (await this.ranuras().catch(() => [])).flatMap((a) =>
+      a === null ? [] : [a.simbolo]
+    );
+    const panel = this.numeroPanel();
+    const mercado = MERCADOS[this.mercado];
+
+    return this.cuentasBarribles().flatMap(({ cuentaId, credencial }) => {
+      const c = registro.cuenta(cuentaId);
+      if (c === undefined) return [];
+      const grupo = registro.nombreDeGrupo(c.grupoId);
+      return [
+        {
+          cuentaId,
+          uid: c.uid,
+          identificador: identificadorCuenta(panel, grupo, c.slot),
+          etiqueta: c.etiqueta,
+          grupo,
+          huella: huellaCuenta(credencial.apiKey),
+          simbolos,
+          fuentes: fuentesBitget(this.cliente, credencial, mercado, this.dormir)
+        }
+      ];
+    });
+  }
+
+  /** Los traspasos que hizo el panel, para no avisarlos como externos. */
+  private async traspasosDelPanel(): Promise<TraspasoDelPanel[]> {
+    const movimientos = await this.traspasos.listar(Number.MAX_SAFE_INTEGER).catch(() => []);
+    return movimientos
+      .filter((m) => m.resultado !== 'fallo')
+      .map((m) => ({
+        ts: Date.parse(m.ts),
+        importe: m.importe,
+        uidOrigen: m.uidOrigen,
+        uidDestino: m.uidDestino
+      }));
+  }
+
+  private destinoTelegram(): DestinoTelegram | null {
+    if (this.vault === null || this.vault.estaCerrado) return null;
+    const cfg = this.vault.telegramConfig();
+    return cfg === null ? null : { cliente: this.telegram, token: cfg.token, chatId: cfg.chatId };
+  }
+
   /* ---------------- tope de margen inicial ---------------- */
 
   /**
@@ -1528,7 +2192,8 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
    */
   async ejecutarCierre(
     planId: string,
-    soloEstos?: { cuentaId: string; lado: Lado }[]
+    soloEstos?: { cuentaId: string; lado: Lado }[],
+    contrasenaPaso?: string
   ): Promise<Lote> {
     this.exigirAbierta();
 
@@ -1540,17 +2205,45 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
       );
     }
 
-    const oids =
+    const elegidas =
       soloEstos === undefined
-        ? undefined
-        : plan.entradas
-            .filter((e) => soloEstos.some((s) => s.cuentaId === e.cuentaId && s.lado === e.lado))
-            .map((e) => e.clientOid);
+        ? plan.entradas
+        : plan.entradas.filter((e) =>
+            soloEstos.some((s) => s.cuentaId === e.cuentaId && s.lado === e.lado)
+          );
+    const oids = soloEstos === undefined ? undefined : elegidas.map((e) => e.clientOid);
+
+    /*
+     * Cerrar en negativo pide la contraseña de paso; en positivo, no.
+     *
+     * El cliente lo pidio el 29/10/2026: el cierre rapido tiene que seguir
+     * siendo inmediato -se le quito la clave el 01/10/2026 por eso-, pero un
+     * cierre que realiza perdida no puede salir de un clic por error. La
+     * pantalla ya pide la clave; esta es la comprobacion que de verdad lo
+     * garantiza, porque el renderer no puede ser el unico freno de nada que
+     * mueva dinero.
+     */
+    if (cierreConPerdida(elegidas) && !this.cierresAutorizados.has(planId)) {
+      if (contrasenaPaso === undefined || contrasenaPaso === '') {
+        throw new ErrorPlan(
+          'paso-requerido',
+          'Este cierre dejaría al menos una posición en negativo: hace falta la contraseña de paso.'
+        );
+      }
+      if (!(await this.comprobarPaso(contrasenaPaso))) {
+        throw new ErrorPlan(
+          'paso-incorrecto',
+          'Contraseña de paso incorrecta. No se cerró ninguna posición.'
+        );
+      }
+      this.cierresAutorizados.add(planId);
+    }
 
     const lote = await this.motor.ejecutarCierre(plan, oids);
 
     if (soloEstos === undefined && lote.jobs.every((j) => j.estado !== 'fallo')) {
       this.planesCierre.delete(planId);
+      this.cierresAutorizados.delete(planId);
     }
 
     return lote;
@@ -2074,40 +2767,45 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
      *
      * Capturado el 01/10/2026: Bitget rechaza con `31008` todo Take Profit
      * separado sobre una posicion UTA abierta, asi que la apertura lo lleva
-     * puesto (ver `abrirPosicionV3`). Aqui solo queda contarlo en el informe y
-     * en el monitor. Mandarlo otra vez solo produciria la fila «SIN Take Profit»
-     * sobre una posicion que si lo tiene. Cambiarlo despues va por
+     * puesto (ver `abrirPosicionV3`). Cambiarlo despues va por
      * `modify-strategy-order`, ver `ejecutarTakeProfit`.
+     *
+     * --------------------------------------------------------------------------
+     * Pero «la orden entro» no prueba que el Take Profit entrara con ella
+     * --------------------------------------------------------------------------
+     * El 19/10/2026, en ELITE LAURA, long y short abrieron a la vez con su
+     * Take Profit embebido, los dos `place-order` respondieron `00000`, y el
+     * del short no estaba: el operador lo puso a mano a los 13 minutos. Esta
+     * rama lo daba por puesto sin mirar. Ahora se comprueba en
+     * `unfilled-strategy-orders`, y el que falta se repone por el camino
+     * normal -`planificarTakeProfit` + `ejecutarTakeProfit`-, que calcula el
+     * precio desde la entrada real y, si Bitget rechaza el Take Profit
+     * separado, deja la fila «SIN Take Profit» que el operador tiene que ver.
      */
     const clasicas: Job[] = [];
+    const porVerificar: Job[] = [];
     for (const job of todas) {
       const cuenta = this.cuentaEjecutable(job.cuentaId);
       const entrada = plan.entradas.find((e) => e.cuentaId === job.cuentaId && e.lado === job.lado);
+      /*
+       * Una orden que agrega a una posicion que ya existia tambien va por el
+       * camino clasico, en UTA igual que en V2: hay que releer la posicion ya
+       * consolidada y llevar su Take Profit a la entrada promedio y al tamaño
+       * de la posicion entera. Ver `EntradaPlan.embeberTp`.
+       */
       if (
         cuenta === null ||
         superficieDe(cuenta.credencial) !== 'v3' ||
         entrada === undefined ||
-        entrada.precioDisparoTp === null
+        entrada.precioDisparoTp === null ||
+        entrada.consolidarTp === true
       ) {
         clasicas.push(job);
         continue;
       }
 
       if (job.estado === 'exito') {
-        lote.jobs.push(
-          this.trabajoDerivado(
-            job,
-            'TP',
-            'exito',
-            null,
-            `Take Profit ${entrada.precioDisparoTp} puesto con la orden de apertura.`
-          )
-        );
-        this.posiciones.fijarTakeProfit(job.cuentaId, plan.simbolo, job.lado, {
-          precio: entrada.precioDisparoTp,
-          porcentaje: Number(porcentaje),
-          planId: ''
-        });
+        porVerificar.push(job);
       } else {
         lote.jobs.push(
           this.trabajoDerivado(
@@ -2120,11 +2818,69 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         );
       }
     }
+    const reponer = await this.verificarTakeProfitEmbebido(plan, lote, porVerificar);
+    const aReponer = new Set(reponer.map((j) => `${j.cuentaId}|${j.lado}`));
+    clasicas.push(...reponer);
+
+    /*
+     * El desenlace de cada reposicion va a la bitacora: `tp-repuesto` si quedo
+     * puesto, `tp-faltante` si no. Es lo que demuestra despues que paso sin
+     * depender de las respuestas GET, que no se anotan.
+     */
+    const anotarReposicion = (
+      job: Job,
+      estado: Job['estado'],
+      mensaje: string,
+      precio: string | null
+    ): void => {
+      if (!aReponer.has(`${job.cuentaId}|${job.lado}`)) return;
+      const cuenta = this.cuentaEjecutable(job.cuentaId);
+      anotarEvento({
+        evento: estado === 'exito' ? 'tp-repuesto' : 'tp-faltante',
+        datos: {
+          cuenta: cuenta === null ? null : cuentaDe(cuenta.credencial.apiKey),
+          etiqueta: job.etiqueta,
+          simbolo: plan.simbolo,
+          lado: job.lado,
+          causa: 'embebido-ausente',
+          estado,
+          precio,
+          mensaje: mensaje.slice(0, 200)
+        }
+      });
+    };
+    const prefijoReposicion = (job: Job): string =>
+      aReponer.has(`${job.cuentaId}|${job.lado}`)
+        ? 'El Take Profit de la orden de apertura no quedó puesto en Bitget; se intentó reponer. '
+        : '';
+
     const abiertas: readonly Job[] = clasicas;
     if (abiertas.length === 0) return;
 
     const objetivos = abiertas.map((j) => ({ cuentaId: j.cuentaId, lado: j.lado }));
     const estadoApertura = new Map(abiertas.map((j) => [`${j.cuentaId}|${j.lado}`, j.estado]));
+
+    /*
+     * Tamaño que tendra cada posicion promediada cuando Bitget refleje lo
+     * agregado. Solo de las que entraron: de una indeterminada no se sabe.
+     */
+    const esperado = new Map<string, Decimal>();
+    for (const job of abiertas) {
+      const entrada = plan.entradas.find((e) => e.cuentaId === job.cuentaId && e.lado === job.lado);
+      if (job.estado !== 'exito' || entrada?.consolidarTp !== true || (entrada.totalPrevio ?? null) === null) {
+        continue;
+      }
+      esperado.set(
+        `${job.cuentaId}|${job.lado}`,
+        new Decimal(entrada.totalPrevio ?? '0').plus(entrada.size)
+      );
+    }
+    const sinConsolidar = (p: PlanTakeProfit): boolean =>
+      p.entradas.some((e) => {
+        const total = esperado.get(`${e.cuentaId}|${e.lado}`);
+        const qty = Number(e.qtyPosicion ?? NaN);
+        return total !== undefined && (!Number.isFinite(qty) || new Decimal(qty).lessThan(total));
+      });
 
     let planTp: PlanTakeProfit;
     try {
@@ -2143,7 +2899,8 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
 
       for (
         let intento = 1;
-        intento < INTENTOS_POSICION && planTp.descartes.some((d) => d.motivo === 'sin-posicion');
+        (intento < INTENTOS_POSICION && planTp.descartes.some((d) => d.motivo === 'sin-posicion')) ||
+        (intento < INTENTOS_CONSOLIDACION && sinConsolidar(planTp));
         intento += 1
       ) {
         await this.dormir(ESPERA_POSICION_MS);
@@ -2160,14 +2917,10 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
        * Profit, y eso tiene que verse: una fila por casilla diciendolo.
        */
       for (const job of abiertas) {
+        const mensaje = `No se pudo calcular el Take Profit: ${textoError(e)}`;
+        anotarReposicion(job, 'fallo', mensaje, null);
         lote.jobs.push(
-          this.trabajoDerivado(
-            job,
-            'TP',
-            'fallo',
-            null,
-            `No se pudo calcular el Take Profit: ${textoError(e)}`
-          )
+          this.trabajoDerivado(job, 'TP', 'fallo', null, `${prefijoReposicion(job)}${mensaje}`)
         );
       }
       return;
@@ -2175,6 +2928,7 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
 
     if (planTp.entradas.length > 0) {
       const loteTp = await this.motor.ejecutarTakeProfit(planTp);
+      await this.comprobarTakeProfitPuesto(planTp, loteTp, esperado);
       for (const j of loteTp.jobs) {
         const original = abiertas.find((a) => a.cuentaId === j.cuentaId && a.lado === j.lado);
         if (original === undefined) continue;
@@ -2185,15 +2939,24 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
          * al operador que tiene una posicion abierta y desprotegida.
          */
         const motivo = j.mensaje ?? mensajeTp(j.estado);
+        const entradaTp = planTp.entradas.find((e) => e.cuentaId === j.cuentaId && e.lado === j.lado);
+        anotarReposicion(original, j.estado, motivo, entradaTp?.precioDisparo ?? null);
         lote.jobs.push(
           this.trabajoDerivado(
             original,
             'TP',
             j.estado,
             j.ordenId,
-            j.estado === 'fallo' && !motivo.includes(SIN_PROTECCION)
-              ? `${motivo} ${SIN_PROTECCION}`
-              : motivo
+            prefijoReposicion(original) +
+              (j.estado !== 'fallo'
+                ? motivo
+                : esperado.has(`${j.cuentaId}|${j.lado}`)
+                  ? motivo.includes(REVISAR_CONSOLIDADO)
+                    ? motivo
+                    : `${motivo} ${REVISAR_CONSOLIDADO}`
+                  : motivo.includes(SIN_PROTECCION)
+                    ? motivo
+                    : `${motivo} ${SIN_PROTECCION}`)
           )
         );
 
@@ -2227,16 +2990,248 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
       const original = abiertas.find((a) => a.cuentaId === d.cuentaId && a.lado === d.lado);
       if (original === undefined) continue;
       const abrio = estadoApertura.get(`${d.cuentaId}|${d.lado}`) === 'exito';
+      const consolidada = esperado.has(`${d.cuentaId}|${d.lado}`);
+      anotarReposicion(original, 'fallo', d.mensaje, null);
       lote.jobs.push(
         this.trabajoDerivado(
           original,
           'TP',
           abrio ? 'fallo' : 'omitida',
           null,
-          abrio ? `${d.mensaje} ${SIN_PROTECCION}` : d.mensaje
+          prefijoReposicion(original) +
+            (abrio ? `${d.mensaje} ${consolidada ? REVISAR_CONSOLIDADO : SIN_PROTECCION}` : d.mensaje)
         )
       );
     }
+  }
+
+  /**
+   * Relee en Bitget los Take Profit que la apertura acaba de poner o modificar,
+   * y convierte en fallo el que no quedo como se pidio.
+   *
+   * --------------------------------------------------------------------------
+   * «Bitget respondio 00000» no es «la posicion esta protegida»
+   * --------------------------------------------------------------------------
+   * Se exige lo que pidio el cliente el 29/10/2026 para dar una posicion por
+   * protegida: un solo Take Profit de ese lado, al precio enviado y -en UTA,
+   * donde la orden lleva cantidad- cubriendo la posicion entera. Con dos, uno
+   * de ellos puede cerrar una parte en perdida, que es lo que paso en ELITE QLC
+   * el 28/10/2026.
+   *
+   * Si la lista no se puede leer, la fila se queda como estaba pero lo dice: no
+   * se sabe, y eso no es lo mismo que comprobado.
+   */
+  private async comprobarTakeProfitPuesto(
+    planTp: PlanTakeProfit,
+    loteTp: Lote,
+    esperado: ReadonlyMap<string, Decimal>
+  ): Promise<void> {
+    const porCuenta = new Map<string, Job[]>();
+    for (const j of loteTp.jobs) {
+      if (j.estado !== 'exito') continue;
+      porCuenta.set(j.cuentaId, [...(porCuenta.get(j.cuentaId) ?? []), j]);
+    }
+
+    for (const [cuentaId, jobs] of porCuenta) {
+      const cuenta = this.cuentaEjecutable(cuentaId);
+      if (cuenta === null) continue;
+      const uta = superficieDe(cuenta.credencial) === 'v3';
+
+      let puestos: PlanPendiente[];
+      try {
+        puestos = await planesPendientes(this.cliente, cuenta.credencial, MERCADOS[this.mercado], {
+          estricto: true
+        });
+      } catch (e) {
+        for (const j of jobs) {
+          j.mensaje =
+            `${j.mensaje ?? 'Take Profit enviado.'} No se pudo releer en Bitget para comprobarlo ` +
+            `(${textoError(e)}): compruébelo allí.`;
+        }
+        continue;
+      }
+
+      for (const j of jobs) {
+        const entrada = planTp.entradas.find((e) => e.cuentaId === j.cuentaId && e.lado === j.lado);
+        if (entrada === undefined) continue;
+        const delLado = takeProfitsDe(puestos, planTp.simbolo, j.lado);
+        const total = esperado.get(`${j.cuentaId}|${j.lado}`) ?? null;
+        const cubre = new Decimal(Number.isFinite(Number(entrada.qtyPosicion ?? '')) ? (entrada.qtyPosicion || '0') : '0');
+        const bueno = delLado[0];
+
+        let problema: string | null = null;
+        if (bueno === undefined) {
+          problema = 'Bitget no muestra ningún Take Profit de este lado.';
+        } else if (delLado.length > 1) {
+          problema = `Bitget muestra ${delLado.length} Take Profit de este lado y tiene que haber uno solo.`;
+        } else if (Number(bueno.triggerPrice ?? NaN) !== Number(entrada.precioDisparo)) {
+          problema = `Bitget muestra el Take Profit en ${bueno.triggerPrice ?? '?'} y se envió ${entrada.precioDisparo}.`;
+        } else if (
+          uta &&
+          Number.isFinite(Number(bueno.qty ?? '')) &&
+          (bueno.qty ?? '') !== '' &&
+          new Decimal(bueno.qty ?? '0').lessThan(Decimal.max(cubre, total ?? 0))
+        ) {
+          problema =
+            `El Take Profit cubre ${bueno.qty} y la posición tiene ` +
+            `${Decimal.max(cubre, total ?? 0).toFixed()}.`;
+        }
+
+        anotarEvento({
+          evento: problema === null ? 'tp-comprobado' : 'tp-no-comprobado',
+          datos: {
+            cuenta: cuentaDe(cuenta.credencial.apiKey),
+            simbolo: planTp.simbolo,
+            lado: j.lado,
+            precioEnviado: entrada.precioDisparo,
+            precioPuesto: bueno?.triggerPrice ?? null,
+            qtyPuesta: bueno?.qty ?? null,
+            qtyPosicion: entrada.qtyPosicion ?? null,
+            totalEsperado: total === null ? null : total.toFixed(),
+            puestos: delLado.length,
+            problema
+          }
+        });
+
+        if (problema === null) {
+          j.mensaje = `${j.mensaje ?? `Take Profit ${entrada.precioDisparo}.`} Comprobado en Bitget.`;
+        } else {
+          j.estado = 'fallo';
+          j.mensaje = `${problema} ${total === null ? SIN_PROTECCION : REVISAR_CONSOLIDADO}`;
+        }
+      }
+    }
+  }
+
+  /**
+   * Comprueba en Bitget que el Take Profit embebido en cada apertura UTA quedo
+   * puesto. Devuelve las aperturas a las que les falta, para reponerlo.
+   *
+   * --------------------------------------------------------------------------
+   * Tres desenlaces, y cada uno deja su linea en la bitacora
+   * --------------------------------------------------------------------------
+   *   esta puesto            fila «TP» correcta, `tp-verificado`
+   *   no aparece             se devuelve para reponer; `tp-repuesto` o
+   *                          `tp-faltante` los anota quien repone
+   *   no se pudo leer        fila «TP» fallida, `tp-faltante` causa `ilegible`
+   *
+   * El tercero **no** se repone, y es deliberado: con la lista sin leer no se
+   * sabe si el Take Profit esta, y colocar otro encima dejaria dos ordenes de
+   * cierre sobre la misma posicion. Por eso la lectura va en modo `estricto`:
+   * la normal de V3 convierte un fallo en lista vacia, que aqui se leeria como
+   * «falta» justo cuando no se sabe.
+   *
+   * Antes de dar uno por ausente se relee, con la misma espera que la de la
+   * posicion: la estrategia `tpsl` puede tardar un instante en aparecer. Si
+   * apareciera justo despues, `planificarTakeProfit` la ve como «anterior» y en
+   * UTA eso es modificar su precio, no colocar un segundo.
+   */
+  private async verificarTakeProfitEmbebido(
+    plan: PlanApertura,
+    lote: Lote,
+    jobs: readonly Job[]
+  ): Promise<Job[]> {
+    const porcentaje = Number(plan.takeProfitPorcentaje);
+    const faltan: Job[] = [];
+
+    const porCuenta = new Map<string, Job[]>();
+    for (const job of jobs) {
+      porCuenta.set(job.cuentaId, [...(porCuenta.get(job.cuentaId) ?? []), job]);
+    }
+
+    for (const [cuentaId, propios] of porCuenta) {
+      const cuenta = this.cuentaEjecutable(cuentaId);
+      if (cuenta === null) {
+        faltan.push(...propios);
+        continue;
+      }
+      const cuentaLog = cuentaDe(cuenta.credencial.apiKey);
+
+      let puestos: PlanPendiente[] | null = null;
+      let errorLectura: unknown = null;
+      let intentos = 0;
+      for (let intento = 1; intento <= INTENTOS_POSICION; intento += 1) {
+        intentos = intento;
+        try {
+          puestos = await planesPendientes(this.cliente, cuenta.credencial, MERCADOS[this.mercado], {
+            estricto: true
+          });
+          errorLectura = null;
+        } catch (e) {
+          puestos = null;
+          errorLectura = e;
+        }
+        const leidos = puestos;
+        const completos =
+          leidos !== null &&
+          propios.every((j) => buscarTakeProfit(leidos, plan.simbolo, j.lado) !== null);
+        if (completos || intento === INTENTOS_POSICION) break;
+        await this.dormir(ESPERA_POSICION_MS);
+      }
+
+      for (const job of propios) {
+        const entrada = plan.entradas.find((e) => e.cuentaId === job.cuentaId && e.lado === job.lado);
+        const enviado = entrada?.precioDisparoTp ?? null;
+
+        if (puestos === null) {
+          const mensaje =
+            `No se pudo comprobar en Bitget si el Take Profit ${enviado ?? ''} quedó puesto ` +
+            `(${textoError(errorLectura)}). Compruébelo en Bitget: si no está, ${SIN_PROTECCION}`;
+          anotarEvento({
+            evento: 'tp-faltante',
+            datos: {
+              cuenta: cuentaLog,
+              etiqueta: job.etiqueta,
+              simbolo: plan.simbolo,
+              lado: job.lado,
+              causa: 'ilegible',
+              precioEnviado: enviado,
+              intentos,
+              mensaje: textoError(errorLectura).slice(0, 200)
+            }
+          });
+          lote.jobs.push(this.trabajoDerivado(job, 'TP', 'fallo', null, mensaje));
+          continue;
+        }
+
+        const puesto = buscarTakeProfit(puestos, plan.simbolo, job.lado);
+        if (puesto === null) {
+          faltan.push(job);
+          continue;
+        }
+
+        const precio = puesto.triggerPrice ?? enviado ?? '';
+        anotarEvento({
+          evento: 'tp-verificado',
+          datos: {
+            cuenta: cuentaLog,
+            etiqueta: job.etiqueta,
+            simbolo: plan.simbolo,
+            lado: job.lado,
+            precioEnviado: enviado,
+            precioPuesto: puesto.triggerPrice ?? null,
+            orderId: puesto.orderId ?? null,
+            intentos
+          }
+        });
+        lote.jobs.push(
+          this.trabajoDerivado(
+            job,
+            'TP',
+            'exito',
+            puesto.orderId ?? null,
+            `Take Profit ${precio} puesto con la orden de apertura y comprobado en Bitget.`
+          )
+        );
+        this.posiciones.fijarTakeProfit(job.cuentaId, plan.simbolo, job.lado, {
+          precio,
+          porcentaje,
+          planId: puesto.orderId ?? ''
+        });
+      }
+    }
+
+    return faltan;
   }
 
   /**
@@ -2712,6 +3707,13 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
      * fantasma pediria un socket para siempre.
      */
     this.posiciones.olvidarCuenta(cuentaId);
+    /*
+     * Y su historial, que el presupuesto no conserva tras desvincular. Espera a
+     * la sincronizacion en curso, si la hay, para que no recree lo borrado.
+     */
+    await this.historial.olvidar(cuentaId);
+    this.lectorSaldo.olvidar(cuentaId);
+    await this.vigia.olvidar(cuentaId);
 
     if (!habia) return 'no-estaba';
 

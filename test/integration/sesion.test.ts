@@ -1425,16 +1425,18 @@ describe('planificar y ejecutar un cierre', () => {
     marginCoin: 'SUSDT',
     marginMode: 'crossed',
     openPriceAvg: '63200.5',
+    /* En ganancia: cerrar no pide la contraseña de paso. */
+    markPrice: '64000',
     liquidationPrice: '57000.1',
     leverage: '10',
     marginSize: '99.3'
   };
 
   /** Enruta las llamadas del cierre; `hay` decide si la cuenta tiene posicion. */
-  function enrutarCierre(hay = true): void {
+  function enrutarCierre(hay = true, marca = '64000'): void {
     exchange.responderCon((p) => {
       if (p.url.startsWith('/api/v2/mix/position/all-position')) {
-        return { cuerpo: sobreOk(hay ? [posicionAbierta] : []) };
+        return { cuerpo: sobreOk(hay ? [{ ...posicionAbierta, markPrice: marca }] : []) };
       }
       if (p.url.startsWith('/api/v2/mix/order/close-positions')) {
         const cuerpo = JSON.parse(p.cuerpo) as Record<string, unknown>;
@@ -1481,6 +1483,67 @@ describe('planificar y ejecutar un cierre', () => {
     expect(lote.accion).toBe('cerrar');
     expect(lote.jobs[0]?.estado).toBe('exito');
     expect(lote.jobs[0]?.etiqueta).toBe('Sub-01');
+  });
+
+  /*
+   * El cliente, 29/10/2026: el cierre rapido sigue sin contraseña, salvo que
+   * cierre en negativo. La sesion lo exige aunque la pantalla se lo salte.
+   */
+  describe('en negativo pide la contraseña de paso', () => {
+    const PASO = 'paso-1234';
+
+    async function planEnPerdida(): Promise<{ planId: string; cuentaId: string }> {
+      await sesion.crear(MAESTRA);
+      await sesion.fijarPaso(PASO);
+      verificacionCorrecta(exchange);
+      const alta = await sesion.agregar(ALTA);
+      /* Long a 63200,5 con la marca en 63000: pierde. */
+      enrutarCierre(true, '63000');
+      const cuentaId = alta.cuenta?.id ?? '';
+      const plan = await sesion.planificarCierre({
+        simbolo: SIMBOLO,
+        objetivos: [{ cuentaId, lado: 'long' }]
+      });
+      expect(Number(plan.entradas[0]?.resultadoEstimado)).toBeLessThan(0);
+      return { planId: plan.id, cuentaId };
+    }
+
+    const cierres = () => exchange.peticiones.filter((p) => p.url.includes('close-positions'));
+
+    it('sin contraseña no cierra nada', async () => {
+      const { planId } = await planEnPerdida();
+      await expect(sesion.ejecutarCierre(planId)).rejects.toThrow('contraseña de paso');
+      expect(cierres()).toHaveLength(0);
+    });
+
+    it('con la contraseña equivocada no cierra nada', async () => {
+      const { planId } = await planEnPerdida();
+      await expect(sesion.ejecutarCierre(planId, undefined, 'otra')).rejects.toThrow('incorrecta');
+      expect(cierres()).toHaveLength(0);
+    });
+
+    it('con la buena cierra, y el reintento del mismo plan no la vuelve a pedir', async () => {
+      const { planId, cuentaId } = await planEnPerdida();
+      const lote = await sesion.ejecutarCierre(planId, [{ cuentaId, lado: 'long' }], PASO);
+      expect(lote.jobs[0]?.estado).toBe('exito');
+
+      const otra = await sesion.ejecutarCierre(planId, [{ cuentaId, lado: 'long' }]);
+      expect(otra.jobs[0]?.estado).toBe('exito');
+    });
+
+    it('sin precio con que calcular el resultado, la pide igual', async () => {
+      await sesion.crear(MAESTRA);
+      await sesion.fijarPaso(PASO);
+      verificacionCorrecta(exchange);
+      const alta = await sesion.agregar(ALTA);
+      enrutarCierre(true, '');
+      const plan = await sesion.planificarCierre({
+        simbolo: SIMBOLO,
+        objetivos: [{ cuentaId: alta.cuenta?.id ?? '', lado: 'long' }]
+      });
+      expect(plan.entradas[0]?.resultadoEstimado).toBeNull();
+      await expect(sesion.ejecutarCierre(plan.id)).rejects.toThrow('contraseña de paso');
+    });
   });
 
   it('una casilla sin posicion se descarta y aparece en el informe', async () => {

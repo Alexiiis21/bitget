@@ -39,6 +39,8 @@ export const esquemaPosicion = zod.object({
   marginCoin: zod.string().nullish(),
   marginMode: zod.string().nullish(),
   openPriceAvg: zod.string().nullish(),
+  /** Precio marca. Referencia del precio actual para el lado del Take Profit. */
+  markPrice: zod.string().nullish(),
   liquidationPrice: zod.string().nullish(),
   leverage: zod.union([zod.string(), zod.number()]).nullish(),
   marginSize: zod.string().nullish(),

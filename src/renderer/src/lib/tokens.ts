@@ -266,5 +266,3 @@ export const TIPO_MONITOR = {
 /** 2 bloques de 20 casillas + etiquetas de lado. */
 export const ANCHO_MINIMO_MATRIZ = 1180;
 export const CASILLAS_POR_CUENTA = 20;
-/** Máximo de operaciones cerradas que se muestran por subcuenta en el historial. */
-export const HISTORIAL_MAXIMO = 20;

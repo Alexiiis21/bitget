@@ -337,6 +337,9 @@ residual y se activa por una bandera de configuración. Es una decisión suya, n
   Se testea: hay un test que falla si un secreto conocido aparece en la salida de log.
 - **Sin telemetría, sin Sentry, sin llamadas de red que no sean a `api.bitget.com` y
   `ws.bitget.com`.** Se aplica una Content-Security-Policy estricta en el renderer.
+  **Única excepción, desde el 15/10/2026:** `api.telegram.org`, solo si el operador
+  configura un bot de alertas, y solo desde el proceso principal para enviar avisos
+  (`src/main/alertas/telegram.ts`). Sin bot guardado en el vault no hay ni una petición.
 - **Verificación de permisos al alta:** al registrar una credencial se consulta su
   permiso y **se rechaza cualquier key con permiso de retiro habilitado**, con mensaje
   explicando cómo corregirlo. Es una defensa barata contra un error de configuración

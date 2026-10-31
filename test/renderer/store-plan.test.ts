@@ -45,6 +45,8 @@ const TOPE_VIGENTE: MarginCap = {
 /* ---------- servicio de mentira, con contador de envios ---------- */
 
 const enviados: { planId: string; only: BatchTarget[] | undefined }[] = [];
+/** La contraseña con la que salio cada envio. Solo la lleva el cierre en negativo. */
+const pasosEnviados: (string | undefined)[] = [];
 let planificaciones = 0;
 /** La ultima peticion de apertura, para comprobar que viaja lo que se eligio. */
 let ultimaApertura: OpenRequest | null = null;
@@ -127,8 +129,9 @@ vi.mock('@/services/panel-service', () => ({
       planificaciones += 1;
       return planDevuelto;
     },
-    executePlan: async (p: BatchPlan, only?: BatchTarget[]) => {
+    executePlan: async (p: BatchPlan, only?: BatchTarget[], paso?: string) => {
       enviados.push({ planId: p.id, only });
+      pasosEnviados.push(paso);
       if (falloAlEnviar !== null) throw falloAlEnviar;
       return resultado;
     },
@@ -200,6 +203,7 @@ function prepararSeleccion(): void {
 
 beforeEach(() => {
   enviados.length = 0;
+  pasosEnviados.length = 0;
   topesFijados.length = 0;
   planificaciones = 0;
   ultimaApertura = null;
@@ -306,6 +310,43 @@ describe('la contraseña de paso, solo al abrir', () => {
     await usarPanel.getState().confirmarPlan();
 
     expect(enviados).toEqual([{ planId: 'plan_close', only: undefined }]);
+    expect(pasosEnviados).toEqual([undefined]);
+  });
+
+  /*
+   * Salvo en negativo, desde el 29/10/2026: el cliente quiere un freno a cerrar
+   * con perdida por error. La contraseña viaja con el envio porque el proceso
+   * principal la vuelve a comprobar.
+   */
+  describe('cerrar en negativo si la pide', () => {
+    const enPerdida = (): BatchPlan => ({
+      ...plan('close', 1),
+      stepPasswordReason: 'Este cierre dejaría al menos una posición en negativo.'
+    });
+
+    it('con la contraseña equivocada no envia nada', async () => {
+      pasoValido = false;
+      planDevuelto = enPerdida();
+
+      await usarPanel.getState().planear('close');
+      usarPanel.getState().escribirPin('mal');
+      await usarPanel.getState().confirmarPlan();
+
+      expect(enviados).toHaveLength(0);
+      expect(usarPanel.getState().errorPaso).toContain('incorrecta');
+    });
+
+    it('con la buena envia, y la contraseña viaja con el envio', async () => {
+      pasoValido = true;
+      planDevuelto = enPerdida();
+
+      await usarPanel.getState().planear('close');
+      usarPanel.getState().escribirPin('bg1');
+      await usarPanel.getState().confirmarPlan();
+
+      expect(enviados).toEqual([{ planId: 'plan_close', only: undefined }]);
+      expect(pasosEnviados).toEqual(['bg1']);
+    });
   });
 
   /*
@@ -401,50 +442,94 @@ describe('un plan impedido', () => {
 
 /*
  * ==========================================================================
- * La selección se deshace sola tras abrir y tras cerrar.
+ * La selección se deshace sola tras enviar un lote, salvo lo que falló.
  * ==========================================================================
- * Lo pidió el cliente -primero para abrir, y el 11/09/2026 para cerrar, que se
- * había quedado fuera-. Evita un error concreto, y es el mismo en espejo: tras
- * abrir esas casillas tienen posición y la siguiente acción caería sobre ellas;
- * tras cerrar están vacías, y la siguiente apertura abriría cuarenta posiciones
- * que nadie pidió. Destildar cuarenta a mano es justamente lo que nadie hace.
+ * Lo pidió el cliente -primero para abrir, el 11/09/2026 para cerrar y el
+ * 22/10/2026 para todas las operaciones-. Tras un lote, la matriz queda vacía o
+ * con solo las casillas fallidas reintentables, para reintentarlas sin buscarlas.
  *
- * Las otras cinco conservan la selección: encadenar dos ajustes sobre las
- * mismas casillas es un uso legítimo.
+ * Lo que no puede pasar es lo contrario: que se desmarque antes de enviar -al
+ * abrir el diálogo, al cancelarlo, con la validación parada o con el envío
+ * reventado-, porque entonces el operador pierde lo que había marcado sin que
+ * haya salido nada.
  */
-describe('desmarcar tras abrir y tras cerrar', () => {
-  it('tras abrir, no queda ninguna casilla marcada', async () => {
-    expect(usarPanel.getState().contarSeleccion()).toBe(3);
-
-    await usarPanel.getState().planear('open');
+describe('desmarcar tras enviar', () => {
+  /** Planifica y aprueba. La contraseña solo la mira la apertura. */
+  async function enviar(kind: BatchPlan['kind']): Promise<void> {
+    planDevuelto = plan(kind, 3);
+    /* Los ajustes con campo propio no se planifican si está vacío -`CAMPO_DE`-. */
+    usarPanel.setState((s) => ({ valores: { ...s.valores, tpAjuste: '20', mgAjuste: '5' } }));
+    await usarPanel.getState().planear(kind);
     usarPanel.getState().escribirPin('bg1');
     await usarPanel.getState().confirmarPlan();
+  }
 
-    expect(enviados).toHaveLength(1);
-    expect(usarPanel.getState().contarSeleccion()).toBe(0);
+  it.each<BatchPlan['kind']>(['open', 'close', 'tp', 'tp-remove', 'margin-add', 'margin-remove', 'leverage'])(
+    'tras «%s» con éxito, no queda ninguna casilla marcada',
+    async (kind) => {
+      expect(usarPanel.getState().contarSeleccion()).toBe(3);
+
+      await enviar(kind);
+
+      /* Sin esto el test pasaría sin haber enviado nada, que es la peor forma de pasar. */
+      expect(enviados).toHaveLength(1);
+      expect(usarPanel.getState().contarSeleccion()).toBe(0);
+    }
+  );
+
+  it('abrir el diálogo no desmarca', async () => {
+    await usarPanel.getState().planear('open');
+
+    expect(usarPanel.getState().plan).not.toBeNull();
+    expect(usarPanel.getState().contarSeleccion()).toBe(3);
   });
 
-  it('tras cerrar, no queda ninguna casilla marcada', async () => {
-    planDevuelto = plan('close', 3);
+  it('cancelar el diálogo deja la selección intacta', async () => {
+    const antes = usarPanel.getState().seleccion;
 
     await usarPanel.getState().planear('close');
-    usarPanel.getState().escribirPin('bg1');
-    await usarPanel.getState().confirmarPlan();
+    usarPanel.getState().cancelarPlan();
 
-    expect(enviados).toHaveLength(1);
-    expect(usarPanel.getState().contarSeleccion()).toBe(0);
+    expect(enviados).toHaveLength(0);
+    expect(usarPanel.getState().seleccion).toEqual(antes);
+  });
+
+  it('la contraseña de paso agotada deja la selección intacta', async () => {
+    pasoValido = false;
+    await usarPanel.getState().planear('open');
+    for (let i = 0; i < 3; i += 1) {
+      usarPanel.getState().escribirPin('mal');
+      await usarPanel.getState().confirmarPlan();
+    }
+
+    expect(enviados).toHaveLength(0);
+    expect(usarPanel.getState().contarSeleccion()).toBe(3);
+  });
+
+  it('la validación que para antes de planificar deja la selección intacta', async () => {
+    usarPanel.setState((s) => ({ valores: { ...s.valores, mgAjuste: '' } }));
+
+    await usarPanel.getState().planear('margin-add');
+
+    expect(planificaciones).toBe(0);
+    expect(usarPanel.getState().contarSeleccion()).toBe(3);
   });
 
   /*
-   * Un lote a medias desmarca igual, y es una decisión, no un descuido.
-   *
-   * `BatchResult` no sabe cuáles salieron bien -`ok` y `skipped` son recuentos
-   * sin identidad-, así que desmarcar solo esas sería adivinar. Las fallidas se
-   * recuperan con «Reintentar solo las fallidas», que se alimenta del informe y
-   * no de la selección: por eso se comprueba aquí que el botón existe.
+   * Si el envío revienta -el proceso principal no responde-, la selección se
+   * queda. Es lo único con lo que el operador puede repetir: sin informe no hay
+   * «Reintentar las fallidas» al que agarrarse.
    */
-  it('un cierre a medias también desmarca del todo', async () => {
-    planDevuelto = plan('close', 3);
+  it('si el envío falla entero, la selección no se toca', async () => {
+    falloAlEnviar = new Error('el panel no responde');
+
+    await enviar('open');
+
+    expect(usarPanel.getState().contarSeleccion()).toBe(3);
+    expect(usarPanel.getState().avisos.at(-1)?.titulo).toContain('No se pudo enviar');
+  });
+
+  it('con fallos parciales quedan marcadas solo las fallidas', async () => {
     resultado = {
       label: 'Prueba',
       ok: 2,
@@ -455,88 +540,64 @@ describe('desmarcar tras abrir y tras cerrar', () => {
       undetermined: []
     };
 
-    await usarPanel.getState().planear('close');
-    usarPanel.getState().escribirPin('bg1');
-    await usarPanel.getState().confirmarPlan();
+    await enviar('close');
 
-    expect(usarPanel.getState().contarSeleccion()).toBe(0);
+    expect(usarPanel.getState().objetivosSeleccionados()).toEqual([
+      { subAccountId: 'sub_3', side: 'long' }
+    ]);
     expect(usarPanel.getState().reintentarFallidas).not.toBeNull();
   });
 
   /*
-   * Con casillas sin confirmar, también. Se enviaron y no se sabe qué pasó: una
-   * casilla que se quedara tildada es una invitación a actuar otra vez sobre una
-   * posición de estado desconocido, que es justo lo que el aviso prohíbe.
+   * Lo indeterminado se envió y no se sabe qué pasó; la fila derivada es el
+   * Take Profit de una apertura que sí entró. Dejar cualquiera de las dos
+   * marcada invita a repetir sobre una posición que puede existir ya.
    */
-  it('un cierre con casillas sin confirmar también desmarca', async () => {
-    planDevuelto = plan('close', 3);
+  it('lo indeterminado y las filas derivadas no quedan marcadas', async () => {
     resultado = {
       label: 'Prueba',
-      ok: 2,
+      ok: 1,
       skipped: 0,
-      failures: [],
+      failures: [
+        { subAccountId: 'sub_1', side: 'long', reason: 'Quedó SIN Take Profit.', retryable: false },
+        { subAccountId: 'sub_2', side: 'long', reason: 'Bitget rechazó la orden.', retryable: true }
+      ],
       undetermined: [
         { subAccountId: 'sub_3', side: 'long', reason: 'Se cortó la conexión.', retryable: false }
       ]
     };
 
-    await usarPanel.getState().planear('close');
-    usarPanel.getState().escribirPin('bg1');
-    await usarPanel.getState().confirmarPlan();
+    await enviar('open');
 
-    expect(usarPanel.getState().contarSeleccion()).toBe(0);
-    expect(usarPanel.getState().avisos.at(-1)?.titulo).toContain('sin confirmar');
+    expect(usarPanel.getState().objetivosSeleccionados()).toEqual([
+      { subAccountId: 'sub_2', side: 'long' }
+    ]);
   });
 
   /*
-   * Las cinco que conservan. Es el guardarraíl de `DESMARCA_TRAS`: si alguien la
-   * amplía sin querer, cae aquí y no en producción.
+   * En «Ambos», si falla solo una punta queda media columna. Completar el par
+   * haría que el siguiente envío repitiese la punta que ya entró.
    */
-  it.each<BatchPlan['kind']>(['tp', 'tp-remove', 'margin-add', 'margin-remove', 'leverage'])(
-    'tras «%s» la selección se conserva',
-    async (kind) => {
-      planDevuelto = plan(kind, 3);
-      /*
-       * Los ajustes con campo propio no se planifican si está vacío -`CAMPO_DE`
-       * en el store-, y el fixture los deja así. Sin esto el test pasaría sin
-       * haber enviado nada, que es la peor forma de pasar.
-       */
-      usarPanel.setState((s) => ({ valores: { ...s.valores, tpAjuste: '20', mgAjuste: '5' } }));
+  it('en «Ambos», queda marcada solo la punta que falló', async () => {
+    usarPanel.setState({
+      alcance: 'ambos',
+      seleccion: { cta_1: { selLong: [true, true, true], selShort: [true, true, true] } }
+    });
+    resultado = {
+      label: 'Prueba',
+      ok: 5,
+      skipped: 0,
+      failures: [
+        { subAccountId: 'sub_2', side: 'short', reason: 'Bitget rechazó la orden.', retryable: true }
+      ],
+      undetermined: []
+    };
 
-      await usarPanel.getState().planear(kind);
-      await usarPanel.getState().confirmarPlan();
+    await enviar('close');
 
-      expect(enviados).toHaveLength(1);
-      expect(usarPanel.getState().contarSeleccion()).toBe(3);
-    }
-  );
-
-  /*
-   * Si el envío revienta -el proceso principal no responde-, la selección se
-   * queda. Es lo único con lo que el operador puede repetir: sin informe no hay
-   * «Reintentar las fallidas» al que agarrarse.
-   */
-  it('si el envío falla, la selección no se toca', async () => {
-    falloAlEnviar = new Error('el panel no responde');
-
-    await usarPanel.getState().planear('open');
-    usarPanel.getState().escribirPin('bg1');
-    await usarPanel.getState().confirmarPlan();
-
-    expect(usarPanel.getState().contarSeleccion()).toBe(3);
-    expect(usarPanel.getState().avisos.at(-1)?.titulo).toContain('No se pudo enviar');
-  });
-
-  it('si el cierre no llega a enviarse, la selección tampoco se toca', async () => {
-    planDevuelto = plan('close', 3);
-    falloAlEnviar = new Error('el panel no responde');
-
-    await usarPanel.getState().planear('close');
-    usarPanel.getState().escribirPin('bg1');
-    await usarPanel.getState().confirmarPlan();
-
-    expect(usarPanel.getState().contarSeleccion()).toBe(3);
-    expect(usarPanel.getState().avisos.at(-1)?.titulo).toContain('No se pudo enviar');
+    expect(usarPanel.getState().objetivosSeleccionados()).toEqual([
+      { subAccountId: 'sub_2', side: 'short' }
+    ]);
   });
 });
 
@@ -555,11 +616,13 @@ describe('reintentar solo las fallidas', () => {
     await usarPanel.getState().confirmarPlan();
 
     /*
-     * El cierre ya desmarcó. El reintento tiene que funcionar igual: se alimenta
-     * de `failures`, no de las casillas tildadas. Si algún día dependiera de la
-     * selección, este es el test que lo delata.
+     * El reintento se alimenta de `failures`, no de las casillas tildadas: se
+     * vacía la selección para que, si algún día dependiera de ella, este test
+     * lo delate.
      */
-    expect(usarPanel.getState().contarSeleccion()).toBe(0);
+    usarPanel.getState().limpiarSeleccion();
+    /* Esta vez entra: no queda nada que dejar marcado. */
+    resultado = { label: 'Prueba', ok: 1, skipped: 0, failures: [], undetermined: [] };
 
     await usarPanel.getState().reintentarFallidas?.();
 

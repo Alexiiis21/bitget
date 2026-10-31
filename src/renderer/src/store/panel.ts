@@ -20,6 +20,7 @@
  *    hay backend detrás, se guarda en `localStorage` del propio renderer.
  */
 import { create } from 'zustand';
+import { usarHistorial } from './historial';
 import type {
   Account,
   Asset,
@@ -28,7 +29,6 @@ import type {
   BatchResult,
   BatchTarget,
   MarginCap,
-  ClosedPosition,
   MarginMode,
   PlanKind,
   Position,
@@ -278,6 +278,7 @@ let secuenciaAviso = 0;
 let cancelarPrecios: (() => void) | undefined;
 let cancelarPosiciones: (() => void) | undefined;
 let cancelarCuentas: (() => void) | undefined;
+let cancelarAlertas: (() => void) | undefined;
 let temporizadorTope: ReturnType<typeof setTimeout> | undefined;
 
 /**
@@ -388,7 +389,6 @@ export interface EstadoPanel {
   cuentas: Account[];
   seleccion: Record<string, SeleccionCuenta>;
   posiciones: Position[];
-  historial: Record<string, ClosedPosition[]>;
   apiKeys: ApiKeyRow[];
   formulario: FormularioApiKey;
   /**
@@ -417,18 +417,18 @@ export interface EstadoPanel {
   motivoApis: string | null;
   /** Hay un respaldo escribiéndose. Frena la segunda pulsación del botón. */
   respaldando: boolean;
-  /** Por `accountId`: el historial se pide al desplegar el acordeón de cada cuenta. */
-  cargaHistorial: Record<string, EstadoCarga>;
 
   /* ---- acordeones ---- */
   cmpAbierto: Record<string, boolean>;
-  histAbierto: Record<string, boolean>;
-  histSubAbierto: Record<string, boolean>;
 
   /* ---- pantallas superpuestas ---- */
   apisAbierto: boolean;
   /** Pantalla de saldos por subcuenta (traspasos, Fase 2). */
   saldosAbierto: boolean;
+  /** Pantalla de historial por periodo. Su contenido vive en `store/historial.ts`. */
+  historialAbierto: boolean;
+  /** Diálogo de alertas de Telegram. Su contenido vive en el componente. */
+  alertasAbierto: boolean;
   /**
    * La casilla abierta en el detalle, y sobre qué activo.
    *
@@ -576,7 +576,7 @@ export interface EstadoPanel {
   /** Aprueba el plan en pantalla y lo envía. */
   confirmarPlan: () => Promise<void>;
   /** Envía un plan, opcionalmente acotado a unas casillas: el reintento. */
-  enviarPlan: (plan: BatchPlan, soloEstos?: BatchTarget[]) => Promise<void>;
+  enviarPlan: (plan: BatchPlan, soloEstos?: BatchTarget[], paso?: string) => Promise<void>;
   cancelarPlan: () => void;
   cerrarLote: () => void;
   escribirPin: (v: string) => void;
@@ -585,6 +585,10 @@ export interface EstadoPanel {
   cerrarApis: () => void;
   abrirSaldos: () => void;
   cerrarSaldos: () => void;
+  abrirHistorial: () => void;
+  cerrarHistorial: () => void;
+  abrirAlertas: () => void;
+  cerrarAlertas: () => void;
   escribirFormulario: (clave: keyof FormularioApiKey, v: string) => void;
   refrescarApis: () => Promise<void>;
   /** Guarda todas las subcuentas en un archivo dentro de Documentos. */
@@ -624,8 +628,6 @@ export interface EstadoPanel {
   guardarTope: () => Promise<void>;
 
   alternarCmp: (accountId: string) => void;
-  alternarHist: (accountId: string) => Promise<void>;
-  alternarHistSub: (subAccountId: string) => void;
   abrirDetalle: (accountId: string, subAccountId: string, assetId: string) => void;
   cerrarDetalle: () => void;
   reintentarConexion: (accountId: string, subAccountId: string) => void;
@@ -688,32 +690,60 @@ const CAMPO_DE: Record<PlanKind, keyof ValoresHerramientas | null> = {
 export const PIDE_PASO = new Set<PlanKind>(['open']);
 
 /**
- * Las operaciones tras las cuales la selección se deshace sola.
- *
- * --------------------------------------------------------------------------
- * Abrir y cerrar, no solo abrir
- * --------------------------------------------------------------------------
- * Hasta el 11/09/2026 solo la apertura. El argumento de entonces —«solo abrir
- * cambia lo que hay en la casilla»— era el correcto, pero se aplicó a medias:
- * cerrar es la otra operación que cambia lo que la casilla contiene, porque la
- * vacía. El cliente lo reportó teniendo que destildar a mano tras cada cierre.
- *
- * El peligro es el mismo en espejo. Tras abrir, esas casillas tienen posición y
- * la siguiente acción caería sobre ellas; tras cerrar están vacías, y la
- * siguiente apertura abriría cuarenta posiciones que nadie pidió. Destildar
- * cuarenta casillas a mano es justamente lo que nadie hace.
- *
- * Las otras cinco no entran: ajustar el Take Profit, el margen o el
- * apalancamiento no cambia lo que hay en la casilla, y encadenar dos ajustes
- * sobre la misma selección —poner el Take Profit y luego subir el
- * apalancamiento— es un uso legítimo que desmarcar rompería.
- *
- * Lista aparte de `PIDE_PASO` —que hoy solo tiene la apertura—: son
- * dos reglas distintas —una frena, la otra ordena— y fundirlas haría que una
- * operación futura que pida clave heredase el desmarcado sin que nadie lo
- * decidiera.
+ * ¿Este plan pide la contraseña de paso? Las operaciones de `PIDE_PASO`
+ * siempre, y cualquier otro plan que traiga su propio motivo: hoy, el cierre
+ * que dejaría alguna posición en negativo —lo pidió el cliente el 29/10/2026—.
+ * El diálogo y `confirmarPlan` usan esta misma función.
  */
-const DESMARCA_TRAS = new Set<PlanKind>(['open', 'close']);
+export const pidePaso = (plan: BatchPlan): boolean =>
+  PIDE_PASO.has(plan.kind) || (plan.stepPasswordReason ?? null) !== null;
+
+/**
+ * La selección que queda tras enviar un lote: solo las casillas fallidas.
+ *
+ * --------------------------------------------------------------------------
+ * Todas las operaciones, y las fallidas se quedan marcadas
+ * --------------------------------------------------------------------------
+ * Hasta el 22/10/2026 solo abrir y cerrar desmarcaban, y desmarcaban del todo
+ * aunque el lote saliera a medias. Los ajustes conservaban la selección para
+ * poder encadenarlos —poner el Take Profit y luego subir el apalancamiento—.
+ * El cliente pidió el 22/10/2026 que **cualquier** lote enviado desmarque, y
+ * que lo que falló se quede marcado para reintentarlo sin buscarlo en la matriz.
+ *
+ * Solo entran las fallidas `retryable`, las mismas que «Reintentar solo las
+ * fallidas»:
+ *  - Las indeterminadas no: se enviaron y no se sabe si entraron. Dejarlas
+ *    tildadas invita a actuar a ciegas sobre ellas, que es lo único que puede
+ *    duplicar una posición.
+ *  - Las filas derivadas de la apertura —su Take Profit o su margen— tampoco:
+ *    comparten cuenta y lado con la apertura, que sí entró, y dejar esa punta
+ *    marcada haría que el siguiente «Abrir» abriese otra posición encima.
+ *
+ * En «Ambos» puede quedar media columna marcada —falló el long y el short
+ * entró—. Rompe a sabiendas la regla de `reconciliar` («las dos puntas de una
+ * columna son una»): completar el par haría que el siguiente envío repitiese la
+ * punta que ya salió bien. Un clic sobre esa columna la vuelve a tratar como
+ * una sola, y cambiar de alcance la reconcilia como a cualquier otra.
+ */
+const seleccionDeFallidas = (
+  cuentas: readonly Account[],
+  fallidas: readonly BatchTarget[]
+): Record<string, SeleccionCuenta> => {
+  const seleccion: Record<string, SeleccionCuenta> = {};
+  for (const f of fallidas) {
+    for (const cuenta of cuentas) {
+      const indice = cuenta.subAccounts.findIndex((s) => s.id === f.subAccountId);
+      if (indice === -1) continue;
+      const n = cuenta.subAccounts.length;
+      const sel = (seleccion[cuenta.id] ??= {
+        selLong: seleccionVacia(n),
+        selShort: seleccionVacia(n)
+      });
+      sel[f.side === 'long' ? 'selLong' : 'selShort'][indice] = true;
+    }
+  }
+  return seleccion;
+};
 
 /**
  * Qué campos se vacían tras enviar, salvo que estén fijados.
@@ -774,7 +804,6 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   cuentas: [],
   seleccion: {},
   posiciones: [],
-  historial: {},
   apiKeys: [],
   formulario: FORMULARIO_VACIO,
   ultimaValidacion: null,
@@ -792,14 +821,13 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
   errorRestauracion: '',
   restaurando: false,
   avisoRestauracion: null,
-  cargaHistorial: {},
 
   cmpAbierto: {},
-  histAbierto: {},
-  histSubAbierto: {},
 
   apisAbierto: false,
   saldosAbierto: false,
+  historialAbierto: false,
+  alertasAbierto: false,
   detalle: null,
   batch: null,
   reintentarFallidas: null,
@@ -1016,6 +1044,38 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
         set({ cargaPosiciones: 'error', motivoPosiciones: textoDeError(e), posiciones: [] });
       }
 
+      /*
+       * Las alertas de Telegram se revisan solas unos segundos después de
+       * desbloquear. Lo que haga falta saber de esa revisión se dice aquí, en
+       * un aviso: que salieron N avisos, o que Telegram no respondió y quedan
+       * pendientes. Una revisión sin novedades no molesta.
+       */
+      cancelarAlertas?.();
+      cancelarAlertas = panelService.subscribeAlertsChecks((c) => {
+        const ops = (n: number): string => `${n} ${n === 1 ? 'operación' : 'operaciones'}`;
+        if (c.delivery === 'ok' && c.sent > 0) {
+          avisar('ok', 'Avisos enviados a Telegram', `${c.sent === 1 ? "1 operación hecha" : `${c.sent} operaciones hechas`} fuera del panel.`, 'Alertas');
+        } else if (c.delivery === 'failed') {
+          avisar(
+            'aviso',
+            'No se pudo avisar por Telegram',
+            `${c.deliveryMessage ?? ''} ${ops(c.pending)} esperan; se reintentará al volver a abrir el panel.`.trim(),
+            'Alertas'
+          );
+        }
+        if (c.errors.length > 0) {
+          avisar(
+            'aviso',
+            'Subcuentas sin revisar',
+            `No se pudieron leer ${c.errors.length}: ${c.errors
+              .slice(0, 3)
+              .map((e) => e.id)
+              .join(', ')}${c.errors.length > 3 ? '…' : ''}. Se revisarán en la próxima apertura.`,
+            'Alertas'
+          );
+        }
+      });
+
       await refrescarApis();
       get()
         .apiKeys.filter((a) => a.status === 'error')
@@ -1036,17 +1096,23 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
   bloquear: () => {
     clearTimeout(temporizadorTope);
+    /* Lo leído del historial y el saldo son de esta sesión: no se heredan. */
+    usarHistorial.getState().reiniciar();
     temporizadorTope = undefined;
     cancelarPosiciones?.();
     cancelarPosiciones = undefined;
     cancelarCuentas?.();
     cancelarCuentas = undefined;
+    cancelarAlertas?.();
+    cancelarAlertas = undefined;
     set({
       pantalla: 'login',
       contrasena: '',
       errorContrasena: '',
       apisAbierto: false,
       saldosAbierto: false,
+      historialAbierto: false,
+      alertasAbierto: false,
       seguridadAbierta: false,
       /*
        * El buscador se cierra, pero las ocho casillas se quedan: son la
@@ -1068,7 +1134,6 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       posiciones: [],
       seleccion: {},
       cmpAbierto: {},
-      histAbierto: {},
       /* Al bloquear se vuelve al punto de partida: nada pedido, nada sabido. */
       cargaCuentas: 'inicial',
       motivoCuentas: null,
@@ -1076,8 +1141,6 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       motivoPosiciones: null,
       cargaApis: 'inicial',
       motivoApis: null,
-      cargaHistorial: {},
-      historial: {},
       tope: null,
       topeAbierto: false,
       topeValor: '',
@@ -1666,7 +1729,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       return;
     }
 
-    if (PIDE_PASO.has(plan.kind)) {
+    if (pidePaso(plan)) {
       let valido: boolean;
       try {
         valido = await panelService.verifyStepPassword(pinPaso);
@@ -1705,7 +1768,11 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       enviando: true,
       mensaje: 'Enviando a Bitget…'
     });
-    await get().enviarPlan(plan);
+    /*
+     * El cierre en negativo la vuelve a comprobar en el proceso principal, así
+     * que viaja con él. La apertura no la necesita allí.
+     */
+    await get().enviarPlan(plan, undefined, plan.stepPasswordReason ? pinPaso : undefined);
   },
 
   /**
@@ -1715,7 +1782,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
    * por tanto los mismos identificadores de orden, que es lo que impide que un
    * reintento duplique lo que ya entró.
    */
-  enviarPlan: async (plan, soloEstos) => {
+  enviarPlan: async (plan, soloEstos, paso) => {
     const { avisar } = get();
 
     /*
@@ -1734,7 +1801,7 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
     if (soloEstos === undefined) set({ batch: null, reintentarFallidas: null });
 
     try {
-      const r = await panelService.executePlan(plan, soloEstos);
+      const r = await panelService.executePlan(plan, soloEstos, paso);
 
       /*
        * Lo que de verdad se puede reenviar.
@@ -1825,16 +1892,14 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
       /*
        * Va después del informe y no antes: el resultado del lote se lee sobre la
        * matriz, y vaciar la selección mientras se dibuja el informe haría
-       * parpadear las casillas que se están mirando. El porqué de la lista, en
-       * `DESMARCA_TRAS`.
+       * parpadear las casillas que se están mirando. Qué queda marcado y por
+       * qué, en `seleccionDeFallidas`.
        *
-       * Desmarca aunque el lote haya salido a medias. Las fallidas se recuperan
-       * con «Reintentar solo las fallidas», que se alimenta del informe y no de
-       * la selección; y `BatchResult` no sabe cuáles salieron bien —`ok` y
-       * `skipped` son recuentos sin identidad—, así que desmarcar solo esas
-       * sería adivinar sobre una matriz que mueve dinero real.
+       * Se construye desde `failures` y no restando de la selección: `ok` y
+       * `skipped` son recuentos sin identidad, y las fallidas son lo único del
+       * informe que dice qué casilla es cuál.
        */
-      if (DESMARCA_TRAS.has(plan.kind)) get().limpiarSeleccion();
+      set({ seleccion: seleccionDeFallidas(get().cuentas, reintentables) });
     } catch (e) {
       set({ enviando: false, mensaje: '' });
       avisar(
@@ -1870,6 +1935,10 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
    */
   abrirSaldos: () => set({ saldosAbierto: true }),
   cerrarSaldos: () => set({ saldosAbierto: false }),
+  abrirHistorial: () => set({ historialAbierto: true }),
+  cerrarHistorial: () => set({ historialAbierto: false }),
+  abrirAlertas: () => set({ alertasAbierto: true }),
+  cerrarAlertas: () => set({ alertasAbierto: false }),
 
   /* Cerrar la pantalla cancela la baja a medio confirmar: su diálogo vive sobre ella. */
   cerrarApis: () =>
@@ -2437,41 +2506,6 @@ export const usarPanel = create<EstadoPanel>()((set, get) => ({
 
   alternarCmp: (accountId) =>
     set((s) => ({ cmpAbierto: { ...s.cmpAbierto, [accountId]: !s.cmpAbierto[accountId] } })),
-
-  alternarHist: async (accountId) => {
-    const abrira = !get().histAbierto[accountId];
-    set((s) => ({ histAbierto: { ...s.histAbierto, [accountId]: !s.histAbierto[accountId] } }));
-    if (!abrira) return;
-
-    const cuenta = get().cuentas.find((c) => c.id === accountId);
-    if (!cuenta) return;
-
-    const faltantes = cuenta.subAccounts.filter((s) => !(s.id in get().historial));
-    if (faltantes.length === 0) {
-      set((s) => ({ cargaHistorial: { ...s.cargaHistorial, [accountId]: 'listo' } }));
-      return;
-    }
-
-    set((s) => ({ cargaHistorial: { ...s.cargaHistorial, [accountId]: 'cargando' } }));
-    try {
-      const resultados = await Promise.all(faltantes.map((s) => panelService.getHistory(s.id, 20)));
-      set((s) => {
-        const historial = { ...s.historial };
-        faltantes.forEach((sub, i) => {
-          historial[sub.id] = resultados[i] ?? [];
-        });
-        return { historial, cargaHistorial: { ...s.cargaHistorial, [accountId]: 'listo' } };
-      });
-    } catch (e) {
-      set((s) => ({ cargaHistorial: { ...s.cargaHistorial, [accountId]: 'error' } }));
-      get().avisar('error', 'No se pudo leer el historial', textoDeError(e), cuenta.name);
-    }
-  },
-
-  alternarHistSub: (subAccountId) =>
-    set((s) => ({
-      histSubAbierto: { ...s.histSubAbierto, [subAccountId]: !s.histSubAbierto[subAccountId] }
-    })),
 
   abrirDetalle: (accountId, subAccountId, assetId) =>
     set({ detalle: { accountId, subAccountId, assetId } }),

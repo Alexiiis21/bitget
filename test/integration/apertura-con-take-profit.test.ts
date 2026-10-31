@@ -202,6 +202,7 @@ function enrutar(
       }
     ]);
 
+  let ordenada = false;
   exchange.responderCon((p) => {
     if (p.url.startsWith('/api/v2/public/time')) return { cuerpo: sobreOk({ serverTime: String(Date.now()) }) };
     if (p.url.startsWith('/api/v2/mix/market/contracts')) return { cuerpo: sobreOk([CONTRATO]) };
@@ -222,10 +223,15 @@ function enrutar(
     if (p.url.startsWith('/api/v2/mix/account/set-margin')) {
       return alAjustarMargen(JSON.parse(p.cuerpo) as Record<string, unknown>);
     }
+    /*
+     * Antes de la orden no hay posicion: la apertura con Take Profit la lee al
+     * planificar para saber si agrega a una que ya existe.
+     */
     if (p.url.startsWith('/api/v2/mix/position/all-position')) {
-      return { cuerpo: sobreOk(posiciones()) };
+      return { cuerpo: sobreOk(ordenada ? posiciones() : []) };
     }
     if (p.url.startsWith('/api/v2/mix/order/place-order')) {
+      ordenada = true;
       return alOrdenar(JSON.parse(p.cuerpo) as Record<string, unknown>);
     }
     if (p.url.startsWith('/api/v2/mix/order/place-tpsl-order')) {

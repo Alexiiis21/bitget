@@ -34,6 +34,7 @@ import type { Credencial } from '../signer';
 import type {
   CancelacionPlan,
   ColocacionTakeProfit,
+  OpcionesLecturaPlanes,
   PlanColocado,
   PlanPendiente,
   ResultadoCancelacionPlan
@@ -177,7 +178,9 @@ const esquemaEstrategiaV3 = zod.object({
   takeProfit: zod.string().nullish(),
   stopLoss: zod.string().nullish(),
   /** Obligatorio en `modify-strategy-order`. Ver `modificarTakeProfitV3`. */
-  qty: zod.string().nullish()
+  qty: zod.string().nullish(),
+  /** `full` o `partial`. Solo para la bitacora: ver `anotarPendientes`. */
+  tpslMode: zod.string().nullish()
 });
 
 const esquemaEstrategiasV3 = esquemaListaV3(esquemaEstrategiaV3);
@@ -218,7 +221,8 @@ const conValor = (v: string | null | undefined): boolean => v != null && v !== '
 export async function planesPendientesV3(
   cliente: ClienteBitget,
   credencial: Credencial,
-  mercado: Mercado
+  mercado: Mercado,
+  opciones: OpcionesLecturaPlanes = {}
 ): Promise<PlanPendiente[]> {
   let r;
   try {
@@ -234,6 +238,7 @@ export async function planesPendientesV3(
     );
   } catch (e) {
     if (e instanceof ErrorBitget && e.reintentable) throw e;
+    if (opciones.estricto === true) throw e;
     anotarEvento({
       evento: 'tpsl-v3-ilegible',
       datos: {
@@ -243,6 +248,8 @@ export async function planesPendientesV3(
     });
     return [];
   }
+
+  anotarPendientes(credencial, r.datos.lista);
 
   return r.datos.lista
     .filter((o) => o.status == null || VIVOS.has(o.status))
@@ -261,6 +268,45 @@ export async function planesPendientesV3(
         qty: o.qty
       };
     });
+}
+
+/** Ultimo resumen anotado por cuenta. Ver `anotarPendientes`. */
+const ultimoResumen = new Map<string, string>();
+
+/**
+ * Deja en la bitacora que ordenes `tpsl` tenia puestas Bitget, resumidas.
+ *
+ * Las respuestas de los GET no se guardan, y el 19/10/2026 eso dejo sin
+ * respuesta lo unico que importaba de ELITE LAURA: que lado, que precio y que
+ * qty tenia cada orden que el panel modifico. Solo se anota cuando cambia: el
+ * barrido lee esto cada 45 s por cuenta y repetir la misma lista no aporta nada.
+ */
+function anotarPendientes(
+  credencial: Credencial,
+  lista: readonly zod.infer<typeof esquemaEstrategiaV3>[]
+): void {
+  const cuenta = cuentaDe(credencial.apiKey);
+  const ordenes = lista.map((o) => ({
+    orderId: o.orderId ?? null,
+    clientOid: o.clientOid ?? null,
+    symbol: o.symbol ?? null,
+    posSide: o.posSide ?? null,
+    tpslMode: o.tpslMode ?? null,
+    status: o.status ?? null,
+    takeProfit: o.takeProfit ?? null,
+    stopLoss: o.stopLoss ?? null,
+    qty: o.qty ?? null
+  }));
+  const resumen = JSON.stringify(ordenes);
+  if (ultimoResumen.get(cuenta) === resumen) return;
+  ultimoResumen.set(cuenta, resumen);
+  /* La bitacora solo admite datos planos: una linea por orden, y una si no hay ninguna. */
+  if (ordenes.length === 0) {
+    anotarEvento({ evento: 'tpsl-v3-pendientes', datos: { cuenta, total: 0 } });
+  }
+  ordenes.forEach((o, i) => {
+    anotarEvento({ evento: 'tpsl-v3-pendientes', datos: { cuenta, total: ordenes.length, n: i + 1, ...o } });
+  });
 }
 
 /**

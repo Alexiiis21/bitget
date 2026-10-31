@@ -119,6 +119,21 @@ export interface PeticionRest {
   idempotente: boolean;
 }
 
+/**
+ * Una escritura que el panel está a punto de enviar a Bitget.
+ *
+ * La recibe el observador de `observarEscrituras` justo antes de firmar. La
+ * credencial no viaja entera: solo la API Key, que es la que identifica la
+ * cuenta y no sirve para firmar nada sin el secreto.
+ */
+export interface EscrituraBitget {
+  ts: number;
+  apiKey: string;
+  metodo: MetodoHttp;
+  ruta: string;
+  cuerpo: unknown;
+}
+
 export interface RespuestaRest<T> {
   datos: T;
   /** Milisegundos de ida y vuelta. Alimenta el diagnostico por cuenta. */
@@ -130,6 +145,7 @@ export class ClienteBitget {
   private readonly pool: Pool;
   private readonly relojLocal: () => number;
   private readonly limitador: LimitadorPeticiones;
+  private observadorEscrituras: ((e: EscrituraBitget) => Promise<void>) | null = null;
   /** Milisegundos a sumar al reloj local para obtener el del exchange. */
   private desfaseMs = 0;
   private sincronizado = false;
@@ -333,7 +349,8 @@ export class ClienteBitget {
     try {
       return await this.limitador.ejecutar(
         credencial.apiKey,
-        () => {
+        async () => {
+          await this.avisarEscritura(credencial, peticion);
           const firmable: PeticionFirmable = {
             metodo: peticion.metodo,
             ruta: peticion.ruta,
@@ -361,6 +378,39 @@ export class ClienteBitget {
         await this.corregirReloj();
       }
       throw e;
+    }
+  }
+
+  /**
+   * Avisa de cada escritura **antes** de enviarla. Lo usa la bitácora de
+   * acciones propias, que es lo que permite a las alertas distinguir lo que hizo
+   * el panel de lo que hizo el cliente por su cuenta. Ver
+   * `storage/bitacora-acciones.ts`. `null` deja de avisar.
+   */
+  observarEscrituras(observador: ((e: EscrituraBitget) => Promise<void>) | null): void {
+    this.observadorEscrituras = observador;
+  }
+
+  /**
+   * Va dentro del hueco del limitador y justo antes de firmar, para que la hora
+   * anotada sea la del envío y no la de la cola.
+   *
+   * Un fallo del observador **no** frena la orden. La bitácora solo sirve para
+   * no avisar de más; dejar de operar porque no se pudo escribir una línea sería
+   * pagar con una orden perdida lo que, como mucho, cuesta una alerta de sobra.
+   */
+  private async avisarEscritura(credencial: Credencial, peticion: PeticionRest): Promise<void> {
+    if (peticion.metodo === 'GET' || this.observadorEscrituras === null) return;
+    try {
+      await this.observadorEscrituras({
+        ts: this.ahora(),
+        apiKey: credencial.apiKey,
+        metodo: peticion.metodo,
+        ruta: peticion.ruta,
+        cuerpo: peticion.cuerpo ?? null
+      });
+    } catch {
+      /* Ver arriba: la bitácora nunca detiene una orden. */
     }
   }
 

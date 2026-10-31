@@ -4,7 +4,6 @@ import { cifra } from '@/lib/formato';
 import { usarPanel } from '@/store/panel';
 import type { Account, Position, Side } from '@shared/domain/panel-view';
 import { AccordeonMonitor } from './AccordeonMonitor';
-import { AccordeonHistorial } from './AccordeonHistorial';
 import { EsqueletoMatriz, EstadoVacio } from './Esqueleto';
 import { LazoSeleccion } from './LazoSeleccion';
 
@@ -293,9 +292,7 @@ function BloqueCuenta({ cuenta }: { cuenta: Account }) {
   const alternarCuenta = usarPanel((s) => s.alternarCuenta);
   const seleccion = usarPanel((s) => s.seleccion[cuenta.id]);
   const cmpAbierto = usarPanel((s) => s.cmpAbierto[cuenta.id] ?? false);
-  const histAbierto = usarPanel((s) => s.histAbierto[cuenta.id] ?? false);
   const alternarCmp = usarPanel((s) => s.alternarCmp);
-  const alternarHist = usarPanel((s) => s.alternarHist);
   const posiciones = usarPanel((s) => s.posiciones);
   const sinPosiciones = usarPanel((s) => s.cargaPosiciones === 'error');
   const alcance = usarPanel((s) => s.alcance);
@@ -348,15 +345,6 @@ function BloqueCuenta({ cuenta }: { cuenta: Account }) {
         </span>
       </div>
       {cmpAbierto && <AccordeonMonitor cuenta={cuenta} />}
-
-      <div
-        onClick={() => void alternarHist(cuenta.id)}
-        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', background: T.superficie2, borderTop: `1px solid ${T.bordeSuave}`, borderBottom: `1px solid ${T.borde}`, cursor: 'pointer', userSelect: 'none' }}
-      >
-        <span style={{ fontSize: 10, lineHeight: 1, color: T.marcaTexto, width: 10, display: 'flex', justifyContent: 'center' }}>{histAbierto ? '▼' : '▶'}</span>
-        <span style={{ fontSize: 12.5, fontWeight: 700, letterSpacing: '.12em', color: T.marcaTexto, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Historial de posiciones</span>
-      </div>
-      {histAbierto && <AccordeonHistorial cuenta={cuenta} />}
     </div>
   );
 }

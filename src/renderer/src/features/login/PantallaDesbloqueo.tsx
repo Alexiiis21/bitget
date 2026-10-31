@@ -80,6 +80,14 @@ export function PantallaDesbloqueo() {
   const restaurando = usarPanel((s) => s.restaurando);
   const avisoRestauracion = usarPanel((s) => s.avisoRestauracion);
   const esperaMs = usarPanel((s) => s.esperaMaestraMs);
+  /*
+   * Ver la contraseña antes de enviarla. Cada fallo alarga la espera del freno,
+   * y un error de tecleo —Bloq Mayús, la «ñ», un espacio— es la causa más
+   * común; poder leer lo escrito evita gastar un intento en él. Se vuelve a
+   * ocultar al desbloquear, porque el componente desaparece.
+   */
+  const [verContrasena, fijarVerContrasena] = useState(false);
+  const [mayusculas, fijarMayusculas] = useState(false);
 
   /*
    * Con la espera en curso no se puede intentar, y el botón lo dice en vez de
@@ -126,6 +134,7 @@ export function PantallaDesbloqueo() {
   const ofrecible = respaldo !== null && !respaldo.tooNew;
 
   const alPulsarTecla = (e: KeyboardEvent<HTMLInputElement>) => {
+    fijarMayusculas(e.getModifierState('CapsLock'));
     if (e.key === 'Enter' && !frenado) void desbloquear();
   };
 
@@ -172,16 +181,37 @@ export function PantallaDesbloqueo() {
         <div style={{ padding: '22px 26px 26px', display: 'flex', flexDirection: 'column', gap: 14 }}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 11.5, fontWeight: 600, letterSpacing: '.06em', color: T.texto3 }}>
             CONTRASEÑA
-            <input
-              className="pcb-campo"
-              type="password"
-              placeholder="••••••••"
-              value={contrasena}
-              onChange={(e) => escribir(e.target.value)}
-              onKeyDown={alPulsarTecla}
-              autoFocus
-              style={{ padding: '12px 13px', borderRadius: 9, border: `1px solid ${T.bordeFuerte}`, fontSize: 15, fontWeight: 500, letterSpacing: '.18em', background: T.campoFondo, color: T.campoTexto, outline: 'none' }}
-            />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                className="pcb-campo"
+                type={verContrasena ? 'text' : 'password'}
+                placeholder="••••••••"
+                value={contrasena}
+                onChange={(e) => escribir(e.target.value)}
+                onKeyDown={alPulsarTecla}
+                onKeyUp={(e) => fijarMayusculas(e.getModifierState('CapsLock'))}
+                autoFocus
+                autoComplete="off"
+                spellCheck={false}
+                style={{ flex: 1, minWidth: 0, padding: '12px 13px', borderRadius: 9, border: `1px solid ${T.bordeFuerte}`, fontSize: 15, fontWeight: 500, letterSpacing: verContrasena ? '.04em' : '.18em', fontFamily: verContrasena ? FUENTE.mono : undefined, background: T.campoFondo, color: T.campoTexto, outline: 'none' }}
+              />
+              <button
+                type="button"
+                className="pcb-boton-claro"
+                onClick={() => fijarVerContrasena((v) => !v)}
+                aria-pressed={verContrasena}
+                aria-label={verContrasena ? 'Ocultar la contraseña' : 'Ver la contraseña'}
+                title={verContrasena ? 'Ocultar la contraseña' : 'Ver la contraseña'}
+                style={{ flex: 'none', padding: '0 14px', borderRadius: 9, border: `1px solid ${T.bordeFuerte}`, background: T.superficie, color: T.texto, fontSize: 12.5, fontWeight: 600, letterSpacing: 0, cursor: 'pointer' }}
+              >
+                {verContrasena ? 'Ocultar' : 'Ver'}
+              </button>
+            </div>
+            {mayusculas && (
+              <span style={{ fontSize: 11.5, fontWeight: 600, letterSpacing: 0, color: CAJA_ERROR.texto }}>
+                Bloq Mayús está activado.
+              </span>
+            )}
           </label>
 
           {error !== '' && (

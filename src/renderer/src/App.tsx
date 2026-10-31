@@ -11,12 +11,14 @@ import { DialogoColores } from '@/features/panel/DialogoColores';
 import { DialogoPlan } from '@/features/panel/DialogoPlan';
 import { DialogoSeguridad } from '@/features/panel/DialogoSeguridad';
 import { DialogoTope } from '@/features/panel/DialogoTope';
+import { DialogoAlertas } from '@/features/panel/DialogoAlertas';
 import { Encabezado } from '@/features/panel/Encabezado';
 import { MatrizCuentas } from '@/features/panel/MatrizCuentas';
 import { ModalDetalleSubcuenta } from '@/features/panel/ModalDetalleSubcuenta';
 import { PanelResultadoLote } from '@/features/panel/PanelResultadoLote';
 import { PantallaApis } from '@/features/panel/PantallaApis';
 import { PantallaSaldos } from '@/features/panel/PantallaSaldos';
+import { PantallaHistorial } from '@/features/panel/PantallaHistorial';
 
 /**
  * Composición del panel — diseño aprobado v2.
@@ -82,10 +84,12 @@ export default function App() {
 
       <PantallaApis />
       <PantallaSaldos />
+      <PantallaHistorial />
       {/* Va sobre la pantalla de API keys, que es desde donde se pide la baja. */}
       <DialogoBajaApi />
       <BuscadorActivos />
       <DialogoSeguridad />
+      <DialogoAlertas />
       <DialogoColores />
       <DialogoTope />
       <DialogoPlan />

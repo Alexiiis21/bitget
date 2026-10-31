@@ -28,7 +28,18 @@ import type {
   BatchPlan,
   BatchResult,
   BatchTarget,
-  ClosedPosition,
+  ClosedTrade,
+  AlertsActionResult,
+  AlertsCheck,
+  AlertsStatus,
+  ExportResult,
+  TelegramLookup,
+  HistoryFilter,
+  HistoryPeriod,
+  HistorySyncProgress,
+  HistorySyncResult,
+  LiveBalance,
+  TradeHistory,
   CloseRequest,
   DeleteOutcome,
   LeverageRequest,
@@ -63,11 +74,19 @@ import type {
   EstadoTopeIpc,
   MadreIpc,
   PlanRepartoIpc,
-  PlanTraspasoIpc
+  PlanTraspasoIpc,
+  EstadoAlertasIpc,
+  FiltroHistorialIpc,
+  ResultadoAlertasIpc,
+  RevisionAlertasIpc,
+  HistorialCuentaIpc,
+  PeriodoIpc,
+  PosicionCerradaIpc,
+  ResumenSincronizacionIpc,
+  SaldoCuentaIpc
 } from '@shared/ipc-contract';
 import type { EstadoConexion, EstadoJob, Lado, Lote, PosicionMonitor } from '@shared/types';
 import {
-  NotImplementedError,
   type PanelService,
   type Unsubscribe
 } from '@shared/ports/panel-service';
@@ -255,10 +274,10 @@ const aDescartes = (
 /** El canal de ejecución de cada tipo de plan. */
 const EJECUTORES: Record<
   PlanKind,
-  (planId: string, soloEstos?: { cuentaId: string; lado: Lado }[]) => Promise<Lote>
+  (planId: string, soloEstos?: { cuentaId: string; lado: Lado }[], paso?: string) => Promise<Lote>
 > = {
   open: (id, solo) => window.pcb.aperturaEjecutar(id, solo),
-  close: (id, solo) => window.pcb.cierreEjecutar(id, solo),
+  close: (id, solo, paso) => window.pcb.cierreEjecutar(id, solo, paso),
   tp: (id, solo) => window.pcb.tpEjecutar(id, solo),
   'tp-remove': (id, solo) => window.pcb.tpEjecutarQuitar(id, solo),
   /* Los dos sentidos comparten canal: la dirección ya viajó con el plan. */
@@ -309,6 +328,142 @@ const ESTADO_TOPE: Record<EstadoTopeIpc['estado'], MarginCap['status']> = {
   vigente: 'active',
   vencido: 'expired'
 };
+
+/* ---------- historial por periodo ---------- */
+
+const aOperacionCerrada = (p: PosicionCerradaIpc): ClosedTrade => ({
+  id: p.positionId,
+  symbol: p.symbol,
+  side: p.lado,
+  marginMode: p.modoMargen,
+  leverage: p.apalancamiento,
+  openedAt: p.abiertaEnMs,
+  closedAt: p.cerradaEnMs,
+  entryPrice: p.precioEntrada,
+  exitPrice: p.precioSalida,
+  takeProfit:
+    p.takeProfit === null
+      ? null
+      : {
+          price: p.takeProfit.precio,
+          placedAt: p.takeProfit.colocadoEnMs,
+          triggeredAt: p.takeProfit.disparadoEnMs
+        },
+  closedSize: p.cantidadCierre,
+  pnl: p.resultado,
+  pnlPercent: p.porcentaje,
+  pricePnl: p.pnlPrecio,
+  fees: p.comisiones,
+  funding: p.financiamiento
+});
+
+const aCobertura = (c: { desdeMs: number; hastaMs: number }): { fromMs: number; toMs: number } => ({
+  fromMs: c.desdeMs,
+  toMs: c.hastaMs
+});
+
+const aFiltroIpc = (f: HistoryFilter | undefined): FiltroHistorialIpc | undefined =>
+  f === undefined
+    ? undefined
+    : {
+        simbolo: f.symbol,
+        lado: f.side,
+        resultado: f.outcome === 'winners' ? 'ganadoras' : f.outcome === 'losers' ? 'perdedoras' : 'todas'
+      };
+
+const aPeriodoIpc = (p: HistoryPeriod | undefined): PeriodoIpc | undefined =>
+  p === undefined ? undefined : { desde: p.from, hasta: p.to };
+
+const aHistorial = (h: HistorialCuentaIpc): TradeHistory => ({
+  subAccountId: h.cuentaId,
+  symbols: h.simbolos,
+  filtered: h.filtrado,
+  period:
+    h.periodo === null
+      ? null
+      : {
+          from: h.periodo.desde,
+          to: h.periodo.hasta,
+          startMs: h.periodo.inicioMs,
+          endMs: h.periodo.finMs,
+          timeZone: h.periodo.zonaHoraria
+        },
+  trades: h.posiciones.map(aOperacionCerrada),
+  summary: {
+    total: h.resumen.total,
+    winners: h.resumen.ganadoras,
+    losers: h.resumen.perdedoras,
+    breakeven: h.resumen.enCero,
+    netPnl: h.resumen.resultadoNeto
+  },
+  completeness: {
+    complete: h.completitud.completo,
+    missingBefore: h.completitud.faltaAntes,
+    missingAfter: h.completitud.faltaDespues
+  },
+  coverage: h.cobertura === null ? null : aCobertura(h.cobertura),
+  syncedAt: h.sincronizadoEn
+});
+
+const aSincronizacion = (r: ResumenSincronizacionIpc): HistorySyncResult => ({
+  subAccountId: r.cuentaId,
+  added: r.nuevas,
+  total: r.total,
+  coverage: aCobertura(r.cobertura),
+  gap: r.hueco,
+  syncedAt: r.sincronizadoEn
+});
+
+/* ---------- alertas ---------- */
+
+const ENVIO: Record<RevisionAlertasIpc['envio'], AlertsCheck['delivery']> = {
+  ok: 'ok',
+  'sin-novedades': 'no-news',
+  fallo: 'failed',
+  'sin-configurar': 'not-configured',
+  abortado: 'aborted'
+};
+
+const aRevision = (r: RevisionAlertasIpc): AlertsCheck => ({
+  startedAt: r.inicioMs,
+  finishedAt: r.finMs,
+  accounts: r.cuentas,
+  reviewed: r.revisadas,
+  firstSeen: r.nuevas,
+  detected: r.detectadas,
+  sent: r.enviadas,
+  pending: r.pendientes,
+  errors: r.errores.map((e) => ({ id: e.identificador, message: e.mensaje })),
+  delivery: ENVIO[r.envio],
+  deliveryMessage: r.mensajeEnvio
+});
+
+const aEstadoAlertas = (e: EstadoAlertasIpc): AlertsStatus => ({
+  configured: e.configurado,
+  chatId: e.chatId,
+  chatTitle: e.chatTitulo,
+  enabledAt: e.activadoEn,
+  checking: e.revisando,
+  pending: e.pendientes,
+  lastCheck: e.ultimaRevision === null ? null : aRevision(e.ultimaRevision),
+  panelNumber: e.numeroPanel
+});
+
+const aResultadoAlertas = (r: ResultadoAlertasIpc): AlertsActionResult => ({
+  ok: r.ok,
+  reason: r.motivo,
+  message: r.mensaje,
+  status: aEstadoAlertas(r.estado)
+});
+
+const aSaldoVivo = (s: SaldoCuentaIpc): LiveBalance => ({
+  subAccountId: s.cuentaId,
+  currency: s.moneda,
+  equity: s.equity,
+  available: s.disponible,
+  locked: s.bloqueado,
+  readAt: s.leidoEn
+});
 
 const aTope = (t: EstadoTopeIpc): MarginCap => ({
   status: ESTADO_TOPE[t.estado],
@@ -438,9 +593,83 @@ export class IpcPanelService implements PanelService {
     throw new Error(`La subcuenta ${subAccountId} ya no está registrada en este panel.`);
   }
 
-  async getHistory(): Promise<ClosedPosition[]> {
-    /* Excluido por contrato hoy: docs/03-modelo-de-datos.md linea 684. */
-    throw new NotImplementedError('getHistory');
+  /* ---- historial por periodo ---- */
+
+  async syncHistory(subAccountId: string): Promise<HistorySyncResult> {
+    return aSincronizacion(await window.pcb.historialSincronizar(subAccountId));
+  }
+
+  async queryHistory(
+    subAccountId: string,
+    period?: HistoryPeriod,
+    filter?: HistoryFilter
+  ): Promise<TradeHistory> {
+    return aHistorial(
+      await window.pcb.historialConsultar(subAccountId, aPeriodoIpc(period), aFiltroIpc(filter))
+    );
+  }
+
+  async exportHistory(
+    subAccountId: string,
+    period?: HistoryPeriod,
+    filter?: HistoryFilter
+  ): Promise<ExportResult> {
+    const r = await window.pcb.historialExportar(subAccountId, aPeriodoIpc(period), aFiltroIpc(filter));
+    return { cancelled: r.cancelado, ok: r.ok, path: r.ruta, rows: r.filas, message: r.mensaje };
+  }
+
+  subscribeHistorySync(cb: (progress: HistorySyncProgress) => void): Unsubscribe {
+    return window.pcb.suscribir('historial:progreso', (p) =>
+      cb({ subAccountId: p.cuentaId, pages: p.paginas, received: p.recibidas })
+    );
+  }
+
+  /* ---- alertas ---- */
+
+  async getAlertsStatus(): Promise<AlertsStatus> {
+    return aEstadoAlertas(await window.pcb.alertasEstado());
+  }
+
+  async findTelegramChats(token: string): Promise<TelegramLookup> {
+    const r = await window.pcb.alertasBuscarChats(token);
+    return {
+      ok: r.ok,
+      bot: r.bot === null ? null : { username: r.bot.usuario, name: r.bot.nombre },
+      chats: r.chats.map((c) => ({ id: c.id, title: c.titulo, type: c.tipo })),
+      message: r.mensaje
+    };
+  }
+
+  async configureAlerts(
+    input: { token: string; chatId: string; chatTitle: string | null },
+    stepPassword: string
+  ): Promise<AlertsActionResult> {
+    return aResultadoAlertas(
+      await window.pcb.alertasConfigurar(
+        { token: input.token, chatId: input.chatId, chatTitulo: input.chatTitle },
+        stepPassword
+      )
+    );
+  }
+
+  async testAlerts(): Promise<AlertsActionResult> {
+    return aResultadoAlertas(await window.pcb.alertasProbar());
+  }
+
+  async disableAlerts(stepPassword: string): Promise<AlertsActionResult> {
+    return aResultadoAlertas(await window.pcb.alertasDesactivar(stepPassword));
+  }
+
+  async checkAlertsNow(): Promise<AlertsCheck> {
+    return aRevision(await window.pcb.alertasRevisar());
+  }
+
+  subscribeAlertsChecks(cb: (check: AlertsCheck) => void): Unsubscribe {
+    return window.pcb.suscribir('alertas:revision', (r) => cb(aRevision(r)));
+  }
+
+  async getLiveBalance(subAccountId: string): Promise<LiveBalance> {
+    return aSaldoVivo(await window.pcb.saldoCuenta(subAccountId));
   }
 
   /**
@@ -589,11 +818,25 @@ export class IpcPanelService implements PanelService {
         label: e.etiqueta,
         detail:
           `${e.size} ${activo.id} · entrada ${e.precioEntrada ?? '—'}` +
-          (e.margenLiberado === null ? '' : ` · libera ${e.margenLiberado} ${plan.monedaMargen}`)
+          (e.margenLiberado === null ? '' : ` · libera ${e.margenLiberado} ${plan.monedaMargen}`) +
+          ` · resultado est. ${
+            e.resultadoEstimado === null
+              ? 'no calculable'
+              : `${Number(e.resultadoEstimado) > 0 ? '+' : ''}${e.resultadoEstimado} ${plan.monedaMargen}`
+          }`
       })),
       /* Cerrar libera saldo, nunca lo compromete: no hay nada que pueda no caber. */
       discards: aDescartes(plan.descartes),
-      blocker: null
+      blocker: null,
+      /*
+       * Solo en negativo: el cliente quiere cerrar en positivo sin trámites
+       * (29/10/2026). La decisión la toma el proceso principal, que es quien
+       * rechaza el envío sin clave.
+       */
+      stepPasswordReason: plan.pidePaso
+        ? 'Este cierre dejaría al menos una posición en negativo (resultado estimado a precio ' +
+          'actual, con comisiones). Para cerrar con pérdida hace falta la contraseña de paso.'
+        : null
     };
   }
 
@@ -730,9 +973,13 @@ export class IpcPanelService implements PanelService {
    * cambie entre lo que el operador aprobó y lo que sale hacia Bitget: aquí no
    * queda ninguna cantidad que se pudiera alterar.
    */
-  async executePlan(plan: BatchPlan, only?: BatchTarget[]): Promise<BatchResult> {
+  async executePlan(
+    plan: BatchPlan,
+    only?: BatchTarget[],
+    stepPassword?: string
+  ): Promise<BatchResult> {
     const soloEstos = only?.map(aObjetivo);
-    const lote = await EJECUTORES[plan.kind](plan.id, soloEstos);
+    const lote = await EJECUTORES[plan.kind](plan.id, soloEstos, stepPassword);
     return aResultado(plan.title, lote);
   }
 

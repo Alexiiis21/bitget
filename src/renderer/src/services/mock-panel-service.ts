@@ -29,7 +29,19 @@ import type {
   BatchPlan,
   BatchResult,
   BatchTarget,
-  ClosedPosition,
+  ClosedTrade,
+  AlertsActionResult,
+  AlertsCheck,
+  AlertsStatus,
+  ExportResult,
+  TelegramLookup,
+  HistoryFilter,
+  HistoryPeriod,
+  HistorySyncProgress,
+  HistorySyncResult,
+  LiveBalance,
+  SubAccount,
+  TradeHistory,
   CloseRequest,
   DeleteOutcome,
   LeverageRequest,
@@ -69,7 +81,14 @@ import type { PanelService, Unsubscribe } from '@shared/ports/panel-service';
 import { prohibidoEnStaging } from '@shared/entorno';
 import { TOPE_MARGEN_VIGENCIA_MS } from '@shared/constants';
 import { esperaTrasFallos, textoEspera } from '@shared/espera-maestra';
-import { CASILLAS_POR_CUENTA, HISTORIAL_MAXIMO } from '@/lib/tokens';
+import { CASILLAS_POR_CUENTA } from '@/lib/tokens';
+import { completitud, filtrarPorCierre, rangoDePeriodo, resumir } from '@shared/resultado-periodo';
+import {
+  construirCsv,
+  cumpleFiltro,
+  identificadorCuenta,
+  nombreArchivoCsv
+} from '@shared/historial-csv';
 
 /**
  * El catálogo del mercado, para el buscador. Topes verificados el 18/08/2026.
@@ -264,6 +283,157 @@ const latencia = (base = 180, variacion = 220): Promise<void> =>
   dormir(base + Math.random() * variacion);
 
 const dec = (n: number, decimales = 4): Decimal => n.toFixed(decimales);
+
+/** El filtro del puerto (inglés) en la forma de la regla compartida (español). */
+const aFiltro = (f: HistoryFilter | undefined) => ({
+  simbolo: f?.symbol ?? null,
+  lado: f?.side ?? null,
+  resultado:
+    f?.outcome === 'winners'
+      ? ('ganadoras' as const)
+      : f?.outcome === 'losers'
+        ? ('perdedoras' as const)
+        : ('todas' as const)
+});
+
+/** La subcuenta que trae el ejemplo del presupuesto (cuenta A, casilla 1). */
+const SUBCUENTA_EJEMPLO = 'a1-s01';
+
+/**
+ * «Del 1 al 7 de agosto de 2026: 8 operaciones, 5 ganadoras, 3 perdedoras,
+ * +61.60 USDT». Resultado neto de cada una, ya con comisiones.
+ */
+const EJEMPLO_PRESUPUESTO: readonly {
+  dia: number;
+  hora: number;
+  activo: string;
+  side: Side;
+  entrada: number;
+  salida: number;
+  cantidad: number;
+  neto: number;
+  modo: 'isolated' | 'crossed';
+}[] = [
+  {
+    dia: 1,
+    hora: 10,
+    activo: 'BTC',
+    side: 'long',
+    entrada: 114820.5,
+    salida: 115412.1,
+    cantidad: 0.043,
+    neto: 25.1,
+    modo: 'isolated'
+  },
+  {
+    dia: 2,
+    hora: 15,
+    activo: 'ETH',
+    side: 'short',
+    entrada: 3712.4,
+    salida: 3668.9,
+    cantidad: 0.43,
+    neto: 18.4,
+    modo: 'isolated'
+  },
+  {
+    dia: 3,
+    hora: 9,
+    activo: 'SOL',
+    side: 'long',
+    entrada: 171.82,
+    salida: 169.95,
+    cantidad: 6.4,
+    neto: -12.3,
+    modo: 'isolated'
+  },
+  {
+    dia: 4,
+    hora: 12,
+    activo: 'BTC',
+    side: 'short',
+    entrada: 115930.0,
+    salida: 115701.2,
+    cantidad: 0.044,
+    neto: 9.75,
+    modo: 'crossed'
+  },
+  {
+    dia: 5,
+    hora: 18,
+    activo: 'ETH',
+    side: 'long',
+    entrada: 3640.15,
+    salida: 3712.8,
+    cantidad: 0.42,
+    neto: 30.0,
+    modo: 'isolated'
+  },
+  {
+    dia: 6,
+    hora: 11,
+    activo: 'LINK',
+    side: 'short',
+    entrada: 22.48,
+    salida: 22.61,
+    cantidad: 30.0,
+    neto: -4.15,
+    modo: 'isolated'
+  },
+  {
+    dia: 6,
+    hora: 20,
+    activo: 'SOL',
+    side: 'short',
+    entrada: 168.3,
+    salida: 170.4,
+    cantidad: 7.1,
+    neto: -15.2,
+    modo: 'isolated'
+  },
+  {
+    dia: 7,
+    hora: 16,
+    activo: 'DOGE',
+    side: 'long',
+    entrada: 0.31842,
+    salida: 0.32161,
+    cantidad: 3300,
+    neto: 10.0,
+    modo: 'crossed'
+  }
+];
+
+function operacionDeEjemplo(e: (typeof EJEMPLO_PRESUPUESTO)[number], i: number): ClosedTrade {
+  const cierre = new Date(2026, 7, e.dia, e.hora, 12, 30).getTime();
+  /* Comisión de apertura y cierre, como en Bitget: 0,06 % del nocional en cada lado. */
+  const comisiones = -0.0006 * (e.entrada + e.salida) * e.cantidad;
+  return {
+    id: `${SUBCUENTA_EJEMPLO}-ago${i}`,
+    symbol: `${e.activo}USDT`,
+    side: e.side,
+    marginMode: e.modo,
+    leverage: null,
+    openedAt: cierre - (3 + i) * 3_600_000,
+    closedAt: cierre,
+    entryPrice: e.entrada.toFixed(e.entrada < 1 ? 5 : 2),
+    exitPrice: e.salida.toFixed(e.salida < 1 ? 5 : 2),
+    takeProfit:
+      e.neto > 0
+        ? {
+            price: e.salida.toFixed(e.salida < 1 ? 5 : 2),
+            placedAt: cierre - (3 + i) * 3_600_000 + 4_000,
+            triggeredAt: cierre
+          }
+        : null,
+    closedSize: String(e.cantidad),
+    pnl: e.neto.toFixed(2),
+    pnlPercent: null,
+    pricePnl: (e.neto - comisiones).toFixed(4),
+    fees: comisiones.toFixed(4),
+    funding: '0'
+  };
+}
 const claveObjetivo = (subAccountId: string, side: Side): string => `${subAccountId}:${side}`;
 
 interface EstadoInterno {
@@ -294,7 +464,23 @@ export class MockPanelService implements PanelService {
   private readonly cuentas: Account[];
   private readonly plantillas = new Map<string, EstadoInterno>();
   private readonly posiciones = new Map<string, Position>();
-  private readonly historial = new Map<string, ClosedPosition[]>();
+  /**
+   * Operaciones cerradas de cada subcuenta, como si ya estuvieran en Bitget.
+   *
+   * Cubren 120 días: más de los 90 que Bitget entrega, para que la demostración
+   * enseñe qué pasa al pedir un periodo anterior a lo sincronizado.
+   */
+  private readonly historial = new Map<string, ClosedTrade[]>();
+  /** Lo «sincronizado» de cada subcuenta: lo que `queryHistory` puede enseñar. */
+  private readonly sincronizado = new Map<
+    string,
+    { fromMs: number; toMs: number; ids: Set<string> }
+  >();
+  private readonly oyentesSincronizacion = new Set<(p: HistorySyncProgress) => void>();
+  /** El bot de la demostración. No sale a Telegram: solo lo finge. */
+  private alertas: { chatId: string; chatTitle: string | null; enabledAt: string } | null = null;
+  private ultimaRevision: AlertsCheck | null = null;
+  private readonly oyentesAlertas = new Set<(c: AlertsCheck) => void>();
   private readonly apiKeys = new Map<string, ApiKeyRow>();
   /** Cuentas principales dadas de alta, por UID. Vacío hasta que se registre una. */
   private readonly madres = new Map<string, ParentAccount>();
@@ -339,7 +525,8 @@ export class MockPanelService implements PanelService {
      */
     const nombres = [
       { id: 'a1', nombre: 'A', semilla: 11 },
-      { id: 'a2', nombre: 'B', semilla: 29 }
+      { id: 'a2', nombre: 'B', semilla: 29 },
+      { id: 'a3', nombre: 'C', semilla: 47 }
     ];
 
     return nombres.map(({ id, nombre, semilla }) => {
@@ -349,8 +536,9 @@ export class MockPanelService implements PanelService {
         const subAccountId = `${id}-s${String(slot).padStart(2, '0')}`;
         const saldo = 900 + azar() * 21000;
 
-        const tieneLong = azar() < 0.72;
-        const tieneShort = azar() < 0.42;
+        /* Casi todas las casillas operadas: es como se ve el panel en un día normal. */
+        const tieneLong = azar() < 0.88;
+        const tieneShort = azar() < 0.7;
         const errorLong = tieneLong && azar() < 0.08;
         const errorShort = tieneShort && azar() < 0.08;
         const mgFailLong = tieneLong && !errorLong && azar() < 0.1;
@@ -370,7 +558,7 @@ export class MockPanelService implements PanelService {
 
         if (tieneLong) this.crearPosicion(subAccountId, 'long', azar, errorLong, mgFailLong);
         if (tieneShort) this.crearPosicion(subAccountId, 'short', azar, errorShort, mgFailShort);
-        this.historial.set(subAccountId, this.generarHistorial(subAccountId, azar));
+        this.historial.set(subAccountId, this.generarHistorial(subAccountId, semilla * 100 + slot));
 
         /* Una de cada doce sin conexión: la pantalla tiene que saber pintar ese caso. */
         const caida = azar() < 0.08;
@@ -444,35 +632,77 @@ export class MockPanelService implements PanelService {
     });
   }
 
-  private generarHistorial(subAccountId: string, azar: () => number): ClosedPosition[] {
-    const cantidad = Math.floor(azar() * 6);
-    return Array.from({ length: cantidad }, (_, i) => {
+  /**
+   * Operaciones cerradas de demostración, con su propio generador por subcuenta.
+   *
+   * No consume del generador de la cuenta: el historial no debe decidir qué
+   * casillas salen caídas o con error en la matriz.
+   */
+  private generarHistorial(subAccountId: string, semilla: number): ClosedTrade[] {
+    const azar = pseudoAleatorio(semilla);
+    const activos = ['BTC', 'ETH', 'SOL', 'DOGE', 'LINK'] as const;
+    const ahora = Date.now();
+    /* De 60 a 200 en 120 días: varias páginas por sincronización, como una subcuenta activa. */
+    const cantidad = 60 + Math.floor(azar() * 140);
+
+    const aleatorias = Array.from({ length: cantidad }, (_, i): ClosedTrade => {
+      const activo = activos[Math.floor(azar() * activos.length)] ?? 'BTC';
+      const base = PRECIO_BASE[activo] ?? 1;
       const side: Side = azar() < 0.5 ? 'long' : 'short';
       const dir = side === 'long' ? 1 : -1;
-      const entrada = 1 + (azar() - 0.5) / 25;
-      const gana = azar() < 0.58;
-      const movimiento = 0.004 + azar() * 0.022;
-      const salida = entrada * (1 + dir * (gana ? movimiento : -movimiento));
-      const margen = azar() < 0.2 ? 150 : 100;
-      const pnl = (gana ? 1 : -1) * movimiento * margen * 10;
-      const cerradoPor: ClosedPosition['closedBy'] = gana
-        ? 'take-profit'
-        : azar() < 0.3
-          ? 'liquidacion'
-          : 'manual';
+      const entrada = base * (1 + (azar() - 0.5) / 10);
+      const movimiento = (azar() - 0.45) * 0.03;
+      const salida = entrada * (1 + dir * movimiento);
+      const cantidadCierre = 250 / entrada;
+      const pnlPrecio = dir * (salida - entrada) * cantidadCierre;
+      const comisiones = -0.0006 * (entrada + salida) * cantidadCierre;
+      const financiamiento = (azar() - 0.5) * 0.02;
+      const cerradaEnMs = ahora - Math.floor(azar() * 120 * 86_400_000);
+      const duracion = 60_000 + Math.floor(azar() * 2 * 86_400_000);
+      const decimales = base < 1 ? 6 : 2;
 
       return {
-        id: `${subAccountId}-h${i}`,
-        subAccountId,
+        id: `${subAccountId}-op${i}`,
+        symbol: `${activo}USDT`,
         side,
-        entryPrice: dec(entrada, 6),
-        exitPrice: dec(salida, 6),
-        initialMargin: dec(margen, 2),
-        pnl: dec(pnl, 2),
-        closedBy: cerradoPor,
-        closedAt: new Date(Date.now() - (i + 1) * 5_400_000).toISOString()
+        marginMode: azar() < 0.8 ? 'isolated' : 'crossed',
+        leverage: null,
+        openedAt: cerradaEnMs - duracion,
+        closedAt: cerradaEnMs,
+        entryPrice: dec(entrada, decimales),
+        exitPrice: dec(salida, decimales),
+        /* Las ganadoras cerraron en su TP; las perdedoras, a mano y sin TP. */
+        takeProfit:
+          pnlPrecio > 0
+            ? {
+                price: dec(salida, decimales),
+                placedAt: cerradaEnMs - duracion + 3_000,
+                triggeredAt: cerradaEnMs
+              }
+            : null,
+        closedSize: dec(cantidadCierre, 4),
+        pnl: dec(pnlPrecio + comisiones + financiamiento, 8),
+        pnlPercent: null,
+        pricePnl: dec(pnlPrecio, 8),
+        fees: dec(comisiones, 8),
+        funding: dec(financiamiento, 8)
       };
     });
+
+    if (subAccountId !== SUBCUENTA_EJEMPLO) return aleatorias;
+
+    /*
+     * La Sub-01 de la cuenta A trae, además, el ejemplo del presupuesto: del 1
+     * al 7 de agosto de 2026, ocho operaciones, cinco ganadoras, tres perdedoras
+     * y +61.60 USDT. Lo aleatorio de esa semana se aparta para que la suma sea
+     * exactamente la del documento.
+     */
+    const inicio = new Date(2026, 7, 1).getTime();
+    const fin = new Date(2026, 7, 8).getTime();
+    return [
+      ...aleatorias.filter((o) => o.closedAt < inicio || o.closedAt >= fin),
+      ...EJEMPLO_PRESUPUESTO.map((e, i) => operacionDeEjemplo(e, i))
+    ];
   }
 
   /** Planes calculados y aún sin enviar, igual que en el proceso principal. */
@@ -664,9 +894,331 @@ export class MockPanelService implements PanelService {
     throw new Error(`Subcuenta desconocida: ${subAccountId}`);
   }
 
-  async getHistory(subAccountId: string, limit: number): Promise<ClosedPosition[]> {
-    await latencia(120, 160);
-    return (this.historial.get(subAccountId) ?? []).slice(0, Math.min(limit, HISTORIAL_MAXIMO));
+  /* ---- historial por periodo ---- */
+
+  private exigirSubcuenta(subAccountId: string): SubAccount {
+    for (const cuenta of this.cuentas) {
+      const sub = cuenta.subAccounts.find((s) => s.id === subAccountId);
+      if (sub) return sub;
+    }
+    throw new Error('La cuenta ya no está en el panel.');
+  }
+
+  /**
+   * Como el real: trae lo que Bitget conserva —90 días— por páginas de 100, y
+   * avisa del avance. La primera vez tarda más, como la primera de verdad.
+   */
+  async syncHistory(subAccountId: string): Promise<HistorySyncResult> {
+    this.exigirSubcuenta(subAccountId);
+    const ahora = Date.now();
+    const desde = ahora - 90 * 86_400_000;
+    const previo = this.sincronizado.get(subAccountId);
+    const disponibles = (this.historial.get(subAccountId) ?? []).filter((o) => o.closedAt >= desde);
+
+    const paginas = Math.max(1, Math.ceil(disponibles.length / 100));
+    for (let n = 1; n <= paginas; n++) {
+      await latencia(previo === undefined ? 350 : 120, 200);
+      const recibidas = Math.min(n * 100, disponibles.length);
+      for (const cb of this.oyentesSincronizacion)
+        cb({ subAccountId, pages: n, received: recibidas });
+    }
+
+    const ids = previo?.ids ?? new Set<string>();
+    const antes = ids.size;
+    for (const o of disponibles) ids.add(o.id);
+    const cobertura = { fromMs: previo?.fromMs ?? desde, toMs: ahora };
+    this.sincronizado.set(subAccountId, { ...cobertura, ids });
+
+    return {
+      subAccountId,
+      added: ids.size - antes,
+      total: ids.size,
+      coverage: cobertura,
+      gap: false,
+      syncedAt: ahora
+    };
+  }
+
+  async queryHistory(
+    subAccountId: string,
+    period?: HistoryPeriod,
+    filter?: HistoryFilter
+  ): Promise<TradeHistory> {
+    this.exigirSubcuenta(subAccountId);
+    await latencia(20, 30);
+    const zona = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const rango =
+      period === undefined ? null : rangoDePeriodo({ desde: period.from, hasta: period.to }, zona);
+    const sync = this.sincronizado.get(subAccountId);
+    const guardadas = (this.historial.get(subAccountId) ?? []).filter(
+      (o) => sync?.ids.has(o.id) ?? false
+    );
+    const porId = new Map(guardadas.map((o) => [o.id, o]));
+    const delPeriodo = filtrarPorCierre(
+      guardadas.map((o) => ({ id: o.id, cerradaEnMs: o.closedAt })),
+      rango
+    ).flatMap((o) => porId.get(o.id) ?? []);
+    /* La misma regla que el proceso principal: `shared/historial-csv.ts`. */
+    const filtro = aFiltro(filter);
+    const trades = delPeriodo.filter((o) =>
+      cumpleFiltro(filtro, { symbol: o.symbol, lado: o.side, resultado: o.pnl })
+    );
+    const r = resumir(trades.map((o) => ({ resultado: o.pnl })));
+    const c = completitud(
+      rango,
+      sync === undefined ? null : { desdeMs: sync.fromMs, hastaMs: sync.toMs },
+      Date.now()
+    );
+
+    return {
+      subAccountId,
+      symbols: [...new Set(delPeriodo.map((o) => o.symbol))].sort(),
+      filtered:
+        filter !== undefined &&
+        (filter.symbol !== null || filter.side !== null || filter.outcome !== 'all'),
+      period:
+        period === undefined || rango === null
+          ? null
+          : { ...period, startMs: rango.inicioMs, endMs: rango.finMs, timeZone: zona },
+      trades,
+      summary: {
+        total: r.total,
+        winners: r.ganadoras,
+        losers: r.perdedoras,
+        breakeven: r.enCero,
+        netPnl: r.resultadoNeto
+      },
+      completeness: {
+        complete: c.completo,
+        missingBefore: c.faltaAntes,
+        missingAfter: c.faltaDespues
+      },
+      coverage: sync === undefined ? null : { fromMs: sync.fromMs, toMs: sync.toMs },
+      syncedAt: sync?.toMs ?? null
+    };
+  }
+
+  /**
+   * En la demostración no hay proceso principal que abra el diálogo: el CSV se
+   * arma con el mismo código y se descarga, y Electron pregunta dónde guardarlo.
+   */
+  async exportHistory(
+    subAccountId: string,
+    period?: HistoryPeriod,
+    filter?: HistoryFilter
+  ): Promise<ExportResult> {
+    const sub = this.exigirSubcuenta(subAccountId);
+    const h = await this.queryHistory(subAccountId, period, filter);
+    const cuenta = this.cuentas.find((c) => c.id === sub.accountId)?.name ?? '';
+    const csv = construirCsv(
+      h.trades.map((o) => ({
+        positionId: o.id,
+        symbol: o.symbol,
+        lado: o.side,
+        modoMargen: o.marginMode,
+        apalancamiento: o.leverage,
+        abiertaEnMs: o.openedAt,
+        cerradaEnMs: o.closedAt,
+        precioEntrada: o.entryPrice,
+        precioSalida: o.exitPrice,
+        takeProfit:
+          o.takeProfit === null
+            ? null
+            : {
+                precio: o.takeProfit.price,
+                colocadoEnMs: o.takeProfit.placedAt,
+                disparadoEnMs: o.takeProfit.triggeredAt
+              },
+        cantidadCierre: o.closedSize,
+        resultado: o.pnl,
+        porcentaje: o.pnlPercent,
+        pnlPrecio: o.pricePnl,
+        comisiones: o.fees,
+        financiamiento: o.funding
+      })),
+      {
+        identificador: identificadorCuenta(this.panelNumero, cuenta, sub.slot),
+        cuenta,
+        subcuenta: sub.label,
+        zona: Intl.DateTimeFormat().resolvedOptions().timeZone
+      }
+    );
+
+    const nombre = nombreArchivoCsv(
+      identificadorCuenta(this.panelNumero, cuenta, sub.slot),
+      period?.from ?? null,
+      period?.to ?? null
+    );
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const enlace = document.createElement('a');
+    enlace.href = url;
+    enlace.download = nombre;
+    enlace.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+
+    const n = h.trades.length;
+    return {
+      cancelled: false,
+      ok: true,
+      path: nombre,
+      rows: n,
+      message: `${n} ${n === 1 ? 'operación exportada' : 'operaciones exportadas'}.`
+    };
+  }
+
+  subscribeHistorySync(cb: (progress: HistorySyncProgress) => void): Unsubscribe {
+    this.oyentesSincronizacion.add(cb);
+    return () => {
+      this.oyentesSincronizacion.delete(cb);
+    };
+  }
+
+  /* ---- alertas: la demostración finge el bot y una revisión con hallazgos ---- */
+
+  private estadoAlertasDemo(): AlertsStatus {
+    return {
+      configured: this.alertas !== null,
+      chatId: this.alertas?.chatId ?? null,
+      chatTitle: this.alertas?.chatTitle ?? null,
+      enabledAt: this.alertas?.enabledAt ?? null,
+      checking: false,
+      pending: 0,
+      lastCheck: this.ultimaRevision,
+      panelNumber: this.panelNumero
+    };
+  }
+
+  async getAlertsStatus(): Promise<AlertsStatus> {
+    await latencia(40, 40);
+    return this.estadoAlertasDemo();
+  }
+
+  async findTelegramChats(token: string): Promise<TelegramLookup> {
+    await latencia(400, 300);
+    if (!/^\d{5,15}:[A-Za-z0-9_-]{30,60}$/.test(token.trim())) {
+      return {
+        ok: false,
+        bot: null,
+        chats: [],
+        message:
+          'Eso no tiene forma de token de bot. Es la línea larga que da @BotFather, del tipo 123456789:AAF…'
+      };
+    }
+    return {
+      ok: true,
+      bot: { username: 'pcb_alertas_bot', name: 'PCB Alertas' },
+      chats: [
+        { id: '-1002233445566', title: 'Alertas PCB', type: 'supergroup' },
+        { id: '551122334', title: 'Daniel Montero', type: 'private' }
+      ],
+      message: null
+    };
+  }
+
+  async configureAlerts(
+    input: { token: string; chatId: string; chatTitle: string | null },
+    stepPassword: string
+  ): Promise<AlertsActionResult> {
+    await latencia(500, 300);
+    const resultado = (
+      ok: boolean,
+      reason: string | null,
+      message: string
+    ): AlertsActionResult => ({
+      ok,
+      reason,
+      message,
+      status: this.estadoAlertasDemo()
+    });
+    if (stepPassword !== this.pasoActual) {
+      return resultado(false, 'paso-incorrecto', 'La contraseña de paso no es correcta.');
+    }
+    if (input.chatId.trim() === '') {
+      return resultado(false, 'sin-chat', 'Elija el grupo o chat donde llegarán los avisos.');
+    }
+    this.alertas = {
+      chatId: input.chatId,
+      chatTitle: input.chatTitle,
+      enabledAt: new Date().toISOString()
+    };
+    return resultado(
+      true,
+      null,
+      'Listo: el mensaje de prueba ya está en el chat (en la demostración no se envía de verdad).'
+    );
+  }
+
+  async testAlerts(): Promise<AlertsActionResult> {
+    await latencia(300, 200);
+    return {
+      ok: this.alertas !== null,
+      reason: this.alertas === null ? 'sin-configurar' : null,
+      message: this.alertas === null ? 'No hay un bot configurado.' : 'Mensaje de prueba enviado.',
+      status: this.estadoAlertasDemo()
+    };
+  }
+
+  async disableAlerts(stepPassword: string): Promise<AlertsActionResult> {
+    await latencia(200, 100);
+    if (stepPassword !== this.pasoActual) {
+      return {
+        ok: false,
+        reason: 'paso-incorrecto',
+        message: 'La contraseña de paso no es correcta.',
+        status: this.estadoAlertasDemo()
+      };
+    }
+    this.alertas = null;
+    this.ultimaRevision = null;
+    return {
+      ok: true,
+      reason: null,
+      message: 'Alertas desactivadas.',
+      status: this.estadoAlertasDemo()
+    };
+  }
+
+  async checkAlertsNow(): Promise<AlertsCheck> {
+    await latencia(1200, 600);
+    const ahora = Date.now();
+    const total = this.cuentas.reduce((n, c) => n + c.subAccounts.length, 0);
+    const r: AlertsCheck = {
+      startedAt: ahora - 1500,
+      finishedAt: ahora,
+      accounts: total,
+      reviewed: total,
+      firstSeen: 0,
+      detected: this.alertas === null ? 0 : 3,
+      sent: this.alertas === null ? 0 : 3,
+      pending: 0,
+      errors: [],
+      delivery: this.alertas === null ? 'not-configured' : 'ok',
+      deliveryMessage: this.alertas === null ? 'No hay un bot de Telegram configurado.' : null
+    };
+    this.ultimaRevision = r;
+    for (const cb of this.oyentesAlertas) cb(r);
+    return r;
+  }
+
+  subscribeAlertsChecks(cb: (check: AlertsCheck) => void): Unsubscribe {
+    this.oyentesAlertas.add(cb);
+    return () => {
+      this.oyentesAlertas.delete(cb);
+    };
+  }
+
+  async getLiveBalance(subAccountId: string): Promise<LiveBalance> {
+    const sub = this.exigirSubcuenta(subAccountId);
+    await latencia(150, 200);
+    const disponible = Number.parseFloat(sub.balance);
+    return {
+      subAccountId,
+      currency: 'USDT',
+      equity: dec(disponible * 1.04, 2),
+      available: sub.balance,
+      locked: '0',
+      readAt: Date.now()
+    };
   }
 
   subscribePositions(cb: (snapshot: PositionSnapshot) => void): Unsubscribe {
@@ -836,19 +1388,28 @@ export class MockPanelService implements PanelService {
       const margenInicial = posicion.initialMarginAccum ?? '0';
       const pnl = dir * (salida - entrada) * (Number.parseFloat(margenInicial) / entrada) * 10;
 
+      /* Lo cerrado pasa al historial «de Bitget»; aparece al sincronizar. */
       const lista = this.historial.get(objetivo.subAccountId) ?? [];
-      lista.unshift({
-        id: `${objetivo.subAccountId}-h${Date.now()}`,
-        subAccountId: objetivo.subAccountId,
+      const ahora = Date.now();
+      lista.push({
+        id: `${objetivo.subAccountId}-c${ahora}${objetivo.side}`,
+        symbol: `${posicion.assetId}USDT`,
         side: objetivo.side,
+        marginMode: posicion.marginMode,
+        leverage: null,
+        openedAt: posicion.openedAt === null ? ahora : Date.parse(posicion.openedAt),
+        closedAt: ahora,
         entryPrice: posicion.entryPrice,
         exitPrice: dec(salida, 6),
-        initialMargin: margenInicial,
-        pnl: dec(pnl, 2),
-        closedBy: 'manual',
-        closedAt: new Date().toISOString()
+        takeProfit: null,
+        closedSize: dec((Number.parseFloat(margenInicial) * 10) / entrada, 4),
+        pnl: dec(pnl, 8),
+        pnlPercent: null,
+        pricePnl: dec(pnl, 8),
+        fees: '0',
+        funding: '0'
       });
-      this.historial.set(objetivo.subAccountId, lista.slice(0, HISTORIAL_MAXIMO));
+      this.historial.set(objetivo.subAccountId, lista);
 
       this.posiciones.delete(clave);
       ok += 1;
@@ -997,7 +1558,9 @@ export class MockPanelService implements PanelService {
     /* La misma puerta que el proceso principal, para que la demostración se comporte igual. */
     const tope = this.estadoTope();
     if (tope.status !== 'active' || tope.value === null) {
-      throw new Error('Antes de abrir posiciones hay que fijar el margen inicial máximo de este panel.');
+      throw new Error(
+        'Antes de abrir posiciones hay que fijar el margen inicial máximo de este panel.'
+      );
     }
     if (Number.parseFloat(req.initialMargin) > Number.parseFloat(tope.value)) {
       throw new Error(
@@ -1153,7 +1716,9 @@ export class MockPanelService implements PanelService {
     await latencia(120, 80);
     const actual = this.estadoTope();
     if (actual.status === 'active') {
-      throw new Error(`El tope de ${actual.value ?? '—'} sigue vigente y no se puede cambiar hasta que pasen 24 horas.`);
+      throw new Error(
+        `El tope de ${actual.value ?? '—'} sigue vigente y no se puede cambiar hasta que pasen 24 horas.`
+      );
     }
     if (!/^\d+(\.\d+)?$/.test(value.trim()) || Number.parseFloat(value) <= 0) {
       throw new Error('Escriba el tope como un número mayor que cero, por ejemplo 0.5 o 10.');
@@ -1432,9 +1997,7 @@ export class MockPanelService implements PanelService {
      * máximo transferible que comprobar. Ver `plan-traspaso.ts`.
      */
     const esMadre = (uid: string): boolean => uid !== '' && uid === hoja.parentUid;
-    const origen = esMadre(input.fromUid)
-      ? null
-      : hoja.rows.find((r) => r.uid === input.fromUid);
+    const origen = esMadre(input.fromUid) ? null : hoja.rows.find((r) => r.uid === input.fromUid);
     const destino = esMadre(input.toUid) ? null : hoja.rows.find((r) => r.uid === input.toUid);
 
     if (origen === undefined)
@@ -1462,7 +2025,8 @@ export class MockPanelService implements PanelService {
     }
 
     /* De la madre también se conoce el saldo: llega en la hoja, de otra petición. */
-    const saldoMadre = hoja.parentAvailable === null ? null : Number.parseFloat(hoja.parentAvailable);
+    const saldoMadre =
+      hoja.parentAvailable === null ? null : Number.parseFloat(hoja.parentAvailable);
     const saldoOrigen = origen === null ? saldoMadre : Number.parseFloat(origen.available ?? '0');
     const saldoDestino =
       destino === null

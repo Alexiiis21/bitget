@@ -77,10 +77,17 @@ import {
   colocarTakeProfit,
   modificarTakeProfit,
   planesPendientes,
+  takeProfitsDe,
   type PlanPendiente
 } from '../bitget/rest/endpoints/tpsl';
 import { dimensionarApertura, type MotivoRechazo } from '../domain/dimension-orden';
-import { precioTakeProfit, type MotivoRechazoTp } from '../domain/precio-take-profit';
+import {
+  ladoEquivocadoTakeProfit,
+  precioTakeProfit,
+  resultadoNetoEstimado,
+  takeProfitConPerdida,
+  type MotivoRechazoTp
+} from '../domain/precio-take-profit';
 
 /* ---------------- lo que el motor necesita saber de cada cuenta ---------------- */
 
@@ -127,6 +134,13 @@ export function apalancamientoVigente(cuenta: CuentaEjecutable, lado: Lado): num
 interface ConfiguracionSimbolo {
   modoMargen: ModoMargenApi;
   apalancamiento: ApalancamientoCuenta;
+}
+
+/** Lo que hay abierto en una cuenta antes de abrir con Take Profit. `error` si no se pudo leer. */
+interface LecturaPosicionesTp {
+  abiertas: PosicionBitget[];
+  puestos: PlanPendiente[];
+  error: string | null;
 }
 
 /** El apalancamiento de ese lado segun el modo con el que se va a abrir. */
@@ -398,8 +412,48 @@ export interface EntradaPlan extends EntradaLote {
    * confirmacion pueda enseñar un precio concreto en vez de un porcentaje
    * -misma regla que el resto del plan- y, sobre todo, para que un porcentaje
    * imposible se detecte **antes** de abrir: ver el descarte de `planificar`.
+   *
+   * Si ya habia posicion de ese lado, se calcula desde la entrada promedio que
+   * tendra la posicion **despues** de agregar, no desde el precio de la orden.
+   * Ver `entradaPromedioEstimada`.
    */
   precioDisparoTp: string | null;
+  /**
+   * Solo UTA: si el Take Profit viaja dentro de `place-order`.
+   *
+   * --------------------------------------------------------------------------
+   * No, cuando la posicion ya tiene el suyo
+   * --------------------------------------------------------------------------
+   * Bitget crea un Take Profit **aparte** por cada orden que lo lleva dentro, y
+   * solo para la cantidad de esa orden. El 28/10/2026, en ELITE QLC, agregar a
+   * un short con su Take Profit dejo dos: el de la posicion y uno nuevo para lo
+   * agregado, calculado desde el precio de la orden y en perdida respecto a la
+   * entrada promedio. Se disparo al minuto.
+   *
+   * Con un Take Profit ya puesto, la orden sale sin el y despues se modifica el
+   * que hay -precio desde la entrada promedio real, cantidad de la posicion
+   * entera-. Sin ninguno puesto si viaja, porque en UTA un Take Profit separado
+   * no entra (`31008`) y modificar exige que exista uno; lo que lleva dentro ya
+   * esta calculado desde la entrada promedio estimada, y despues se extiende a
+   * toda la posicion.
+   *
+   * `undefined` en planes anteriores a este campo: viaja si hay precio.
+   */
+  embeberTp?: boolean;
+  /**
+   * La orden agrega a una posicion que ya existia, asi que su Take Profit tiene
+   * que recalcularse sobre la posicion consolidada despues de abrir, en V2 y
+   * en UTA. Ver `Sesion.ponerTakeProfitTrasAbrir`.
+   */
+  consolidarTp?: boolean;
+  /** Tamaño de la posicion de ese lado antes de esta orden, o `null` si no habia. */
+  totalPrevio?: string | null;
+  /**
+   * Entrada promedio que tendra la posicion tras esta orden: la de la orden si
+   * no habia posicion, la ponderada si la habia. Es la referencia del Take
+   * Profit y de `takeProfitConPerdida` antes de abrir.
+   */
+  entradaPromedioEstimada?: string | null;
 }
 
 /** Motivo por el que un objetivo no llega a enviarse. */
@@ -539,9 +593,28 @@ export interface EntradaCierre extends EntradaLote {
   precioEntrada: string | null;
   /** Margen que quedara libre al cerrar, si Bitget lo informa. */
   margenLiberado: string | null;
+  /**
+   * Lo que dejaria cerrar ahora, a precio marca y con las comisiones de abrir y
+   * cerrar ya restadas. `null` si Bitget no da con que calcularlo.
+   *
+   * Es lo que decide si el cierre pide la contraseña de paso: el cliente la
+   * pidio el 29/10/2026 solo para cerrar en negativo, como freno a un cierre
+   * por error. Ver `Sesion.ejecutarCierre`.
+   */
+  resultadoEstimado: string | null;
 }
 
 export type PlanCierre = PlanBase<EntradaCierre>;
+
+/**
+ * ¿Cerrar estas casillas dejaria alguna en negativo? Una sin resultado
+ * calculable cuenta como negativa: no se sabe, y el freno existe para eso.
+ */
+export function cierreConPerdida(entradas: readonly EntradaCierre[]): boolean {
+  return entradas.some(
+    (e) => e.resultadoEstimado === null || new Decimal(e.resultadoEstimado).isNegative()
+  );
+}
 
 /* ---------------- take profit ---------------- */
 
@@ -597,6 +670,19 @@ export interface EntradaTakeProfit extends EntradaLote {
    * `ejecutarTakeProfit`.
    */
   qtyAnterior?: string | null;
+  /** Precio marca al planificar. Referencia de `ladoEquivocadoTakeProfit`. */
+  precioActual?: string | null;
+  /**
+   * Tamaño de la posicion al planificar. Lo usa la apertura para esperar a que
+   * Bitget refleje lo agregado antes de dar por buena la entrada promedio.
+   */
+  qtyPosicion?: string | null;
+  /**
+   * Los **otros** Take Profit del mismo lado, que se quitan antes de modificar
+   * o colocar el bueno: la posicion tiene que acabar con uno solo, que la cubra
+   * entera. Ver `takeProfitsDe`.
+   */
+  sobrantes?: { orderId: string; planType: string; precioDisparo: string | null }[];
 }
 
 export interface PlanTakeProfit extends PlanBase<EntradaTakeProfit> {
@@ -729,6 +815,29 @@ export interface OpcionesMotor {
   dormir?: (ms: number) => Promise<void>;
   /** Se invoca cada vez que un trabajo cambia de estado. */
   alProgresar?: (lote: Lote) => void;
+}
+
+/**
+ * `25600 · No changes made to the TP/SL order`. Bitget lo responde al modificar
+ * un Take Profit UTA con el mismo precio y cantidad que ya tenia: no es un
+ * fallo, ya esta como se pedia. Visto en la bitacora del 28/10/2026.
+ */
+const SIN_CAMBIOS_TP = '25600';
+
+/**
+ * Resultado neto de cerrar la posicion ahora. Ver `EntradaCierre.resultadoEstimado`.
+ *
+ * Desde entrada, precio marca y tamaño, con las dos comisiones. Si falta el
+ * precio marca, el no realizado que da Bitget menos la comision de cierre
+ * estimada sobre la entrada.
+ */
+function estimarResultadoCierre(posicion: PosicionBitget, lado: Lado): string | null {
+  const neto = resultadoNetoEstimado(lado, posicion.openPriceAvg, posicion.markPrice, posicion.total);
+  if (neto !== null) return neto.toFixed();
+  const pnl = Number(posicion.unrealizedPL ?? NaN);
+  if (!Number.isFinite(pnl)) return null;
+  const sinComisiones = resultadoNetoEstimado(lado, posicion.openPriceAvg, posicion.openPriceAvg, posicion.total);
+  return sinComisiones === null ? null : sinComisiones.plus(pnl).toFixed();
 }
 
 /** Espera creciente entre reintentos: 300 ms, 900 ms, 2,7 s. */
@@ -881,6 +990,12 @@ export class MotorLotes {
       peticion.simbolo
     );
 
+    /* Con Take Profit, lo que ya hay abierto de ese lado. Ver `leerPosicionesParaTp`. */
+    const lecturasTp =
+      tpPorcentaje === null
+        ? new Map<string, LecturaPosicionesTp>()
+        : await this.leerPosicionesParaTp(peticion.objetivos, peticion.mercado, peticion.simbolo);
+
     peticion.objetivos.forEach((objetivo, indice) => {
       const cuenta = this.fuente.cuentaEjecutable(objetivo.cuentaId);
       if (cuenta === null) {
@@ -984,10 +1099,69 @@ export class MotorLotes {
        * motivo del propio calculo, y no un aviso.
        */
       let precioDisparoTp: string | null = null;
+      let embeberTp = false;
+      let consolidarTp = false;
+      let totalPrevio: string | null = null;
+      let entradaPromedioEstimada: string | null = null;
       if (tpPorcentaje !== null) {
+        /*
+         * Sin saber si ya hay posicion no se abre con Take Profit: es lo que
+         * decide desde que entrada se calcula y si viaja dentro de la orden.
+         */
+        const lectura = lecturasTp.get(objetivo.cuentaId);
+        if (lectura === undefined || lectura.error !== null) {
+          descartes.push({
+            cuentaId: cuenta.cuentaId,
+            etiqueta: cuenta.etiqueta,
+            lado: objetivo.lado,
+            motivo: 'posiciones-ilegibles',
+            mensaje:
+              `No se pudo comprobar si ya hay una posición ${objetivo.lado} abierta en ${peticion.simbolo}: ` +
+              `${lectura?.error ?? 'motivo desconocido'}. No se abre: el Take Profit se calcula ` +
+              'sobre la entrada promedio de la posición entera, y sin leerla podría quedar en pérdida.'
+          });
+          return;
+        }
+
+        /*
+         * Si ya hay posicion, el Take Profit es de la posicion **consolidada**:
+         * se calcula desde la entrada promedio que tendra despues de agregar, no
+         * desde el precio de esta orden. Calcularlo desde la orden es lo que dejo
+         * el 28/10/2026 un Take Profit en perdida en ELITE QLC.
+         */
+        const previa = buscarPosicion(lectura.abiertas, peticion.simbolo, objetivo.lado);
+        let referencia = precio;
+        if (previa !== null) {
+          const promedio = Number(previa.openPriceAvg ?? NaN);
+          if (!Number.isFinite(promedio) || promedio <= 0) {
+            descartes.push({
+              cuentaId: cuenta.cuentaId,
+              etiqueta: cuenta.etiqueta,
+              lado: objetivo.lado,
+              motivo: 'posiciones-ilegibles',
+              mensaje:
+                `Bitget no informa la entrada promedio de la posición ${objetivo.lado} abierta en ` +
+                `${peticion.simbolo}. No se agrega con Take Profit: sin ella no se puede comprobar ` +
+                'que cierre en positivo.'
+            });
+            return;
+          }
+          const total = new Decimal(previa.total);
+          const tamano = new Decimal(calculo.dimension.size);
+          referencia = total
+            .times(previa.openPriceAvg ?? '0')
+            .plus(tamano.times(peticion.precioLimite ?? precio))
+            .dividedBy(total.plus(tamano))
+            .toSignificantDigits(12)
+            .toFixed();
+          totalPrevio = previa.total;
+          consolidarTp = true;
+        }
+        entradaPromedioEstimada = referencia;
+
         const tp = precioTakeProfit({
           contrato,
-          precioEntrada: precio,
+          precioEntrada: referencia,
           lado: objetivo.lado,
           apalancamiento,
           porcentaje: tpPorcentaje
@@ -1005,7 +1179,35 @@ export class MotorLotes {
           });
           return;
         }
+
+        const perdida = takeProfitConPerdida(objetivo.lado, tp.disparo.precioDisparo, [
+          {
+            nombre:
+              previa === null
+                ? 'el precio de apertura'
+                : 'la entrada promedio que tendrá la posición al agregar',
+            precio: referencia
+          }
+        ]);
+        if (perdida !== null) {
+          descartes.push({
+            cuentaId: cuenta.cuentaId,
+            etiqueta: cuenta.etiqueta,
+            lado: objetivo.lado,
+            motivo: 'tp-con-perdida',
+            mensaje: `${perdida} Tampoco se abre la posición: se pidió con Take Profit.`
+          });
+          return;
+        }
+
         precioDisparoTp = tp.disparo.precioDisparo;
+        /* Con un Take Profit ya puesto no viaja: se modifica el que hay. Ver `embeberTp`. */
+        embeberTp =
+          esUta &&
+          !(
+            previa !== null &&
+            takeProfitsDe(lectura.puestos, peticion.simbolo, objetivo.lado).length > 0
+          );
       }
 
       /*
@@ -1046,7 +1248,11 @@ export class MotorLotes {
           apalancamientoCuenta: vigente,
           margenQueRetiene: margenQueRetiene.toFixed(4),
           saldoDisponible: cuenta.saldoDisponible,
-          takeProfit: precioDisparoTp
+          takeProfit: precioDisparoTp,
+          totalPrevio,
+          entradaPromedioEstimada,
+          embeberTp,
+          consolidarTp
         }
       });
 
@@ -1091,7 +1297,11 @@ export class MotorLotes {
         modoMargenActual:
           superficieDe(cuenta.credencial) === 'v3' ? peticion.modoMargen : config.modoMargen,
         margenAdicional,
-        precioDisparoTp
+        precioDisparoTp,
+        embeberTp,
+        consolidarTp,
+        totalPrevio,
+        entradaPromedioEstimada
       });
 
       /*
@@ -1253,7 +1463,8 @@ export class MotorLotes {
           clientOid: clientOidDe(id, indice, objetivo.lado),
           size: posicion.total,
           precioEntrada: posicion.openPriceAvg ?? null,
-          margenLiberado: posicion.marginSize ?? null
+          margenLiberado: posicion.marginSize ?? null,
+          resultadoEstimado: estimarResultadoCierre(posicion, objetivo.lado)
         });
         indice += 1;
       }
@@ -1352,8 +1563,14 @@ export class MotorLotes {
           continue;
         }
 
-        /* El que ya esta puesto, para quitarlo antes de colocar el nuevo. */
-        const anterior = buscarTakeProfit(puestos, peticion.simbolo, objetivo.lado);
+        /*
+         * El que ya esta puesto, para sustituirlo, y los demas del mismo lado,
+         * para quitarlos: la posicion acaba con un solo Take Profit. Ver
+         * `takeProfitsDe`.
+         */
+        const delLado = takeProfitsDe(puestos, peticion.simbolo, objetivo.lado);
+        const anterior = delLado[0] ?? null;
+        const sobrantes = delLado.slice(1);
 
         const apalancamiento =
           Number(posicion.leverage ?? 0) || (apalancamientoVigente(cuenta, objetivo.lado) ?? 0);
@@ -1385,7 +1602,10 @@ export class MotorLotes {
          * de las dos salidas posibles, dejarla como esta es la que no toca
          * dinero.
          */
-        if (anterior !== null && (anterior.orderId ?? '') === '') {
+        if (
+          (anterior !== null && (anterior.orderId ?? '') === '') ||
+          sobrantes.some((p) => (p.orderId ?? '') === '')
+        ) {
           descartes.push({
             cuentaId,
             etiqueta: cuenta.etiqueta,
@@ -1397,6 +1617,62 @@ export class MotorLotes {
           });
           continue;
         }
+
+        const precioActual = posicion.markPrice ?? null;
+        const ladoMal = ladoEquivocadoTakeProfit(objetivo.lado, calculo.disparo.precioDisparo, [
+          { nombre: 'la entrada', precio: posicion.openPriceAvg },
+          { nombre: 'el precio actual', precio: precioActual }
+        ]);
+        if (ladoMal !== null) {
+          descartes.push({
+            cuentaId,
+            etiqueta: cuenta.etiqueta,
+            lado: objetivo.lado,
+            motivo: 'tp-lado-equivocado',
+            mensaje: ladoMal
+          });
+          continue;
+        }
+
+        /* Ni del lado bueno puede cerrar en negativo. Ver `takeProfitConPerdida`. */
+        const perdida = takeProfitConPerdida(objetivo.lado, calculo.disparo.precioDisparo, [
+          { nombre: 'la entrada promedio de la posición', precio: posicion.openPriceAvg }
+        ]);
+        if (perdida !== null) {
+          descartes.push({
+            cuentaId,
+            etiqueta: cuenta.etiqueta,
+            lado: objetivo.lado,
+            motivo: 'tp-con-perdida',
+            mensaje: perdida
+          });
+          continue;
+        }
+
+        /*
+         * De donde sale cada dato del Take Profit, para poder auditarlo. El
+         * 19/10/2026 un `modify-strategy-order` del short de ELITE LAURA salio con
+         * qty 3674000 sobre un short de 1825000, y la bitacora no podia decir si
+         * ese numero lo habia dado Bitget en la orden o en la posicion.
+         */
+        anotarEvento({
+          evento: 'take-profit-planificado',
+          datos: {
+            cuenta: cuentaDe(cuenta.credencial.apiKey),
+            etiqueta: cuenta.etiqueta,
+            simbolo: peticion.simbolo,
+            lado: objetivo.lado,
+            precioEntrada: posicion.openPriceAvg ?? null,
+            precioActual,
+            precioDisparo: calculo.disparo.precioDisparo,
+            orderIdAnterior: anterior?.orderId ?? null,
+            posSideAnterior: anterior?.posSide ?? anterior?.holdSide ?? null,
+            precioDisparoAnterior: anterior?.triggerPrice ?? null,
+            qtyOrden: anterior?.qty ?? null,
+            qtyPosicion: posicion.total,
+            sobrantes: sobrantes.length
+          }
+        });
 
         entradas.push({
           cuentaId,
@@ -1411,7 +1687,24 @@ export class MotorLotes {
           orderIdAnterior: anterior?.orderId ?? null,
           /* `pos_profit` por defecto: cancelar con el tipo equivocado no falla, no quita. */
           planTypeAnterior: anterior === null ? null : (anterior.planType ?? 'pos_profit'),
-          qtyAnterior: anterior === null ? null : (anterior.qty ?? posicion.total ?? null)
+          /*
+           * En UTA, la cantidad de la **posicion**, no la de la orden: el Take
+           * Profit tiene que cubrirla entera. Tras agregar, la orden puede
+           * cubrir solo lo que habia antes, o solo lo agregado.
+           */
+          qtyAnterior:
+            anterior === null
+              ? null
+              : superficieDe(cuenta.credencial) === 'v3'
+                ? (posicion.total ?? anterior.qty ?? null)
+                : (anterior.qty ?? posicion.total ?? null),
+          precioActual,
+          qtyPosicion: posicion.total,
+          sobrantes: sobrantes.map((p) => ({
+            orderId: p.orderId ?? '',
+            planType: p.planType ?? 'pos_profit',
+            precioDisparo: p.triggerPrice ?? null
+          }))
         });
 
         indice += 1;
@@ -1895,6 +2188,41 @@ export class MotorLotes {
           });
         }
 
+        /*
+         * El Take Profit embebido pasa las mismas puertas: el lado
+         * (`ladoEquivocadoTakeProfit`) y que no cierre en perdida respecto a la
+         * entrada promedio que tendra la posicion (`takeProfitConPerdida`).
+         */
+        const embeber = entrada.precioDisparoTp !== null && (entrada.embeberTp ?? true);
+        if (entrada.precioDisparoTp !== null) {
+          const referencia = entrada.entradaPromedioEstimada ?? plan.precioLimite ?? plan.precioReferencia;
+          const motivo =
+            ladoEquivocadoTakeProfit(entrada.lado, entrada.precioDisparoTp, [
+              {
+                nombre: entrada.consolidarTp === true ? 'la entrada promedio estimada' : 'el precio de apertura',
+                precio: referencia
+              }
+            ]) ??
+            takeProfitConPerdida(entrada.lado, entrada.precioDisparoTp, [
+              {
+                nombre:
+                  entrada.consolidarTp === true
+                    ? 'la entrada promedio que tendrá la posición al agregar'
+                    : 'el precio de apertura',
+                precio: referencia
+              }
+            ]);
+          if (motivo !== null) {
+            throw new ErrorBitget(motivo, {
+              clase: 'fatal-cuenta',
+              codigo: null,
+              mensajeOriginal: null,
+              httpStatus: null,
+              reintentarEnMs: null
+            });
+          }
+        }
+
         const r = await abrirPosicion(this.cliente, cuenta.credencial, {
           mercado: plan.mercado,
           simbolo: plan.simbolo,
@@ -1903,8 +2231,11 @@ export class MotorLotes {
           size: entrada.size,
           precioLimite: plan.precioLimite,
           clientOid: entrada.clientOid,
-          /* Solo lo envia V3; V2 coloca el suyo despues de abrir. Ver `AperturaOrden`. */
-          takeProfit: entrada.precioDisparoTp
+          /*
+           * Solo lo envia V3; V2 coloca el suyo despues de abrir. Ver `AperturaOrden`.
+           * Y en V3 no viaja si la posicion ya tiene uno: ver `embeberTp`.
+           */
+          takeProfit: embeber ? entrada.precioDisparoTp : null
         });
         return { ordenId: r.datos.orderId, mensaje: null };
       },
@@ -2050,6 +2381,56 @@ export class MotorLotes {
 
     return this.correrLote(plan, 'take-profit', soloEstos, {
       enviar: async (cuenta, entrada) => {
+        /* Ultima puerta: nada sale del lado de un Stop Loss. Ver `ladoEquivocadoTakeProfit`. */
+        const ladoMal = ladoEquivocadoTakeProfit(entrada.lado, entrada.precioDisparo, [
+          { nombre: 'la entrada', precio: entrada.precioEntrada },
+          { nombre: 'el precio actual', precio: entrada.precioActual }
+        ]);
+        const perdida =
+          ladoMal ??
+          takeProfitConPerdida(entrada.lado, entrada.precioDisparo, [
+            { nombre: 'la entrada promedio de la posición', precio: entrada.precioEntrada }
+          ]);
+        if (perdida !== null) {
+          throw new ErrorBitget(perdida, {
+            clase: 'fatal-cuenta',
+            codigo: null,
+            mensajeOriginal: null,
+            httpStatus: null,
+            reintentarEnMs: null
+          });
+        }
+
+        /*
+         * Los Take Profit sobrantes del mismo lado, **antes** de tocar el bueno.
+         *
+         * Si quitar uno falla, no se sigue: la posicion conserva todo lo que
+         * tenia y la fila sale fallida con el motivo. Un sobrante que ya no esta
+         * -reintento, o se disparo- no es un fallo.
+         */
+        await this.quitarSobrantes(cuenta, plan, entrada);
+
+        /*
+         * `modify-strategy-order` no lleva `posSide`: el lado solo queda en la
+         * bitacora si se anota aqui.
+         */
+        anotarEvento({
+          evento: 'take-profit-envio',
+          datos: {
+            cuenta: cuentaDe(cuenta.credencial.apiKey),
+            simbolo: plan.simbolo,
+            lado: entrada.lado,
+            operacion: esModificacionUta(cuenta, entrada) ? 'modificar' : 'colocar',
+            orderId: entrada.orderIdAnterior,
+            clientOid: entrada.clientOid,
+            precioEntrada: entrada.precioEntrada,
+            precioActual: entrada.precioActual ?? null,
+            precioDisparo: entrada.precioDisparo,
+            precioDisparoAnterior: entrada.precioDisparoAnterior,
+            qty: entrada.qtyAnterior ?? null
+          }
+        });
+
         if (esModificacionUta(cuenta, entrada)) {
           const qty = entrada.qtyAnterior ?? '';
           if (qty === '') {
@@ -2065,11 +2446,23 @@ export class MotorLotes {
               }
             );
           }
-          await modificarTakeProfit(this.cliente, cuenta.credencial, {
-            orderId: entrada.orderIdAnterior ?? '',
-            qty,
-            precioDisparo: entrada.precioDisparo
-          });
+          try {
+            await modificarTakeProfit(this.cliente, cuenta.credencial, {
+              orderId: entrada.orderIdAnterior ?? '',
+              qty,
+              precioDisparo: entrada.precioDisparo
+            });
+          } catch (e) {
+            /*
+             * `25600 · No changes made`: ya tenia ese precio y esa cantidad, que
+             * es justo lo que se pedia. Hasta el 29/10/2026 salia como fallo.
+             */
+            if (!(e instanceof ErrorBitget) || e.codigo !== SIN_CAMBIOS_TP) throw e;
+            return {
+              ordenId: entrada.orderIdAnterior,
+              mensaje: `El Take Profit ya estaba en ${entrada.precioDisparo} y cubría la posición entera.`
+            };
+          }
           return {
             ordenId: entrada.orderIdAnterior,
             mensaje: `Take Profit ${entrada.precioDisparoAnterior ?? '?'} → ${entrada.precioDisparo}`
@@ -2406,6 +2799,98 @@ export class MotorLotes {
           ? 'El panel está bloqueado: desbloquéelo para poder operar esta subcuenta.'
           : 'La subcuenta ya no está registrada o no tiene credencial.'
     };
+  }
+
+  /**
+   * Posiciones abiertas -y en UTA, los Take Profit puestos- de cada cuenta de
+   * la apertura. Una lectura por cuenta.
+   *
+   * Solo se llama cuando la apertura lleva Take Profit: es lo que dice si la
+   * orden agrega a una posicion que ya existe, y entonces el Take Profit se
+   * calcula sobre la entrada promedio de la posicion entera. En UTA dice ademas
+   * si ya tiene uno puesto que modificar en vez de crear otro. Los Take Profit
+   * se leen en modo `estricto`: leer «no hay» por un fallo de red crearia un
+   * segundo Take Profit encima del que si estaba.
+   */
+  /**
+   * Quita los Take Profit sobrantes de una entrada. Ver `EntradaTakeProfit.sobrantes`.
+   *
+   * Si cancelar falla, se relee: si el sobrante ya no esta -se disparo o lo
+   * quito un intento anterior- se sigue; si sigue puesto, se corta aqui sin
+   * haber tocado el Take Profit bueno.
+   */
+  private async quitarSobrantes(
+    cuenta: CuentaEjecutable,
+    plan: PlanTakeProfit,
+    entrada: EntradaTakeProfit
+  ): Promise<void> {
+    for (const sobrante of entrada.sobrantes ?? []) {
+      try {
+        await cancelarPlan(this.cliente, cuenta.credencial, {
+          mercado: plan.mercado,
+          simbolo: plan.simbolo,
+          orderId: sobrante.orderId,
+          planType: sobrante.planType
+        });
+      } catch (e) {
+        const puestos = await planesPendientes(this.cliente, cuenta.credencial, plan.mercado, {
+          estricto: true
+        });
+        if (puestos.some((p) => p.orderId === sobrante.orderId)) {
+          throw new ErrorBitget(
+            `No se pudo quitar el Take Profit sobrante ${sobrante.precioDisparo ?? ''} ` +
+              `(${e instanceof Error ? e.message : String(e)}). No se cambió el Take Profit ` +
+              'de la posición: quite el sobrante en Bitget y vuelva a intentarlo.',
+            {
+              clase: 'fatal-cuenta',
+              codigo: null,
+              mensajeOriginal: null,
+              httpStatus: null,
+              reintentarEnMs: null
+            }
+          );
+        }
+      }
+      anotarEvento({
+        evento: 'tp-sobrante-quitado',
+        datos: {
+          cuenta: cuentaDe(cuenta.credencial.apiKey),
+          simbolo: plan.simbolo,
+          lado: entrada.lado,
+          orderId: sobrante.orderId,
+          precioDisparo: sobrante.precioDisparo
+        }
+      });
+    }
+  }
+
+  private async leerPosicionesParaTp(
+    objetivos: readonly { cuentaId: string }[],
+    mercado: Mercado,
+    simbolo: string
+  ): Promise<Map<string, LecturaPosicionesTp>> {
+    const lecturas = new Map<string, LecturaPosicionesTp>();
+    for (const cuentaId of new Set(objetivos.map((o) => o.cuentaId))) {
+      const cuenta = this.fuente.cuentaEjecutable(cuentaId);
+      if (cuenta === null) continue;
+      try {
+        const abiertas = (await obtenerPosiciones(this.cliente, cuenta.credencial, mercado)).datos;
+        /* Solo hacen falta si hay a que agregar: sin posicion, no hay Take Profit que mirar. */
+        const puestos =
+          superficieDe(cuenta.credencial) === 'v3' &&
+          abiertas.some((a) => a.symbol === simbolo && Number(a.total) > 0)
+            ? await planesPendientes(this.cliente, cuenta.credencial, mercado, { estricto: true })
+            : [];
+        lecturas.set(cuentaId, { abiertas, puestos, error: null });
+      } catch (e) {
+        lecturas.set(cuentaId, {
+          abiertas: [],
+          puestos: [],
+          error: e instanceof Error ? e.message : String(e)
+        });
+      }
+    }
+    return lecturas;
   }
 
   private async leerConfiguracionPorCuenta(

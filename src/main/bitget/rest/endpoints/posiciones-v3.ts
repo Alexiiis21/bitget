@@ -100,6 +100,7 @@ export function posicionV3AFormatoV2(cruda: PosicionV3): PosicionBitget {
     marginCoin: null,
     marginMode: cruda.marginMode,
     openPriceAvg: cruda.avgPrice,
+    markPrice: cruda.markPrice,
     liquidationPrice: cruda.liquidationPrice,
     leverage: cruda.leverage,
     marginSize: cruda.positionBalance ?? cruda.marginSize ?? cruda.margin,

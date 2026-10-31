@@ -15,6 +15,14 @@ import type {
   CuentaPanel,
   EstadoApp,
   EstadoTopeIpc,
+  ResumenSincronizacionIpc,
+  HistorialCuentaIpc,
+  ResultadoExportacionIpc,
+  BusquedaChatsIpc,
+  EstadoAlertasIpc,
+  ResultadoAlertasIpc,
+  RevisionAlertasIpc,
+  SaldoCuentaIpc,
   EstadoVault,
   ResultadoImportacionIpc,
   RespaldoDisponibleIpc,
@@ -101,6 +109,22 @@ export const api: ApiPcb = {
     ipcRenderer.invoke('paso:comprobar', contrasena) as Promise<boolean>,
   pasoFijar: (contrasena) => ipcRenderer.invoke('paso:fijar', contrasena) as Promise<void>,
 
+  historialSincronizar: (cuentaId) =>
+    ipcRenderer.invoke('historial:sincronizar', cuentaId) as Promise<ResumenSincronizacionIpc>,
+  historialConsultar: (cuentaId, periodo, filtro) =>
+    ipcRenderer.invoke('historial:consultar', cuentaId, periodo, filtro) as Promise<HistorialCuentaIpc>,
+  historialExportar: (cuentaId, periodo, filtro) =>
+    ipcRenderer.invoke('historial:exportar', cuentaId, periodo, filtro) as Promise<ResultadoExportacionIpc>,
+  saldoCuenta: (cuentaId) => ipcRenderer.invoke('saldo:cuenta', cuentaId) as Promise<SaldoCuentaIpc>,
+  alertasEstado: () => ipcRenderer.invoke('alertas:estado') as Promise<EstadoAlertasIpc>,
+  alertasBuscarChats: (token) =>
+    ipcRenderer.invoke('alertas:buscar-chats', token) as Promise<BusquedaChatsIpc>,
+  alertasConfigurar: (config, contrasenaPaso) =>
+    ipcRenderer.invoke('alertas:configurar', config, contrasenaPaso) as Promise<ResultadoAlertasIpc>,
+  alertasProbar: () => ipcRenderer.invoke('alertas:probar') as Promise<ResultadoAlertasIpc>,
+  alertasDesactivar: (contrasenaPaso) =>
+    ipcRenderer.invoke('alertas:desactivar', contrasenaPaso) as Promise<ResultadoAlertasIpc>,
+  alertasRevisar: () => ipcRenderer.invoke('alertas:revisar') as Promise<RevisionAlertasIpc>,
   topeEstado: () => ipcRenderer.invoke('tope:estado') as Promise<EstadoTopeIpc>,
   topeFijar: (valor) => ipcRenderer.invoke('tope:fijar', valor) as Promise<EstadoTopeIpc>,
 
@@ -110,8 +134,8 @@ export const api: ApiPcb = {
     ipcRenderer.invoke('apertura:ejecutar', planId, soloEstos) as Promise<Lote>,
   cierrePlanificar: (peticion) =>
     ipcRenderer.invoke('cierre:planificar', peticion) as Promise<PlanCierreIpc>,
-  cierreEjecutar: (planId, soloEstos) =>
-    ipcRenderer.invoke('cierre:ejecutar', planId, soloEstos) as Promise<Lote>,
+  cierreEjecutar: (planId, soloEstos, contrasenaPaso) =>
+    ipcRenderer.invoke('cierre:ejecutar', planId, soloEstos, contrasenaPaso) as Promise<Lote>,
   tpPlanificar: (peticion) =>
     ipcRenderer.invoke('tp:planificar', peticion) as Promise<PlanTakeProfitIpc>,
   tpEjecutar: (planId, soloEstos) =>

@@ -340,6 +340,44 @@ describe('ejecutar: colocar el Take Profit', () => {
  * otra mitad -que el campo del ajuste no sea el de la apertura- vive en el
  * store. Ver `PlanKind`.
  */
+/*
+ * ELITE LAURA, 19/10/2026: la operadora vio en Bitget el Take Profit de un short
+ * por encima de la entrada, donde va un Stop Loss. Ningun precio del lado
+ * equivocado sale del panel, venga de donde venga.
+ */
+describe('el Take Profit nunca sale del lado de un Stop Loss', () => {
+  it('se descarta al planificar si el precio actual ya paso el objetivo', async () => {
+    enrutar({ posicionesDe: () => [{ ...(posicion('long') as object), markPrice: '64000' }] });
+
+    const plan = await motor.planificarTakeProfit(peticion(1));
+
+    expect(plan.entradas).toHaveLength(0);
+    expect(plan.descartes[0]?.motivo).toBe('tp-lado-equivocado');
+    expect(plan.descartes[0]?.mensaje).toContain('el precio actual');
+  });
+
+  it('un precio de short sobre un long no llega a Bitget', async () => {
+    let colocados = 0;
+    enrutar({
+      alColocar: (c) => {
+        colocados += 1;
+        return { cuerpo: sobreOk({ orderId: 'plan_1', clientOid: c['clientOid'] }) };
+      }
+    });
+
+    const plan = await motor.planificarTakeProfit(peticion(1));
+    const entrada = plan.entradas[0];
+    if (entrada === undefined) throw new Error('el plan deberia traer la casilla');
+    const torcido = { ...plan, entradas: [{ ...entrada, precioDisparo: '62779.5' }] };
+
+    const lote = await motor.ejecutarTakeProfit(torcido);
+
+    expect(colocados).toBe(0);
+    expect(lote.jobs[0]?.estado).toBe('fallo');
+    expect(lote.jobs[0]?.mensaje).toContain('por encima de la entrada');
+  });
+});
+
 describe('poner Take Profit sustituye el que hubiera, no lo duplica', () => {
   it('el plan trae el precio anterior para poder enseñar la sustitucion', async () => {
     enrutar({ planesDe: () => [tpPuesto('63100')] });

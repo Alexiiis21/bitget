@@ -168,16 +168,180 @@ export interface Balance {
   total: Decimal;
 }
 
-export interface ClosedPosition {
+/* ---------- historial por periodo ---------- */
+
+/**
+ * Una operación cerrada, con las columnas de la plataforma oficial.
+ *
+ * `pnl` es el resultado neto que reporta Bitget (`netProfit`): precio, más
+ * comisiones, más financiamiento. Es lo que se suma en el periodo. `leverage` y
+ * `pnlPercent` son `null` porque el historial de Bitget no los entrega, y la
+ * pantalla enseña un guion: no se estiman. Ver docs/00-historial-fase-1.md.
+ */
+export interface ClosedTrade {
   id: string;
-  subAccountId: string;
+  symbol: string;
   side: Side;
+  marginMode: 'isolated' | 'crossed' | null;
+  leverage: string | null;
+  /** Milisegundos. */
+  openedAt: number;
+  closedAt: number;
   entryPrice: Decimal;
   exitPrice: Decimal;
-  initialMargin: Decimal;
+  /**
+   * El Take Profit que estaba puesto al cerrarse, o `null` si no tenía o no se
+   * sabe. `triggeredAt` es `null` si no se disparó: Bitget lo canceló al cerrar.
+   */
+  takeProfit: { price: Decimal; placedAt: number; triggeredAt: number | null } | null;
+  closedSize: Decimal;
   pnl: Decimal;
-  closedBy: 'take-profit' | 'liquidacion' | 'manual';
-  closedAt: string;
+  pnlPercent: Decimal | null;
+  /** Desglose de `pnl`: movimiento de precio, comisiones y financiamiento, con signo. */
+  pricePnl: Decimal;
+  fees: Decimal;
+  funding: Decimal;
+}
+
+/**
+ * Filtros de la tabla del historial. Se aplican igual al resumen y al CSV: lo
+ * que se exporta es lo que se ve.
+ */
+export interface HistoryFilter {
+  /** Par exacto, o `null` para todos. */
+  symbol: string | null;
+  side: Side | null;
+  outcome: 'all' | 'winners' | 'losers';
+}
+
+export const NO_FILTER: HistoryFilter = { symbol: null, side: null, outcome: 'all' };
+
+/** Desenlace de exportar a CSV. `cancelled`: cerró el diálogo sin guardar. */
+export interface ExportResult {
+  cancelled: boolean;
+  ok: boolean;
+  path: string | null;
+  rows: number;
+  message: string;
+}
+
+/** Fechas `YYYY-MM-DD`, los dos días completos. */
+export interface HistoryPeriod {
+  from: string;
+  to: string;
+}
+
+/**
+ * Ganadoras, perdedoras y resultado neto. `breakeven` son las de resultado
+ * exactamente cero: winners + losers + breakeven = total. Sin porcentaje
+ * agregado, como fija el presupuesto.
+ */
+export interface PeriodSummary {
+  total: number;
+  winners: number;
+  losers: number;
+  breakeven: number;
+  /** Suma exacta, sin redondear. */
+  netPnl: Decimal;
+}
+
+/**
+ * Lo guardado de una subcuenta en un periodo.
+ *
+ * `completeness.missingBefore`: el periodo empieza antes de lo sincronizado (si
+ * son más de 90 días, Bitget ya no lo entrega). `missingAfter`: sigue después
+ * de la última sincronización; se arregla sincronizando.
+ */
+export interface TradeHistory {
+  subAccountId: string;
+  /** Pares con operaciones en el periodo, antes de filtrar. */
+  symbols: string[];
+  /** Hay algún filtro aplicado: el resumen es el de lo filtrado. */
+  filtered: boolean;
+  period: (HistoryPeriod & { startMs: number; endMs: number; timeZone: string }) | null;
+  trades: ClosedTrade[];
+  summary: PeriodSummary;
+  completeness: { complete: boolean; missingBefore: boolean; missingAfter: boolean };
+  coverage: { fromMs: number; toMs: number } | null;
+  syncedAt: number | null;
+}
+
+export interface HistorySyncResult {
+  subAccountId: string;
+  added: number;
+  total: number;
+  coverage: { fromMs: number; toMs: number };
+  /** Quedó un hueco: la subcuenta pasó más de 90 días sin sincronizar. */
+  gap: boolean;
+  syncedAt: number;
+}
+
+export interface HistorySyncProgress {
+  subAccountId: string;
+  pages: number;
+  received: number;
+}
+
+/* ---------- alertas de Telegram ---------- */
+
+/**
+ * Una revisión de lo hecho fuera del panel. `firstSeen` son subcuentas vistas
+ * por primera vez: de ellas solo se tomó la foto de partida.
+ */
+export interface AlertsCheck {
+  startedAt: number;
+  finishedAt: number;
+  accounts: number;
+  reviewed: number;
+  firstSeen: number;
+  detected: number;
+  sent: number;
+  pending: number;
+  errors: { id: string; message: string }[];
+  delivery: 'ok' | 'no-news' | 'failed' | 'not-configured' | 'aborted';
+  deliveryMessage: string | null;
+}
+
+export interface AlertsStatus {
+  configured: boolean;
+  chatId: string | null;
+  chatTitle: string | null;
+  enabledAt: string | null;
+  checking: boolean;
+  pending: number;
+  lastCheck: AlertsCheck | null;
+  panelNumber: number;
+}
+
+export interface TelegramChat {
+  id: string;
+  title: string;
+  /** `private`, `group`, `supergroup`, `channel`. */
+  type: string;
+}
+
+export interface TelegramLookup {
+  ok: boolean;
+  bot: { username: string; name: string } | null;
+  chats: TelegramChat[];
+  message: string | null;
+}
+
+export interface AlertsActionResult {
+  ok: boolean;
+  reason: string | null;
+  message: string;
+  status: AlertsStatus;
+}
+
+/** Saldo leído de Bitget en el momento de pedirlo. `null` = no se sabe. */
+export interface LiveBalance {
+  subAccountId: string;
+  currency: string;
+  equity: Decimal | null;
+  available: Decimal | null;
+  locked: Decimal | null;
+  readAt: number;
 }
 
 /* ---------- lotes de ejecución ---------- */
@@ -329,6 +493,12 @@ export interface BatchPlan {
    * arma un `BatchPlan` tiene que decir explícitamente que no hay impedimento.
    */
   blocker: PlanBlocker | null;
+  /**
+   * Por qué este plan en concreto pide la contraseña de paso, o `null`/ausente
+   * si no la pide por sí mismo. Hoy solo el cierre que dejaría alguna posición
+   * en negativo. Ver `pidePaso` en el store.
+   */
+  stepPasswordReason?: string | null;
 }
 
 export interface OpenRequest {

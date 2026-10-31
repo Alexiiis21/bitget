@@ -58,15 +58,15 @@ describe('margenDe', () => {
   const punta = (initialMarginAccum: string | null, currentMargin: string | null) =>
     ({ initialMarginAccum, currentMargin }) as Position;
 
-  it('prefiere el margen inicial que anoto el panel', () => {
-    expect(margenDe(punta('0.06', '0.16'))).toMatchObject({ valor: '0,06', deBitget: false });
+  it('enseña siempre el margen de Bitget, aunque el panel haya anotado otro', () => {
+    expect(margenDe(punta('0.20', '0.4181')).valor).toBe('0,4181');
   });
 
-  it('sin anotacion del panel, enseña el margen de Bitget y lo dice', () => {
-    expect(margenDe(punta(null, '4.349'))).toMatchObject({ valor: '4,35', deBitget: true });
+  it('sin anotacion del panel, tambien el de Bitget', () => {
+    expect(margenDe(punta(null, '4.349')).valor).toBe('4,35');
   });
 
-  it('un guion solo si ninguno de los dos lo sabe', () => {
-    expect(margenDe(punta(null, null))).toMatchObject({ valor: '—', deBitget: false });
+  it('un guion solo si Bitget no lo manda', () => {
+    expect(margenDe(punta('0.20', null)).valor).toBe('—');
   });
 });

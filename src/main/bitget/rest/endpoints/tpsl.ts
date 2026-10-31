@@ -124,10 +124,23 @@ export const esquemaPlanesPendientes = zod.object({
   entrustedList: zod.array(esquemaPlanPendiente).nullish()
 });
 
+export interface OpcionesLecturaPlanes {
+  /**
+   * `true` lanza tambien en V3 cuando la lectura falla, en vez de devolver la
+   * lista vacia que conviene al barrido.
+   *
+   * Lo necesita quien decide **colocar** un Take Profit porque no ve ninguno:
+   * con una lectura fallida leida como «no hay», lo repondria encima del que
+   * si estaba. Ver `verificarTakeProfitEmbebido` en la sesion.
+   */
+  estricto?: boolean;
+}
+
 export async function planesPendientes(
   cliente: ClienteBitget,
   credencial: Credencial,
-  mercado: Mercado
+  mercado: Mercado,
+  opciones: OpcionesLecturaPlanes = {}
 ): Promise<PlanPendiente[]> {
   /*
    * ==========================================================================
@@ -140,7 +153,9 @@ export async function planesPendientes(
    * como caida, que es mucho peor que quedarse sin la columna de Take Profit.
    * Ver `planesPendientesV3`.
    */
-  if (superficieDe(credencial) === 'v3') return planesPendientesV3(cliente, credencial, mercado);
+  if (superficieDe(credencial) === 'v3') {
+    return planesPendientesV3(cliente, credencial, mercado, opciones);
+  }
 
   const r = await cliente.peticionFirmada(
     credencial,
@@ -290,4 +305,36 @@ export function buscarTakeProfit(
         !(p.planType ?? '').includes('loss')
     ) ?? null
   );
+}
+
+/**
+ * **Todos** los Take Profit de un simbolo y lado, el de mayor cantidad primero.
+ *
+ * `buscarTakeProfit` devuelve el primero y da por hecho que hay uno. En UTA
+ * puede haber varios: cada `place-order` con `takeProfit` sobre una posicion
+ * que ya existe crea el suyo, solo para la cantidad de esa orden. Es lo que
+ * paso en ELITE QLC el 28/10/2026, y el segundo Take Profit -en perdida
+ * respecto a la entrada promedio- se disparo sin que el panel lo viera.
+ *
+ * El primero es el que cubre mas posicion: el que se conserva y se modifica.
+ * Los demas son los que hay que quitar para que la posicion quede con uno solo.
+ */
+export function takeProfitsDe(
+  planes: readonly PlanPendiente[],
+  simbolo: string,
+  lado: Lado
+): PlanPendiente[] {
+  const qty = (p: PlanPendiente): number => {
+    const n = Number(p.qty ?? NaN);
+    return Number.isFinite(n) ? n : -1;
+  };
+  return planes
+    .filter(
+      (p) =>
+        p.symbol === simbolo &&
+        (p.posSide ?? p.holdSide) === lado &&
+        (p.planType ?? '').includes('profit') &&
+        !(p.planType ?? '').includes('loss')
+    )
+    .sort((a, b) => qty(b) - qty(a));
 }

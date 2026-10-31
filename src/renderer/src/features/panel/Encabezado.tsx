@@ -11,10 +11,24 @@ import { usarPanel } from '@/store/panel';
  * renderizarse por esto. docs/cliente/PCB-standalone.html.
  */
 
+/**
+ * La barra se parte en dos filas cuando no cabe, en vez de encimarse.
+ *
+ * En una laptop de 1280–1366 px, el grupo izquierdo —número, tope, mercado,
+ * precio— y los botones de la derecha no caben en una línea. Con los dos grupos
+ * rígidos, el izquierdo invadía al derecho y el precio quedaba debajo del
+ * interruptor de tema. Ahora, si no caben, los botones bajan a una segunda fila
+ * alineados a la derecha, y cada grupo puede partirse a su vez. La barra crece
+ * hacia abajo y la matriz se ajusta debajo: nada queda tapado.
+ */
 const barra: CSSProperties = {
+  flex: 'none',
   display: 'flex',
+  flexWrap: 'wrap',
   alignItems: 'center',
   justifyContent: 'space-between',
+  columnGap: 16,
+  rowGap: 8,
   padding: '12px 20px',
   background: T.marca,
   color: '#ffffff'
@@ -292,6 +306,8 @@ export function Encabezado() {
   const cuentas = usarPanel((s) => s.cuentas);
   const abrirApis = usarPanel((s) => s.abrirApis);
   const abrirSaldos = usarPanel((s) => s.abrirSaldos);
+  const abrirHistorial = usarPanel((s) => s.abrirHistorial);
+  const abrirAlertas = usarPanel((s) => s.abrirAlertas);
   const abrirSeguridad = usarPanel((s) => s.abrirSeguridad);
   const abrirColores = usarPanel((s) => s.abrirColores);
   const bloquear = usarPanel((s) => s.bloquear);
@@ -310,7 +326,17 @@ export function Encabezado() {
        * mercado, precio— no se recortan: se recorta el rótulo, que es el único
        * que el operador ya se sabe.
        */}
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, minWidth: 0 }}>
+      <div
+        style={{
+          flex: '1 1 auto',
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          columnGap: 10,
+          rowGap: 6,
+          minWidth: 0
+        }}
+      >
         <span
           style={{
             flex: 'none',
@@ -341,10 +367,28 @@ export function Encabezado() {
         <UltimoPrecio />
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div
+        style={{
+          flex: '0 1 auto',
+          marginLeft: 'auto',
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          justifyContent: 'flex-end',
+          columnGap: 12,
+          rowGap: 6
+        }}
+      >
         <div
           title="Estado de las credenciales registradas, según la última comprobación contra Bitget"
-          style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#95c9ea' }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            fontSize: 13,
+            color: '#95c9ea',
+            whiteSpace: 'nowrap'
+          }}
         >
           <span
             style={{
@@ -436,6 +480,26 @@ export function Encabezado() {
           style={botonBarra}
         >
           Saldos
+        </button>
+
+        <button
+          type="button"
+          className="pcb-boton-barra"
+          onClick={abrirHistorial}
+          title="Operaciones cerradas de una subcuenta, por periodo, con su resultado neto"
+          style={botonBarra}
+        >
+          Historial
+        </button>
+
+        <button
+          type="button"
+          className="pcb-boton-barra"
+          onClick={abrirAlertas}
+          title="Avisos por Telegram de lo que se hace fuera del panel"
+          style={botonBarra}
+        >
+          Alertas
         </button>
 
         <button

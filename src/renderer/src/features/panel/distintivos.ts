@@ -5,10 +5,9 @@ import type { Position } from '@shared/domain/panel-view';
 /**
  * Distintivos TP · MGA · AP · OE de una punta.
  *
- * Los usan `AccordeonMonitor`, `AccordeonHistorial` (indirectamente, vía la
- * punta viva) y `ModalDetalleSubcuenta`. Calculados en un solo sitio para
- * que ninguno de los tres pueda desalinearse del resto en la lectura de
- * color.
+ * Los usan `AccordeonMonitor` y `ModalDetalleSubcuenta`. Calculados en un
+ * solo sitio para que ninguno de los dos pueda desalinearse del otro en la
+ * lectura de color.
  */
 export interface Distintivo {
   clave: string;
