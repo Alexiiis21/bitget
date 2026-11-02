@@ -65,6 +65,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { verificarCredencial, type ResultadoVerificacion } from '../bitget/verificacion';
+import { detectarModo } from '../bitget/deteccion-modo';
 import { obtenerCuentasFuturos, obtenerInfoCuenta } from '../bitget/rest/endpoints/cuenta';
 import {
   buscarTraspaso,
@@ -4221,6 +4222,16 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
       };
     }
 
+    /*
+     * Antes de anotar el intento: si no se sabe por qué ruta sale, no se envía,
+     * y un traspaso que no salió no tiene que quedar en el registro.
+     */
+    const modoMadre = await this.modoMadre(credencial);
+    if (!modoMadre.ok) {
+      return { ok: false, motivo: 'rechazado', mensaje: modoMadre.mensaje, transferId: null, plan };
+    }
+    const madre = { uid: plan.uidMadre, modo: modoMadre.modo };
+
     /* Paso 2: en disco antes de salir a la red. Si esto falla, no se envía. */
     await this.traspasos.anotarIntento({
       clientOid: plan.clientOid,
@@ -4243,16 +4254,20 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
      */
     this.planesTraspaso.delete(planId);
 
-    const v3 = this.traspasoEsV3(plan.origen.uid, plan.destino.uid);
+    const v3 = this.traspasoEsV3(plan.origen.uid, plan.destino.uid, madre);
 
     try {
-      const respuesta = await this.enviarTraspaso(credencial, {
-        uidOrigen: plan.origen.uid,
-        uidDestino: plan.destino.uid,
-        importe: plan.importe,
-        clientOid: plan.clientOid,
-        moneda: plan.moneda
-      });
+      const respuesta = await this.enviarTraspaso(
+        credencial,
+        {
+          uidOrigen: plan.origen.uid,
+          uidDestino: plan.destino.uid,
+          importe: plan.importe,
+          clientOid: plan.clientOid,
+          moneda: plan.moneda
+        },
+        madre
+      );
 
       const transferId = respuesta.transferId ?? null;
       await this.traspasos.anotarResuelta({
@@ -4292,14 +4307,64 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
   }
 
   /**
+   * Modo de la cuenta principal, preguntado a Bitget con su propia clave.
+   *
+   * ==========================================================================
+   * Por que se pregunta y no se supone
+   * ==========================================================================
+   * La madre no esta en el registro de cuentas -no se da de alta como cuenta
+   * de operacion-, asi que `modoDeUid` la tomaba siempre por Classic. Con una
+   * madre UTA eso mandaba sus traspasos por V2 como `usdt_futures`, que es la
+   * combinacion que Bitget rechaza con `43127`. Detectado el 31/10/2026.
+   *
+   * Se pregunta en cada envio, sin guardar el resultado: una cuenta puede
+   * migrar a UTA en cualquier momento, y es una sola consulta por traspaso o
+   * por reparto.
+   *
+   * Si no se puede saber -IP fuera de la lista blanca, cuenta migrando, red-
+   * no se envia. Elegir una ruta a ciegas es mandar el dinero por la que quiza
+   * no corresponde.
+   */
+  private async modoMadre(
+    credencial: Credencial
+  ): Promise<{ ok: true; modo: AccountMode } | { ok: false; mensaje: string }> {
+    let deteccion;
+    try {
+      deteccion = await detectarModo(this.cliente, credencial);
+    } catch (e) {
+      return {
+        ok: false,
+        mensaje:
+          'No se pudo comprobar si la cuenta principal es UTA o clásica, así que no se envió ' +
+          `nada. ${e instanceof Error ? e.message : 'Sin conexión con Bitget.'}`
+      };
+    }
+
+    if (deteccion.modo === 'uta' || deteccion.esUta === true) return { ok: true, modo: 'uta' };
+    if (deteccion.modo === 'classic') return { ok: true, modo: 'classic' };
+
+    return {
+      ok: false,
+      mensaje:
+        deteccion.modo === 'transicion'
+          ? 'La cuenta principal está cambiando de modo en Bitget. No se envió nada: inténtalo ' +
+            'cuando termine la migración.'
+          : 'Bitget no dejó comprobar el modo de la cuenta principal' +
+            (deteccion.codigoRechazo === null ? '' : ` (código ${deteccion.codigoRechazo})`) +
+            '. No se envió nada. Revisa que la IP de este equipo esté autorizada en su clave.'
+    };
+  }
+
+  /**
    * Con que API habla una punta del traspaso, por su UID.
    *
-   * Sale del registro de cuentas, que es donde la verificacion deja el
-   * `accountMode`. La madre y las subcuentas que el panel no tiene dadas de
-   * alta no estan en el registro y cuentan como Classic, el mismo valor por
-   * defecto que usa el registro.
+   * La madre trae su modo detectado en el momento -ver `modoMadre`-. Las
+   * subcuentas lo sacan del registro de cuentas, que es donde la verificacion
+   * deja el `accountMode`; las que el panel no tiene dadas de alta cuentan como
+   * Classic, el mismo valor por defecto que usa el registro.
    */
-  private modoDeUid(uid: string): AccountMode {
+  private modoDeUid(uid: string, madre: { uid: string; modo: AccountMode }): AccountMode {
+    if (uid === madre.uid) return madre.modo;
     return (
       this.exigirAbierta()
         .registro.listarCuentas()
@@ -4308,8 +4373,14 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
   }
 
   /** `true` si alguna punta es UTA: entonces el traspaso sale por V3. */
-  private traspasoEsV3(uidOrigen: string, uidDestino: string): boolean {
-    return this.modoDeUid(uidOrigen) === 'uta' || this.modoDeUid(uidDestino) === 'uta';
+  private traspasoEsV3(
+    uidOrigen: string,
+    uidDestino: string,
+    madre: { uid: string; modo: AccountMode }
+  ): boolean {
+    return (
+      this.modoDeUid(uidOrigen, madre) === 'uta' || this.modoDeUid(uidDestino, madre) === 'uta'
+    );
   }
 
   /**
@@ -4328,13 +4399,14 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
       importe: string;
       clientOid: string;
       moneda: string;
-    }
+    },
+    madre: { uid: string; modo: AccountMode }
   ): Promise<Traspaso> {
-    if (!this.traspasoEsV3(datos.uidOrigen, datos.uidDestino)) {
+    if (!this.traspasoEsV3(datos.uidOrigen, datos.uidDestino, madre)) {
       return (await traspasarEntreSubcuentas(this.cliente, credencial, datos)).datos;
     }
 
-    const tipo = (uid: string) => (this.modoDeUid(uid) === 'uta' ? 'uta' : 'usdt_futures');
+    const tipo = (uid: string) => (this.modoDeUid(uid, madre) === 'uta' ? 'uta' : 'usdt_futures');
     return (
       await traspasarEntreSubcuentasV3(this.cliente, credencial, {
         ...datos,
@@ -4547,6 +4619,31 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
     /* Se retira antes de enviar: una segunda pulsación no repite el reparto. */
     this.planesReparto.delete(planId);
 
+    /*
+     * Una sola vez para todo el lote. Si no se sabe la ruta, ningún movimiento
+     * sale ni se anota: todos cuentan como fallidos, con el motivo.
+     */
+    const modoMadre = await this.modoMadre(credencial);
+    if (!modoMadre.ok) {
+      return {
+        ok: false,
+        motivo: null,
+        plan,
+        resultados: plan.movimientos.map((m) => ({
+          clientOid: m.clientOid,
+          etiquetaOrigen: m.etiquetaOrigen,
+          etiquetaDestino: m.etiquetaDestino,
+          importe: m.importe,
+          ok: false,
+          mensaje: modoMadre.mensaje
+        })),
+        enviados: 0,
+        fallidos: plan.movimientos.length,
+        indeterminados: 0
+      };
+    }
+    const madre = { uid: plan.uidMadre, modo: modoMadre.modo };
+
     const resultados: ResultadoMovimientoIpc[] = [];
     let enviados = 0;
     let fallidos = 0;
@@ -4566,16 +4663,20 @@ export class Sesion implements FuenteCuentas, FuenteBarrido, FuentePool {
         moneda: plan.moneda
       });
 
-      const v3 = this.traspasoEsV3(m.uidOrigen, m.uidDestino);
+      const v3 = this.traspasoEsV3(m.uidOrigen, m.uidDestino, madre);
 
       try {
-        const respuesta = await this.enviarTraspaso(credencial, {
-          uidOrigen: m.uidOrigen,
-          uidDestino: m.uidDestino,
-          importe: m.importe,
-          clientOid: m.clientOid,
-          moneda: plan.moneda
-        });
+        const respuesta = await this.enviarTraspaso(
+          credencial,
+          {
+            uidOrigen: m.uidOrigen,
+            uidDestino: m.uidDestino,
+            importe: m.importe,
+            clientOid: m.clientOid,
+            moneda: plan.moneda
+          },
+          madre
+        );
 
         const transferId = respuesta.transferId ?? null;
         await this.traspasos.anotarResuelta({

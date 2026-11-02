@@ -293,8 +293,78 @@ describe('el envio', () => {
     expect(m?.resultado).toBe('fallo');
     expect(m?.mensaje).toBeTruthy();
 
-    /* Una sola peticion: no hay reenvio a ciegas de algo que mueve dinero. */
-    expect(exchange.peticiones.length).toBe(antes + 1);
+    /*
+     * La consulta del modo de la madre y un solo envio: no hay reenvio a ciegas
+     * de algo que mueve dinero.
+     */
+    const nuevas = exchange.peticiones.slice(antes).map((p) => p.url);
+    expect(nuevas.filter((u) => u.includes('/api/v3/account/settings'))).toHaveLength(1);
+    expect(nuevas.filter((u) => u.includes('subaccount-transfer'))).toHaveLength(1);
+    expect(nuevas).toHaveLength(2);
+  });
+});
+
+/*
+ * La madre no esta en el registro de cuentas, asi que su modo no se puede leer
+ * de ahi: se pregunta a Bitget al enviar. Antes se la tomaba siempre por
+ * Classic y una madre UTA salia por V2, que Bitget rechaza con `43127`.
+ */
+describe('la ruta segun el modo de la cuenta principal', () => {
+  it('una madre UTA traspasa por V3, con `uta` en su punta', async () => {
+    exchange.simularUta({ accountMode: 'unified', holdMode: 'hedge_mode' });
+    const plan = await planificar('30', DOS_SUBCUENTAS, UID_MADRE, '111');
+    exchange.responder({ cuerpo: sobreOk({ transferId: 'bg-v3', clientOid: plan.clientOid }) });
+
+    const r = await sesion.ejecutarTraspaso(plan.id, PASO);
+
+    expect(r.ok).toBe(true);
+    const enviada = exchange.peticiones.at(-1);
+    expect(enviada?.url).toContain('/api/v3/account/sub-transfer');
+    expect(JSON.parse(enviada?.cuerpo ?? '{}')).toMatchObject({
+      fromType: 'uta',
+      toType: 'usdt_futures',
+      fromUserId: UID_MADRE,
+      toUserId: '111',
+      amount: '30'
+    });
+  });
+
+  it('una madre Classic sigue saliendo por V2', async () => {
+    const plan = await planificar('30', DOS_SUBCUENTAS, UID_MADRE, '111');
+    exchange.responder({ cuerpo: sobreOk({ transferId: 'bg-v2', clientOid: plan.clientOid }) });
+
+    await sesion.ejecutarTraspaso(plan.id, PASO);
+
+    const enviada = exchange.peticiones.at(-1);
+    expect(enviada?.url).toContain('/api/v2/spot/wallet/subaccount-transfer');
+    expect(JSON.parse(enviada?.cuerpo ?? '{}')).toMatchObject({
+      fromType: 'usdt_futures',
+      fromUserId: UID_MADRE
+    });
+  });
+
+  it('si no se puede saber el modo no se envia ni se anota nada', async () => {
+    const plan = await planificar('30');
+    exchange.responderV3({ estado: 400, cuerpo: { code: '40018', msg: 'Invalid IP' } });
+
+    const r = await sesion.ejecutarTraspaso(plan.id, PASO);
+
+    expect(r.ok).toBe(false);
+    expect(r.motivo).toBe('rechazado');
+    expect(r.mensaje).toContain('40018');
+    expect(exchange.peticiones.some((p) => p.url.includes('transfer'))).toBe(false);
+    expect(await sesion.historialTraspasos()).toHaveLength(0);
+  });
+
+  it('una madre migrando de modo no envia', async () => {
+    exchange.simularUta({ accountMode: 'switching', holdMode: 'hedge_mode' });
+    const plan = await planificar('30');
+
+    const r = await sesion.ejecutarTraspaso(plan.id, PASO);
+
+    expect(r.ok).toBe(false);
+    expect(r.mensaje).toContain('cambiando de modo');
+    expect(exchange.peticiones.some((p) => p.url.includes('transfer'))).toBe(false);
   });
 });
 
